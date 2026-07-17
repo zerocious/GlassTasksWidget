@@ -5,9 +5,37 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 
-function loadEnvFile() {
-  const envPath = path.join(ROOT, '.env');
-  if (!fs.existsSync(envPath)) return;
+let envLoaded = false;
+/** @type {ReturnType<typeof buildConfig> | null} */
+let configCache = null;
+
+function tryElectronApp() {
+  try {
+    // eslint-disable-next-line global-require
+    return require('electron').app;
+  } catch {
+    return null;
+  }
+}
+
+function isPackaged() {
+  const app = tryElectronApp();
+  return Boolean(app && app.isPackaged);
+}
+
+/**
+ * Writable data root. Dev: app/data. Packaged: %APPDATA%/glass-tasks-widget/data
+ */
+function getDataRoot() {
+  const app = tryElectronApp();
+  if (app && app.isPackaged) {
+    return path.join(app.getPath('userData'), 'data');
+  }
+  return path.join(ROOT, 'data');
+}
+
+function loadEnvFromFile(envPath) {
+  if (!fs.existsSync(envPath)) return false;
   const text = fs.readFileSync(envPath, 'utf8');
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -24,6 +52,31 @@ function loadEnvFile() {
     }
     if (!(key in process.env)) process.env[key] = value;
   }
+  return true;
+}
+
+function loadEnvFile() {
+  if (envLoaded) return;
+  envLoaded = true;
+
+  const candidates = [];
+  const app = tryElectronApp();
+  if (app) {
+    candidates.push(path.join(app.getPath('userData'), '.env'));
+    if (app.isPackaged) {
+      candidates.push(path.join(path.dirname(process.execPath), '.env'));
+    }
+  }
+  candidates.push(path.join(ROOT, '.env'));
+
+  for (const p of candidates) {
+    if (loadEnvFromFile(p)) break;
+  }
+}
+
+/** Force re-read of .env on next credential check. */
+function resetEnvCache() {
+  envLoaded = false;
 }
 
 function readJson(filePath, fallback) {
@@ -40,11 +93,22 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
-function loadConfig() {
+function buildConfig() {
   const example = path.join(ROOT, 'config.example.json');
   const local = path.join(ROOT, 'config.json');
   const base = readJson(example, {});
   const override = readJson(local, {});
+
+  // Packaged: allow user override next to exe or in userData
+  let packagedOverride = {};
+  const app = tryElectronApp();
+  if (app && app.isPackaged) {
+    packagedOverride = {
+      ...readJson(path.join(app.getPath('userData'), 'config.json'), {}),
+      ...readJson(path.join(path.dirname(process.execPath), 'config.json'), {}),
+    };
+  }
+
   return {
     tasksListName: 'Tasks',
     habitsListName: 'Habits',
@@ -57,15 +121,26 @@ function loadConfig() {
     },
     ...base,
     ...override,
+    ...packagedOverride,
     window: {
       ...(base.window || {}),
       ...(override.window || {}),
+      ...(packagedOverride.window || {}),
     },
   };
 }
 
+function loadConfig() {
+  if (!configCache) configCache = buildConfig();
+  return configCache;
+}
+
+function resetConfigCache() {
+  configCache = null;
+}
+
 function dataPath(...parts) {
-  return path.join(ROOT, 'data', ...parts);
+  return path.join(getDataRoot(), ...parts);
 }
 
 function hasGoogleCredentials() {
@@ -76,9 +151,13 @@ function hasGoogleCredentials() {
 module.exports = {
   ROOT,
   loadEnvFile,
+  resetEnvCache,
   readJson,
   writeJson,
   loadConfig,
+  resetConfigCache,
   dataPath,
+  getDataRoot,
+  isPackaged,
   hasGoogleCredentials,
 };

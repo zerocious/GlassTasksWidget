@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="dark" data-size="normal">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -16,6 +16,7 @@
             <svg viewBox="0 0 24 24"><path d="M5 12l4 4L19 6"/></svg>
           </div>
           <h1 class="title" id="viewTitle">Tasks</h1>
+          <span class="offline-pill" id="offlinePill" hidden>офлайн</span>
         </div>
         <div class="header-right">
           <div class="tabs" role="tablist" aria-label="Вид">
@@ -23,11 +24,54 @@
             <button class="tab" role="tab" id="tab-habits" aria-selected="false" data-view="habits" type="button">Habits</button>
           </div>
           <div class="win-controls">
-            <button class="win-btn" type="button" id="btnMin" title="Свернуть" aria-label="Свернуть">–</button>
-            <button class="win-btn close" type="button" id="btnClose" title="Закрыть" aria-label="Закрыть">×</button>
+            <button class="win-btn" type="button" id="btnSettings" title="Настройки" aria-label="Настройки" aria-expanded="false" aria-controls="settingsPanel">
+              <svg class="gear" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 13a7.8 7.8 0 0 0 .1-2l2-1.5-2-3.5-2.4 1a7.4 7.4 0 0 0-1.7-1L15 3h-6l-.4 2.5a7.4 7.4 0 0 0-1.7 1L4.5 6 2.5 9.5 4.5 11a7.8 7.8 0 0 0 0 2l-2 1.5 2 3.5 2.4-1a7.4 7.4 0 0 0 1.7 1L9 21h6l.4-2.5a7.4 7.4 0 0 0 1.7-1l2.4 1 2-3.5-2-1.5z"/></svg>
+            </button>
+            <button class="win-btn" type="button" id="btnMin" title="Скрыть" aria-label="Скрыть">–</button>
+            <button class="win-btn close" type="button" id="btnClose" title="Скрыть в трей" aria-label="Скрыть в трей">×</button>
           </div>
         </div>
       </header>
+
+      <div class="settings-panel" id="settingsPanel" hidden>
+        <div class="settings-title">Настройки</div>
+
+        <div class="settings-row">
+          <span class="settings-label">Тема стекла</span>
+          <div class="seg-toggle" role="group" aria-label="Тема">
+            <button type="button" class="seg-btn" data-setting="theme" data-value="dark" aria-pressed="true">Тёмная</button>
+            <button type="button" class="seg-btn" data-setting="theme" data-value="light" aria-pressed="false">Светлая</button>
+          </div>
+        </div>
+
+        <div class="settings-row">
+          <span class="settings-label">Размер</span>
+          <div class="seg-toggle" role="group" aria-label="Размер">
+            <button type="button" class="seg-btn" data-setting="size" data-value="normal" aria-pressed="true">Обычный</button>
+            <button type="button" class="seg-btn" data-setting="size" data-value="compact" aria-pressed="false">Компакт</button>
+          </div>
+        </div>
+
+        <label class="settings-row switch-row">
+          <span class="settings-label">Автозапуск с Windows</span>
+          <input type="checkbox" id="optAutostart" />
+          <span class="switch-ui" aria-hidden="true"></span>
+        </label>
+
+        <label class="settings-row switch-row">
+          <span class="settings-label">Прилипание к краю</span>
+          <input type="checkbox" id="optSnap" />
+          <span class="switch-ui" aria-hidden="true"></span>
+        </label>
+
+        <div class="settings-hotkeys" id="hotkeysHint">
+          <div class="settings-label">Горячие клавиши</div>
+          <ul>
+            <li><kbd id="hkToggle">Ctrl+Alt+W</kbd> — показать / скрыть</li>
+            <li><kbd id="hkSwitch">Ctrl+Tab</kbd> — Tasks ↔ Habits</li>
+          </ul>
+        </div>
+      </div>
 
       <div class="status-banner" id="statusBanner" role="status"></div>
 
@@ -36,10 +80,18 @@
           <section class="panel" id="panel-tasks" role="tabpanel" aria-labelledby="tab-tasks">
             <div class="section-label">Today</div>
             <ul class="list" id="list-tasks"></ul>
+            <form class="add-row" id="form-add-tasks" autocomplete="off">
+              <input class="add-input" id="input-add-tasks" type="text" maxlength="200" placeholder="Новая задача…" aria-label="Новая задача" />
+              <button class="add-btn" type="submit" title="Добавить">+</button>
+            </form>
           </section>
           <section class="panel" id="panel-habits" role="tabpanel" aria-labelledby="tab-habits" aria-hidden="true">
             <div class="section-label">Today</div>
             <ul class="list" id="list-habits"></ul>
+            <form class="add-row" id="form-add-habits" autocomplete="off">
+              <input class="add-input" id="input-add-habits" type="text" maxlength="200" placeholder="Новая привычка…" aria-label="Новая привычка" />
+              <button class="add-btn" type="submit" title="Добавить">+</button>
+            </form>
           </section>
         </div>
       </div>

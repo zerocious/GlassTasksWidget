@@ -2,6 +2,9 @@ node_modules/
 .env
 data/tokens.json
 data/streaks.json
+data/settings.json
+data/mock-items.json
+data/offline-cache.json
 dist/
 *.log
 .DS_Store

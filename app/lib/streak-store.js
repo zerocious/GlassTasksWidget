@@ -2,10 +2,12 @@
 
 const { readJson, writeJson, dataPath } = require('./config');
 
-const STREAKS_FILE = dataPath('streaks.json');
-
 /** @typedef {{ dates: string[] }} HabitHistory */
 /** @typedef {{ habits: Record<string, HabitHistory> }} StreakStore */
+
+function streaksFile() {
+  return dataPath('streaks.json');
+}
 
 function todayIso(date = new Date()) {
   const y = date.getFullYear();
@@ -23,13 +25,13 @@ function addDaysIso(iso, delta) {
 
 function loadStore() {
   /** @type {StreakStore} */
-  const store = readJson(STREAKS_FILE, { habits: {} });
+  const store = readJson(streaksFile(), { habits: {} });
   if (!store.habits || typeof store.habits !== 'object') store.habits = {};
   return store;
 }
 
 function saveStore(store) {
-  writeJson(STREAKS_FILE, store);
+  writeJson(streaksFile(), store);
 }
 
 function ensureHabit(store, habitId) {

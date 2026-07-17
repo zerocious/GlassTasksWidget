@@ -8,8 +8,20 @@ contextBridge.exposeInMainWorld('widgetApi', {
   logout: () => ipcRenderer.invoke('widget:logout'),
   setCompleted: (listKind, taskId, completed) =>
     ipcRenderer.invoke('widget:set-completed', { listKind, taskId, completed }),
-  hasCredentials: () => ipcRenderer.invoke('widget:has-credentials'),
-  getConfig: () => ipcRenderer.invoke('widget:get-config'),
+  createItem: (listKind, title) =>
+    ipcRenderer.invoke('widget:create-item', { listKind, title }),
+  getSettings: () => ipcRenderer.invoke('widget:get-settings'),
+  setSettings: (patch) => ipcRenderer.invoke('widget:set-settings', patch),
+  onSwitchView: (handler) => {
+    const listener = () => handler();
+    ipcRenderer.on('widget:switch-view', listener);
+    return () => ipcRenderer.removeListener('widget:switch-view', listener);
+  },
+  onFocusAdd: (handler) => {
+    const listener = () => handler();
+    ipcRenderer.on('widget:focus-add', listener);
+    return () => ipcRenderer.removeListener('widget:focus-add', listener);
+  },
   minimize: () => ipcRenderer.send('widget:minimize'),
   close: () => ipcRenderer.send('widget:close'),
   openExternal: (url) => ipcRenderer.send('widget:open-external', url),
