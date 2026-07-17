@@ -36,7 +36,13 @@ function saveOfflineCache(payload) {
 function loadOfflineCache() {
   if (memoryCache !== undefined) return memoryCache;
   const raw = readJson(cacheFile(), null);
-  if (!raw || !Array.isArray(raw.tasks) || !Array.isArray(raw.habits)) {
+  // Require google mode so a wiped/placeholder file is not treated as a real cache.
+  if (
+    !raw ||
+    raw.mode !== 'google' ||
+    !Array.isArray(raw.tasks) ||
+    !Array.isArray(raw.habits)
+  ) {
     memoryCache = null;
     return null;
   }
@@ -51,7 +57,8 @@ function clearOfflineCache() {
   try {
     if (fs.existsSync(file)) fs.unlinkSync(file);
   } catch {
-    writeJson(file, { tasks: [], habits: [] });
+    // Placeholder without mode:google so loadOfflineCache ignores it.
+    writeJson(file, { clearedAt: new Date().toISOString() });
   }
 }
 

@@ -5,6 +5,10 @@
   "main": "electron/main.js",
   "author": "Glass Tasks",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zerocious/GlassTasksWidget.git"
+  },
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
@@ -17,6 +21,7 @@
     "dist:portable": "npm run prebuild:clean && electron-builder --win portable && npm run shortcut"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "googleapis": "^144.0.0"
   },
   "devDependencies": {
@@ -47,11 +52,20 @@
         "to": ".env.example"
       }
     ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "zerocious",
+        "repo": "GlassTasksWidget"
+      }
+    ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "${productName}-Setup-${version}.${ext}",

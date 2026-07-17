@@ -15,6 +15,8 @@ const { readJson, writeJson, dataPath } = require('./config');
  *   accentColor: string | null,
  *   bgOpacity: number,
  *   remindersEnabled: boolean,
+ *   dailyHabitsReset: boolean,
+ *   lastHabitsResetDate: string | null,
  *   pos: WindowPos | null,
  *   toggleHotkey: string,
  *   switchViewHotkey: string,
@@ -39,6 +41,8 @@ const DEFAULTS = /** @type {AppSettings} */ ({
   accentColor: null,
   bgOpacity: DEFAULT_BG_OPACITY,
   remindersEnabled: true,
+  dailyHabitsReset: true,
+  lastHabitsResetDate: null,
   pos: null,
   toggleHotkey: DEFAULT_TOGGLE_HOTKEY,
   switchViewHotkey: DEFAULT_SWITCH_HOTKEY,
@@ -111,6 +115,13 @@ function normalizeSettings(raw) {
     ),
     remindersEnabled:
       raw.remindersEnabled === undefined ? true : Boolean(raw.remindersEnabled),
+    dailyHabitsReset:
+      raw.dailyHabitsReset === undefined ? true : Boolean(raw.dailyHabitsReset),
+    lastHabitsResetDate:
+      typeof raw.lastHabitsResetDate === 'string' &&
+      /^\d{4}-\d{2}-\d{2}$/.test(raw.lastHabitsResetDate)
+        ? raw.lastHabitsResetDate
+        : null,
     pos,
     toggleHotkey: normalizeHotkey(raw.toggleHotkey, DEFAULT_TOGGLE_HOTKEY),
     switchViewHotkey: normalizeHotkey(raw.switchViewHotkey, DEFAULT_SWITCH_HOTKEY),
@@ -145,6 +156,8 @@ function saveSettings(patch) {
     next.accentColor === current.accentColor &&
     next.bgOpacity === current.bgOpacity &&
     next.remindersEnabled === current.remindersEnabled &&
+    next.dailyHabitsReset === current.dailyHabitsReset &&
+    next.lastHabitsResetDate === current.lastHabitsResetDate &&
     next.toggleHotkey === current.toggleHotkey &&
     next.switchViewHotkey === current.switchViewHotkey &&
     next.onboardingSkipped === current.onboardingSkipped &&

@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld('widgetApi', {
   saveCredentials: (payload) => ipcRenderer.invoke('widget:save-credentials', payload || {}),
   skipCredentials: () => ipcRenderer.invoke('widget:skip-credentials'),
   sampleWallpaperPalette: () => ipcRenderer.invoke('widget:sample-wallpaper-palette'),
+  checkReminders: () => ipcRenderer.invoke('widget:check-reminders'),
+  checkUpdates: () => ipcRenderer.invoke('widget:check-updates'),
   onSwitchView: (handler) => {
     const listener = () => handler();
     ipcRenderer.on('widget:switch-view', listener);
@@ -30,6 +32,11 @@ contextBridge.exposeInMainWorld('widgetApi', {
     const listener = () => handler();
     ipcRenderer.on('widget:focus-add', listener);
     return () => ipcRenderer.removeListener('widget:focus-add', listener);
+  },
+  onHabitsReset: (handler) => {
+    const listener = () => handler();
+    ipcRenderer.on('widget:habits-reset', listener);
+    return () => ipcRenderer.removeListener('widget:habits-reset', listener);
   },
   minimize: () => ipcRenderer.send('widget:minimize'),
   close: () => ipcRenderer.send('widget:close'),

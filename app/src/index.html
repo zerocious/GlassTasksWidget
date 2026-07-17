@@ -90,6 +90,27 @@
           <span class="switch-ui" aria-hidden="true"></span>
         </label>
 
+        <div class="settings-row">
+          <span class="settings-label">Проверить напоминания</span>
+          <button type="button" class="settings-link-btn" id="btnCheckReminders">Проверить</button>
+        </div>
+        <p class="settings-hint" id="remindersHint" hidden>
+          Если тосты не появляются: Параметры Windows → Система → Уведомления — разрешите
+          «Glass Tasks Widget». Отключите Фокусировку внимания (Focus Assist).
+        </p>
+
+        <label class="settings-row switch-row">
+          <span class="settings-label">Сбрасывать привычки в Google каждый день</span>
+          <input type="checkbox" id="optDailyHabitsReset" checked />
+          <span class="switch-ui" aria-hidden="true"></span>
+        </label>
+
+        <div class="settings-row">
+          <span class="settings-label">Обновления</span>
+          <button type="button" class="settings-link-btn" id="btnCheckUpdates">Проверить обновления</button>
+        </div>
+        <p class="settings-hint" id="updatesHint" hidden></p>
+
         <div class="settings-row palette-row">
           <label class="switch-row palette-switch" for="optAutoPalette">
             <span class="settings-label">Автопалитра с обоев</span>

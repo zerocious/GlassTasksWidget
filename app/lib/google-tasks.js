@@ -14,8 +14,10 @@ const {
   setMockCompleted,
   updateMockItem,
   deleteMockItem,
+  resetMockHabitsCompleted,
 } = require('./mock-data');
 const { loadConfig, hasGoogleCredentials } = require('./config');
+const { loadSettings, saveSettings } = require('./settings-store');
 const {
   saveOfflineCache,
   loadOfflineCache,
@@ -37,6 +39,8 @@ let dataInFlight = null;
 let payloadCache = null;
 /** @type {Map<string, Promise<any>>} */
 const mutationInFlight = new Map();
+/** @type {Promise<any> | null} */
+let habitsResetInFlight = null;
 
 /** Lazy-load heavy googleapis only on first Google API use. */
 function getGoogle() {
@@ -76,14 +80,17 @@ function dueKindFor(due, completed) {
 }
 
 function formatMeta(task) {
+  const time = resolveTaskTime(task);
   if (task.due) {
     try {
       const d = new Date(task.due);
       const kind = dueKindFor(task.due, task.status === 'completed');
-      const dateLabel = d.toLocaleDateString(undefined, {
-        month: 'short',
-        day: 'numeric',
-      });
+      const dateLabel = formatDueDateLabel(d, task.due);
+      if (time) {
+        if (kind === 'overdue') return `Просрочено · ${time}`;
+        if (kind === 'today') return `Сегодня · ${time}`;
+        return `${dateLabel} · ${time}`;
+      }
       if (kind === 'overdue') return `Просрочено · ${dateLabel}`;
       if (kind === 'today') return `Сегодня · ${dateLabel}`;
       return dateLabel;
@@ -91,6 +98,7 @@ function formatMeta(task) {
       return 'Срок';
     }
   }
+  if (time) return time;
   if (task.notes && String(task.notes).trim()) {
     const line = String(task.notes).trim().split(/\r?\n/)[0];
     return line.length > 40 ? `${line.slice(0, 37)}…` : line;
@@ -98,16 +106,138 @@ function formatMeta(task) {
   return '';
 }
 
+/**
+ * Prefer calendar day from Google's UTC date-only due; fall back to locale date.
+ * @param {Date} d
+ * @param {string} due
+ */
+function formatDueDateLabel(d, due) {
+  const key = dueDateKey(due);
+  if (key) {
+    try {
+      const [y, m, day] = key.split('-').map(Number);
+      const local = new Date(y, m - 1, day);
+      return local.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    } catch {
+      /* fall through */
+    }
+  }
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+/**
+ * Time from due ISO when not midnight UTC, else common patterns in notes.
+ * @param {{ due?: string | null, notes?: string | null }} task
+ * @returns {string | null} HH:MM
+ */
+function resolveTaskTime(task) {
+  return dueTimeLabel(task?.due) || timeFromNotes(task?.notes);
+}
+
+/**
+ * Google Tasks date-only dues are midnight UTC. Any other UTC time is real.
+ * @param {string | null | undefined} due
+ * @returns {string | null}
+ */
+function dueTimeLabel(due) {
+  if (!due) return null;
+  try {
+    const d = new Date(due);
+    if (Number.isNaN(d.getTime())) return null;
+    const utcMidnight =
+      d.getUTCHours() === 0 &&
+      d.getUTCMinutes() === 0 &&
+      d.getUTCSeconds() === 0 &&
+      d.getUTCMilliseconds() === 0;
+    if (utcMidnight) return null;
+    return formatHm(d.getHours(), d.getMinutes());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse time from notes: «14:30», «в 14:30», «time: 9:05», «время 09.30».
+ * @param {string | null | undefined} notes
+ * @returns {string | null}
+ */
+function timeFromNotes(notes) {
+  if (!notes) return null;
+  const text = String(notes);
+  const patterns = [
+    /(?:^|[\s,;|(])(?:в|В|at|time|время|Время)\s*[:\-]?\s*(\d{1,2})[:\.](\d{2})\b/i,
+    /\b(\d{1,2}):(\d{2})\b/,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (!m) continue;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (!Number.isFinite(h) || !Number.isFinite(min) || h > 23 || min > 59) continue;
+    return formatHm(h, min);
+  }
+  return null;
+}
+
+function formatHm(h, min) {
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
+/**
+ * Absolute local Date for a timed reminder, or null if date-only / no resolvable time.
+ * Uses real due datetime when not midnight-UTC-only; otherwise notes HH:MM + due day / today.
+ * @param {{ due?: string | null, notes?: string | null, dueTime?: string | null }} task
+ * @returns {Date | null}
+ */
+function resolveTaskDueAt(task) {
+  if (!task) return null;
+  const hm = (task.dueTime && /^\d{2}:\d{2}$/.test(task.dueTime)
+    ? task.dueTime
+    : null) || resolveTaskTime(task);
+  if (!hm) return null;
+  const parts = hm.split(':');
+  const hh = Number(parts[0]);
+  const mm = Number(parts[1]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh > 23 || mm > 59) return null;
+
+  if (task.due) {
+    try {
+      const d = new Date(task.due);
+      if (!Number.isNaN(d.getTime())) {
+        const utcMidnight =
+          d.getUTCHours() === 0 &&
+          d.getUTCMinutes() === 0 &&
+          d.getUTCSeconds() === 0 &&
+          d.getUTCMilliseconds() === 0;
+        // Real clock on due ISO → absolute instant
+        if (!utcMidnight) return d;
+        const key = dueDateKey(task.due);
+        if (key) {
+          const [y, m, day] = key.split('-').map(Number);
+          return new Date(y, m - 1, day, hh, mm, 0, 0);
+        }
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0, 0);
+}
+
 function mapTask(item) {
   const completed = item.status === 'completed';
   const due = item.due || null;
   const dueKind = dueKindFor(due, completed);
+  const dueTime = resolveTaskTime(item);
   return {
     id: item.id,
     title: item.title || '(без названия)',
     notes: item.notes || '',
     due,
     dueKind,
+    dueTime,
     status: item.status || 'needsAction',
     completed,
     meta: formatMeta(item) || (completed ? 'Done' : 'Task'),
@@ -124,7 +254,14 @@ function sortTasks(tasks) {
     if (ra !== rb) return ra - rb;
     const da = a.due || '';
     const db = b.due || '';
-    if (da !== db) return da < db ? -1 : 1;
+    if (da !== db) {
+      const ka = dueDateKey(da) || da;
+      const kb = dueDateKey(db) || db;
+      if (ka !== kb) return ka < kb ? -1 : 1;
+    }
+    const ta = a.dueTime || resolveTaskTime(a) || '99:99';
+    const tb = b.dueTime || resolveTaskTime(b) || '99:99';
+    if (ta !== tb) return ta < tb ? -1 : 1;
     return String(a.title).localeCompare(String(b.title));
   });
   return [...open, ...done];
@@ -134,12 +271,13 @@ function decorateTasks(tasks) {
   return sortTasks(
     tasks.map((t) => {
       const dueKind = dueKindFor(t.due, Boolean(t.completed));
+      const dueTime = resolveTaskTime(t);
       const meta =
-        t.due || !t.meta
+        t.due || dueTime || !t.meta
           ? formatMeta({ ...t, status: t.completed ? 'completed' : 'needsAction' }) ||
             (t.completed ? 'Done' : 'Task')
           : t.meta;
-      return { ...t, dueKind, meta };
+      return { ...t, dueKind, dueTime, meta };
     })
   );
 }
@@ -353,7 +491,103 @@ function fromPayloadCache() {
   return next;
 }
 
+/**
+ * Once per local calendar day: clear completed flags on Habits (Google or mock).
+ * Streak store is untouched — only sticky Google/mock completed status resets.
+ * @returns {Promise<{
+ *   ok: boolean,
+ *   reset: boolean,
+ *   reason?: string,
+ *   mode?: string,
+ *   count?: number,
+ *   message?: string,
+ * }>}
+ */
+async function resetCompletedHabitsForNewDay() {
+  if (habitsResetInFlight) return habitsResetInFlight;
+
+  habitsResetInFlight = (async () => {
+    const settings = loadSettings();
+    if (settings.dailyHabitsReset === false) {
+      return { ok: true, reset: false, reason: 'disabled' };
+    }
+    const today = localDateKey();
+    if (settings.lastHabitsResetDate === today) {
+      return { ok: true, reset: false, reason: 'already' };
+    }
+
+    const config = loadConfig();
+
+    if (!hasGoogleCredentials()) {
+      const count = resetMockHabitsCompleted();
+      saveSettings({ lastHabitsResetDate: today });
+      invalidatePayloadCache();
+      return { ok: true, reset: true, mode: 'mock', count };
+    }
+
+    try {
+      const auth = await getAuthorizedClient({ interactive: false });
+      if (!auth) {
+        return { ok: false, reset: false, reason: 'auth' };
+      }
+
+      const tasksApi = getGoogle().tasks({ version: 'v1', auth });
+      const listId = await resolveListId(tasksApi, config.habitsListName);
+      if (!listId) {
+        // Persist so we don't hammer the API when the Habits list is missing.
+        saveSettings({ lastHabitsResetDate: today });
+        return { ok: true, reset: false, reason: 'no_list' };
+      }
+
+      const res = await tasksApi.tasks.list({
+        tasklist: listId,
+        showCompleted: true,
+        showHidden: true,
+        maxResults: 100,
+      });
+      const items = (res.data.items || []).filter(
+        (i) => i && i.id && i.status === 'completed'
+      );
+
+      for (const item of items) {
+        await tasksApi.tasks.patch({
+          tasklist: listId,
+          task: item.id,
+          requestBody: { status: 'needsAction', completed: null },
+        });
+        patchOfflineCache('habits', item.id, {
+          status: 'needsAction',
+          completed: false,
+        });
+      }
+
+      saveSettings({ lastHabitsResetDate: today });
+      invalidateListCache();
+      invalidatePayloadCache();
+      return { ok: true, reset: true, mode: 'google', count: items.length };
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      console.warn('[habits-reset]', msg);
+      return { ok: false, reset: false, reason: 'error', message: msg };
+    }
+  })().finally(() => {
+    habitsResetInFlight = null;
+  });
+
+  return habitsResetInFlight;
+}
+
 async function getWidgetDataUncached(force) {
+  // Day rollover before serving data so habits aren't stuck completed in Google.
+  try {
+    await resetCompletedHabitsForNewDay();
+  } catch (err) {
+    console.warn(
+      '[habits-reset]',
+      err && err.message ? err.message : err
+    );
+  }
+
   if (!force) {
     const warm = fromPayloadCache();
     if (warm) return warm;
@@ -453,9 +687,33 @@ async function setTaskCompleted(listKind, taskId, completed) {
     const config = loadConfig();
 
     if (!hasGoogleCredentials()) {
+      const cached = lookupCachedItem(listKind, taskId);
       const result = setMockCompleted(listKind, taskId, completed);
-      invalidatePayloadCache();
-      return result;
+      const status = completed ? 'completed' : 'needsAction';
+      const due = cached && cached.due ? cached.due : null;
+      const notes = cached && cached.notes ? cached.notes : '';
+      const dueKind = dueKindFor(due, completed);
+      const dueTime = resolveTaskTime({ due, notes });
+      const meta =
+        formatMeta({ due, notes, status }) ||
+        (completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
+      const itemPatch = {
+        status,
+        completed,
+        dueKind,
+        dueTime,
+        meta: listKind === 'habits' ? (cached && cached.meta) || 'Daily' : meta,
+        ...(result.stats
+          ? {
+              streak: result.stats.streak,
+              week: result.stats.week,
+              ring: result.stats.ring,
+              completedToday: result.stats.completedToday,
+            }
+          : {}),
+      };
+      patchPayloadCache(listKind, taskId, itemPatch);
+      return { ...result, item: { id: taskId, ...itemPatch } };
     }
 
     const auth = await getAuthorizedClient({ interactive: false });
@@ -472,6 +730,7 @@ async function setTaskCompleted(listKind, taskId, completed) {
     // Patch-only: skip redundant tasks.get (saves one round-trip per toggle)
     const requestBody = { status };
     if (completed) requestBody.completed = new Date().toISOString();
+    else requestBody.completed = null;
 
     await tasksApi.tasks.patch({
       tasklist: listId,
@@ -487,6 +746,7 @@ async function setTaskCompleted(listKind, taskId, completed) {
     const due = cached && cached.due ? cached.due : null;
     const notes = cached && cached.notes ? cached.notes : '';
     const dueKind = dueKindFor(due, completed);
+    const dueTime = resolveTaskTime({ due, notes });
     const meta =
       formatMeta({ due, notes, status }) ||
       (completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
@@ -495,6 +755,7 @@ async function setTaskCompleted(listKind, taskId, completed) {
       status,
       completed,
       dueKind,
+      dueTime,
       meta: listKind === 'habits' ? (cached && cached.meta) || 'Daily' : meta,
       ...(stats
         ? {
@@ -509,7 +770,12 @@ async function setTaskCompleted(listKind, taskId, completed) {
     patchOfflineCache(listKind, taskId, itemPatch);
     patchPayloadCache(listKind, taskId, itemPatch);
 
-    return { ok: true, mode: 'google', stats };
+    return {
+      ok: true,
+      mode: 'google',
+      stats,
+      item: { id: taskId, ...itemPatch },
+    };
   })().finally(() => {
     mutationInFlight.delete(flightKey);
   });
@@ -696,4 +962,7 @@ module.exports = {
   invalidateListCache,
   invalidatePayloadCache,
   clearOfflineCache,
+  resolveTaskTime,
+  resolveTaskDueAt,
+  resetCompletedHabitsForNewDay,
 };

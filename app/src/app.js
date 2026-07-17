@@ -29,6 +29,11 @@ const optAutoPalette = document.getElementById('optAutoPalette');
 const optBgOpacity = document.getElementById('optBgOpacity');
 const bgOpacityValue = document.getElementById('bgOpacityValue');
 const optReminders = document.getElementById('optReminders');
+const optDailyHabitsReset = document.getElementById('optDailyHabitsReset');
+const btnCheckReminders = document.getElementById('btnCheckReminders');
+const btnCheckUpdates = document.getElementById('btnCheckUpdates');
+const remindersHint = document.getElementById('remindersHint');
+const updatesHint = document.getElementById('updatesHint');
 const btnRefreshPalette = document.getElementById('btnRefreshPalette');
 const hkToggle = document.getElementById('hkToggle');
 const hkSwitch = document.getElementById('hkSwitch');
@@ -101,6 +106,7 @@ let settings = {
   autoPalette: false,
   bgOpacity: 0.72,
   remindersEnabled: true,
+  dailyHabitsReset: true,
   onboardingSkipped: false,
 };
 
@@ -185,6 +191,10 @@ function syncSettingsUi() {
   optSnap.checked = Boolean(settings.snapToEdge);
   if (optAutoPalette) optAutoPalette.checked = Boolean(settings.autoPalette);
   if (optReminders) optReminders.checked = settings.remindersEnabled !== false;
+  if (optDailyHabitsReset) {
+    optDailyHabitsReset.checked = settings.dailyHabitsReset !== false;
+  }
+  syncRemindersHint(settings);
 
   const hotkeys = settings.hotkeys || {};
   hkToggle.textContent = formatAccel(hotkeys.toggleHotkey || settings.toggleHotkey || 'Control+Alt+W');
@@ -196,6 +206,48 @@ function syncSettingsUi() {
 function setSettingsOpen(open) {
   settingsPanel.hidden = !open;
   btnSettings.setAttribute('aria-expanded', String(open));
+}
+
+/**
+ * @param {{ notificationsSupported?: boolean, remindersEnabled?: boolean } | null} [settings]
+ * @param {{ forceShow?: boolean, tone?: 'error' | 'ok' | '', text?: string }} [opts]
+ */
+function syncRemindersHint(settings, opts = {}) {
+  if (!remindersHint) return;
+  if (opts.text) {
+    remindersHint.hidden = false;
+    remindersHint.textContent = opts.text;
+    remindersHint.classList.toggle('is-error', opts.tone === 'error');
+    remindersHint.classList.toggle('is-ok', opts.tone === 'ok');
+    return;
+  }
+  const unsupported = settings && settings.notificationsSupported === false;
+  if (unsupported || opts.forceShow) {
+    remindersHint.hidden = false;
+    remindersHint.textContent =
+      'Если тосты не появляются: Параметры Windows → Система → Уведомления — разрешите «Glass Tasks Widget». Отключите Фокусировку внимания (Focus Assist).';
+    remindersHint.classList.add('is-error');
+    remindersHint.classList.remove('is-ok');
+    return;
+  }
+  remindersHint.hidden = true;
+  remindersHint.classList.remove('is-error', 'is-ok');
+}
+
+/**
+ * @param {{ text?: string, tone?: '' | 'ok' | 'error' }} [opts]
+ */
+function syncUpdatesHint(opts = {}) {
+  if (!updatesHint) return;
+  if (opts.text) {
+    updatesHint.hidden = false;
+    updatesHint.textContent = opts.text;
+    updatesHint.classList.toggle('is-error', opts.tone === 'error');
+    updatesHint.classList.toggle('is-ok', opts.tone === 'ok');
+    return;
+  }
+  updatesHint.hidden = true;
+  updatesHint.classList.remove('is-error', 'is-ok');
 }
 
 function setOnboardingError(msg) {
@@ -283,6 +335,9 @@ function patchSettings(patch) {
   }
   if (typeof patch.remindersEnabled === 'boolean' && optReminders) {
     optReminders.checked = patch.remindersEnabled;
+  }
+  if (typeof patch.dailyHabitsReset === 'boolean' && optDailyHabitsReset) {
+    optDailyHabitsReset.checked = patch.dailyHabitsReset;
   }
 
   document.querySelectorAll('.seg-btn[data-setting="theme"]').forEach((el) => {
@@ -576,6 +631,9 @@ function resortTasksLocal() {
     const da = a.due || '';
     const db = b.due || '';
     if (da !== db) return da < db ? -1 : 1;
+    const ta = a.dueTime || '99:99';
+    const tb = b.dueTime || '99:99';
+    if (ta !== tb) return ta < tb ? -1 : 1;
     return String(a.title).localeCompare(String(b.title));
   });
   state.tasks = [...open, ...done];
@@ -690,10 +748,20 @@ async function toggleItem(listKind, item) {
 
   try {
     const result = await window.widgetApi.setCompleted(listKind, item.id, next);
+    // Server recomputes dueKind/meta/dueTime — critical after uncomplete
+    // so we don't stick on optimistic "Done" / null dueKind.
+    if (result && result.item && typeof result.item === 'object') {
+      Object.assign(item, result.item);
+    }
     if (listKind === 'habits' && result && result.stats) {
       applyHabitStats(item, result.stats);
+    }
+    if (listKind === 'habits') {
       resortHabitsLocal();
       patchHabitRow(item);
+    } else {
+      resortTasksLocal();
+      patchTaskRow(item);
     }
   } catch (err) {
     item.completed = prevCompleted;
@@ -1172,6 +1240,72 @@ if (optReminders) {
     patchSettings({ remindersEnabled: optReminders.checked })
   );
 }
+if (optDailyHabitsReset) {
+  optDailyHabitsReset.addEventListener('change', () =>
+    patchSettings({ dailyHabitsReset: optDailyHabitsReset.checked })
+  );
+}
+if (btnCheckReminders) {
+  btnCheckReminders.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.widgetApi?.checkReminders) return;
+    btnCheckReminders.disabled = true;
+    try {
+      const result = await window.widgetApi.checkReminders();
+      if (result?.shown) {
+        syncRemindersHint(null, {
+          text: `Отправлено: ${result.count || 0}. Проверьте область уведомлений Windows.`,
+          tone: 'ok',
+        });
+      } else if (result?.reason === 'unsupported' || result?.reason === 'failed') {
+        syncRemindersHint(null, {
+          text:
+            result.message ||
+            'Тосты недоступны. Разрешите уведомления для «Glass Tasks Widget» и отключите Фокусировку внимания.',
+          tone: 'error',
+        });
+      } else {
+        syncRemindersHint(null, {
+          text: result?.message || 'Нечего напоминать прямо сейчас.',
+          tone: '',
+        });
+      }
+    } catch (err) {
+      syncRemindersHint(null, {
+        text: err?.message || 'Не удалось проверить напоминания.',
+        tone: 'error',
+      });
+    } finally {
+      btnCheckReminders.disabled = false;
+    }
+  });
+}
+if (btnCheckUpdates) {
+  btnCheckUpdates.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.widgetApi?.checkUpdates) return;
+    btnCheckUpdates.disabled = true;
+    syncUpdatesHint({ text: 'Проверяем…', tone: '' });
+    try {
+      const result = await window.widgetApi.checkUpdates();
+      const tone =
+        result?.ok === false || result?.reason === 'error' ? 'error' : result?.reason === 'available' ? 'ok' : '';
+      syncUpdatesHint({
+        text: result?.message || 'Готово.',
+        tone,
+      });
+    } catch (err) {
+      syncUpdatesHint({
+        text: err?.message || 'Не удалось проверить обновления.',
+        tone: 'error',
+      });
+    } finally {
+      btnCheckUpdates.disabled = false;
+    }
+  });
+}
 if (optBgOpacity) {
   optBgOpacity.addEventListener('input', () => {
     const opacity = normalizeBgOpacity(Number(optBgOpacity.value) / 100);
@@ -1280,6 +1414,11 @@ if (window.widgetApi?.onSwitchView) {
 }
 if (window.widgetApi?.onFocusAdd) {
   window.widgetApi.onFocusAdd(() => focusAddInput());
+}
+if (window.widgetApi?.onHabitsReset) {
+  window.widgetApi.onHabitsReset(() => {
+    loadData(true).catch(() => {});
+  });
 }
 
 setView('tasks', true);

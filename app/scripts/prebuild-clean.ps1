@@ -10,7 +10,7 @@ if (Test-Path -LiteralPath 'dist') {
   Remove-Item -LiteralPath 'dist' -Recurse -Force -ErrorAction SilentlyContinue
 }
 if (Test-Path -LiteralPath 'dist') {
-  Write-Warning "dist/ is locked. Build may use a temporary folder or fail — close any handle to dist\\win-unpacked and retry."
+  Write-Warning 'dist/ is locked. Build may fail — close any handle to dist\win-unpacked and retry.'
   exit 0
 }
-Write-Host "dist/ cleared"
+Write-Host 'dist/ cleared'

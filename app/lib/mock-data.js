@@ -233,10 +233,31 @@ function deleteMockItem(listKind, taskId) {
   return { ok: true, mode: 'mock' };
 }
 
+/**
+ * Clear Google-style completed flags on habits for a new day.
+ * Does not touch the streak store (completedToday / history stay intact).
+ * @returns {number} how many habits were flipped
+ */
+function resetMockHabitsCompleted() {
+  const store = loadMockStore();
+  let n = 0;
+  for (const h of store.habits || []) {
+    if (!h) continue;
+    if (h.completed || h.status === 'completed') {
+      h.completed = false;
+      h.status = 'needsAction';
+      n += 1;
+    }
+  }
+  if (n) saveMockStore(store);
+  return n;
+}
+
 module.exports = {
   getMockPayload,
   addMockItem,
   setMockCompleted,
+  resetMockHabitsCompleted,
   updateMockItem,
   deleteMockItem,
   loadMockStore,

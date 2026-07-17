@@ -1,32 +1,30 @@
 # Glass Tasks Widget — приложение
 
-См. корневой [README](../README.md) для установки и Google OAuth.
+Полное описание: корневой [README](../README.md).
 
 ```powershell
 npm install
 npm start
 ```
 
-**Первый запуск:** если нет Google Client ID/Secret, виджет покажет форму онбординга (или «Продолжить в демо»). Ключи пишутся в `%APPDATA%\glass-tasks-widget\.env` — вручную править `.env` не нужно. Позже: Настройки → Google API ключи.
+**Первый запуск:** без Client ID/Secret — онбординг или «Продолжить в демо». Ключи → `%APPDATA%\glass-tasks-widget\.env` (ручной `.env` не обязателен). Позже: Настройки → Google API ключи.
 
 ## Сборка
 
-Стабильный вывод всегда в `dist/` (не `dist-ctx` / `dist-fresh`).
+Вывод в `dist/` (не `dist-ctx` / `dist-fresh`).
 
 | Команда | Результат |
 |---------|-----------|
-| `npm run dist` / `npm run build:win` | NSIS-установщик + ярлык на Desktop |
-| `npm run pack` / `npm run pack:desktop` | `dist/win-unpacked/` + ярлык на Desktop |
-| `npm run shortcut` | Только обновить ярлык на Desktop |
-
-После `pack` / `dist` скрипт `scripts/update-desktop-shortcut.ps1` пересоздаёт  
-`%USERPROFILE%\Desktop\Glass Tasks Widget.lnk` → `dist\win-unpacked\Glass Tasks Widget.exe`  
-(или установленный путь, если unpacked нет).
+| `npm run dist` / `npm run build:win` | NSIS + ярлык Desktop |
+| `npm run pack` / `npm run pack:desktop` | `dist/win-unpacked/` + ярлык |
+| `npm run shortcut` | Только обновить ярлык |
 
 ```powershell
 $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
 npm run dist
 ```
 
-Установщик: Desktop + Start Menu shortcuts, per-user (`perMachine: false`).
+После `pack` / `dist` — `scripts/update-desktop-shortcut.ps1` обновляет  
+`%USERPROFILE%\Desktop\Glass Tasks Widget.lnk`. Установщик: Desktop + Start Menu, per-user.
 
+Если `winCodeSign` / symlink — **Режим разработчика** Windows. См. корневой README: данные, OAuth redirect `http://127.0.0.1:42813/oauth2callback`, напоминания (точное время + sweep), ежедневный сброс привычек, автообновления с GitHub Releases, автопалитра.
