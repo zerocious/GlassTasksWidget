@@ -8,9 +8,13 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder --win nsis",
-    "dist:portable": "electron-builder --win portable"
+    "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/update-desktop-shortcut.ps1",
+    "prebuild:clean": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/prebuild-clean.ps1",
+    "pack": "npm run prebuild:clean && electron-builder --dir && npm run shortcut",
+    "pack:desktop": "npm run pack",
+    "dist": "npm run prebuild:clean && electron-builder --win nsis && npm run shortcut",
+    "build:win": "npm run dist",
+    "dist:portable": "npm run prebuild:clean && electron-builder --win portable && npm run shortcut"
   },
   "dependencies": {
     "googleapis": "^144.0.0"

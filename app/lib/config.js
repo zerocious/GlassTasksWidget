@@ -34,9 +34,18 @@ function getDataRoot() {
   return path.join(ROOT, 'data');
 }
 
-function loadEnvFromFile(envPath) {
+const GOOGLE_ENV_KEYS = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'OAUTH_REDIRECT_PORT'];
+const DEFAULT_OAUTH_PORT = 42813;
+
+function applyEnvValue(key, value, { force = false } = {}) {
+  if (!force && key in process.env) return;
+  process.env[key] = value;
+}
+
+function loadEnvFromFile(envPath, { force = false } = {}) {
   if (!fs.existsSync(envPath)) return false;
   const text = fs.readFileSync(envPath, 'utf8');
+  let loaded = false;
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
@@ -50,15 +59,40 @@ function loadEnvFromFile(envPath) {
     ) {
       value = value.slice(1, -1);
     }
-    if (!(key in process.env)) process.env[key] = value;
+    applyEnvValue(key, value, { force });
+    loaded = true;
+  }
+  return loaded;
+}
+
+function loadCredentialsJson(jsonPath, { force = false } = {}) {
+  const data = readJson(jsonPath, null);
+  if (!data || typeof data !== 'object') return false;
+  const clientId = typeof data.clientId === 'string' ? data.clientId.trim() : '';
+  const clientSecret = typeof data.clientSecret === 'string' ? data.clientSecret.trim() : '';
+  if (!clientId || !clientSecret) return false;
+  applyEnvValue('GOOGLE_CLIENT_ID', clientId, { force });
+  applyEnvValue('GOOGLE_CLIENT_SECRET', clientSecret, { force });
+  const port = Number(data.redirectPort || data.OAUTH_REDIRECT_PORT || DEFAULT_OAUTH_PORT);
+  if (Number.isFinite(port) && port > 0) {
+    applyEnvValue('OAUTH_REDIRECT_PORT', String(Math.round(port)), { force });
   }
   return true;
 }
 
-function loadEnvFile() {
-  if (envLoaded) return;
-  envLoaded = true;
+/** Preferred writable .env path (packaged/dev Electron: %APPDATA%/glass-tasks-widget/.env). */
+function getCredentialsEnvPath() {
+  const app = tryElectronApp();
+  if (app) return path.join(app.getPath('userData'), '.env');
+  return path.join(ROOT, '.env');
+}
 
+/** Structured credentials mirror under the writable data root. */
+function getCredentialsJsonPath() {
+  return dataPath('credentials.json');
+}
+
+function envCandidatePaths() {
   const candidates = [];
   const app = tryElectronApp();
   if (app) {
@@ -68,15 +102,108 @@ function loadEnvFile() {
     }
   }
   candidates.push(path.join(ROOT, '.env'));
+  return candidates;
+}
 
-  for (const p of candidates) {
-    if (loadEnvFromFile(p)) break;
+function loadEnvFile({ force = false } = {}) {
+  if (envLoaded && !force) return;
+  envLoaded = true;
+
+  let found = false;
+  for (const p of envCandidatePaths()) {
+    if (loadEnvFromFile(p, { force })) {
+      found = true;
+      break;
+    }
+  }
+  if (!found || !(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET)) {
+    loadCredentialsJson(getCredentialsJsonPath(), { force });
   }
 }
 
-/** Force re-read of .env on next credential check. */
+/** Force re-read of credentials on next check. */
 function resetEnvCache() {
   envLoaded = false;
+  for (const key of GOOGLE_ENV_KEYS) {
+    delete process.env[key];
+  }
+}
+
+/**
+ * Persist Desktop OAuth client credentials for the widget.
+ * Writes %APPDATA%/…/.env (or app/.env in non-Electron) and data/credentials.json.
+ * @param {{ clientId: string, clientSecret: string, redirectPort?: number }} input
+ */
+function saveGoogleCredentials(input) {
+  const clientId = String(input?.clientId || '').trim();
+  const clientSecret = String(input?.clientSecret || '').trim();
+  if (!clientId || !clientSecret) {
+    throw new Error('Укажите Client ID и Client Secret');
+  }
+  let redirectPort = Number(input?.redirectPort);
+  if (!Number.isFinite(redirectPort) || redirectPort <= 0) redirectPort = DEFAULT_OAUTH_PORT;
+  redirectPort = Math.round(redirectPort);
+  if (redirectPort < 1024 || redirectPort > 65535) {
+    throw new Error('Порт redirect должен быть в диапазоне 1024–65535');
+  }
+
+  const envPath = getCredentialsEnvPath();
+  fs.mkdirSync(path.dirname(envPath), { recursive: true });
+  const envBody = [
+    '# Glass Tasks Widget — Google OAuth Desktop client',
+    `# Saved by the app UI (${new Date().toISOString()})`,
+    `GOOGLE_CLIENT_ID=${clientId}`,
+    `GOOGLE_CLIENT_SECRET=${clientSecret}`,
+    `OAUTH_REDIRECT_PORT=${redirectPort}`,
+    '',
+  ].join('\n');
+  // Restrictive mode where the OS honors it (Unix); Windows ACLs remain user-profile default
+  fs.writeFileSync(envPath, envBody, { encoding: 'utf8', mode: 0o600 });
+
+  writeSecretJson(getCredentialsJsonPath(), {
+    clientId,
+    clientSecret,
+    redirectPort,
+    updatedAt: new Date().toISOString(),
+  });
+
+  resetEnvCache();
+  loadEnvFile({ force: true });
+  process.env.GOOGLE_CLIENT_ID = clientId;
+  process.env.GOOGLE_CLIENT_SECRET = clientSecret;
+  process.env.OAUTH_REDIRECT_PORT = String(redirectPort);
+
+  return {
+    configured: true,
+    clientId,
+    redirectPort,
+    envPath,
+    jsonPath: getCredentialsJsonPath(),
+  };
+}
+
+/**
+ * @returns {{
+ *   configured: boolean,
+ *   clientId: string | null,
+ *   redirectPort: number,
+ *   envPath: string,
+ *   jsonPath: string,
+ * }}
+ */
+function getGoogleCredentialsStatus() {
+  loadEnvFile();
+  const clientId = process.env.GOOGLE_CLIENT_ID || null;
+  const configured = Boolean(clientId && process.env.GOOGLE_CLIENT_SECRET);
+  let redirectPort = Number(process.env.OAUTH_REDIRECT_PORT || DEFAULT_OAUTH_PORT);
+  if (!Number.isFinite(redirectPort) || redirectPort <= 0) redirectPort = DEFAULT_OAUTH_PORT;
+  return {
+    configured,
+    clientId: configured ? clientId : null,
+    redirectPort: Math.round(redirectPort),
+    envPath: getCredentialsEnvPath(),
+    jsonPath: getCredentialsJsonPath(),
+  };
 }
 
 function readJson(filePath, fallback) {
@@ -91,6 +218,15 @@ function readJson(filePath, fallback) {
 function writeJson(filePath, data) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+}
+
+/** Like writeJson, but prefer owner-only file mode for secrets (tokens, credentials). */
+function writeSecretJson(filePath, data) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), {
+    encoding: 'utf8',
+    mode: 0o600,
+  });
 }
 
 function buildConfig() {
@@ -109,7 +245,7 @@ function buildConfig() {
     };
   }
 
-  return {
+  const merged = {
     tasksListName: 'Tasks',
     habitsListName: 'Habits',
     accentColor: '#C4122E',
@@ -128,6 +264,12 @@ function buildConfig() {
       ...(packagedOverride.window || {}),
     },
   };
+  // Reject non-hex accents from config overrides (CSS injection via renderer setProperty)
+  const accent = typeof merged.accentColor === 'string' ? merged.accentColor.trim() : '';
+  if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(accent)) {
+    merged.accentColor = '#C4122E';
+  }
+  return merged;
 }
 
 function loadConfig() {
@@ -154,10 +296,16 @@ module.exports = {
   resetEnvCache,
   readJson,
   writeJson,
+  writeSecretJson,
   loadConfig,
   resetConfigCache,
   dataPath,
   getDataRoot,
   isPackaged,
   hasGoogleCredentials,
+  getCredentialsEnvPath,
+  getCredentialsJsonPath,
+  saveGoogleCredentials,
+  getGoogleCredentialsStatus,
+  DEFAULT_OAUTH_PORT,
 };

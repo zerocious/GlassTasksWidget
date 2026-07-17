@@ -11,11 +11,21 @@ const { readJson, writeJson, dataPath } = require('./config');
  *   size: WidgetSize,
  *   autostart: boolean,
  *   snapToEdge: boolean,
+ *   autoPalette: boolean,
+ *   accentColor: string | null,
+ *   bgOpacity: number,
+ *   remindersEnabled: boolean,
  *   pos: WindowPos | null,
  *   toggleHotkey: string,
  *   switchViewHotkey: string,
+ *   onboardingSkipped: boolean,
  * }} AppSettings
  */
+
+/** Glass fill alpha — matches default dark --glass-fill (0.72). */
+const DEFAULT_BG_OPACITY = 0.72;
+const BG_OPACITY_MIN = 0.2;
+const BG_OPACITY_MAX = 0.95;
 
 const DEFAULT_TOGGLE_HOTKEY = 'Control+Alt+W';
 const DEFAULT_SWITCH_HOTKEY = 'Control+Tab';
@@ -25,10 +35,35 @@ const DEFAULTS = /** @type {AppSettings} */ ({
   size: 'normal',
   autostart: false,
   snapToEdge: false,
+  autoPalette: false,
+  accentColor: null,
+  bgOpacity: DEFAULT_BG_OPACITY,
+  remindersEnabled: true,
   pos: null,
   toggleHotkey: DEFAULT_TOGGLE_HOTKEY,
   switchViewHotkey: DEFAULT_SWITCH_HOTKEY,
+  onboardingSkipped: false,
 });
+
+/**
+ * @param {unknown} value
+ * @returns {number}
+ */
+function normalizeBgOpacity(value) {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_BG_OPACITY;
+  const clamped = Math.min(BG_OPACITY_MAX, Math.max(BG_OPACITY_MIN, n));
+  return Math.round(clamped * 100) / 100;
+}
+
+function normalizeAccentHex(value) {
+  if (typeof value !== 'string') return null;
+  const m = value.trim().match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/);
+  if (!m) return null;
+  let h = m[1];
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  return `#${h.toUpperCase()}`;
+}
 
 const SIZE_PRESETS = {
   normal: { width: 380, height: 460, minWidth: 320, minHeight: 380 },
@@ -69,9 +104,17 @@ function normalizeSettings(raw) {
     size,
     autostart: Boolean(raw.autostart),
     snapToEdge: Boolean(raw.snapToEdge),
+    autoPalette: Boolean(raw.autoPalette),
+    accentColor: normalizeAccentHex(raw.accentColor),
+    bgOpacity: normalizeBgOpacity(
+      raw.bgOpacity !== undefined ? raw.bgOpacity : DEFAULT_BG_OPACITY
+    ),
+    remindersEnabled:
+      raw.remindersEnabled === undefined ? true : Boolean(raw.remindersEnabled),
     pos,
     toggleHotkey: normalizeHotkey(raw.toggleHotkey, DEFAULT_TOGGLE_HOTKEY),
     switchViewHotkey: normalizeHotkey(raw.switchViewHotkey, DEFAULT_SWITCH_HOTKEY),
+    onboardingSkipped: Boolean(raw.onboardingSkipped),
   };
 }
 
@@ -98,8 +141,13 @@ function saveSettings(patch) {
     next.size === current.size &&
     next.autostart === current.autostart &&
     next.snapToEdge === current.snapToEdge &&
+    next.autoPalette === current.autoPalette &&
+    next.accentColor === current.accentColor &&
+    next.bgOpacity === current.bgOpacity &&
+    next.remindersEnabled === current.remindersEnabled &&
     next.toggleHotkey === current.toggleHotkey &&
     next.switchViewHotkey === current.switchViewHotkey &&
+    next.onboardingSkipped === current.onboardingSkipped &&
     ((next.pos === null && current.pos === null) ||
       (next.pos &&
         current.pos &&
@@ -120,10 +168,14 @@ function getSizePreset(size) {
 
 module.exports = {
   DEFAULTS,
+  DEFAULT_BG_OPACITY,
+  BG_OPACITY_MIN,
+  BG_OPACITY_MAX,
   DEFAULT_TOGGLE_HOTKEY,
   DEFAULT_SWITCH_HOTKEY,
   SIZE_PRESETS,
   loadSettings,
   saveSettings,
   getSizePreset,
+  normalizeBgOpacity,
 };

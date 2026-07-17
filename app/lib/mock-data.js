@@ -1,6 +1,12 @@
 'use strict';
 
-const { enrichHabits, todayIso, markCompleted, unmarkCompleted } = require('./streak-store');
+const {
+  enrichHabits,
+  todayIso,
+  markCompleted,
+  unmarkCompleted,
+  removeHabit,
+} = require('./streak-store');
 const { readJson, writeJson, dataPath } = require('./config');
 
 function mockFile() {
@@ -204,9 +210,34 @@ function setMockCompleted(listKind, taskId, completed) {
   return { ok: true, mode: 'mock' };
 }
 
+function updateMockItem(listKind, taskId, title) {
+  const trimmed = String(title || '').trim();
+  if (!trimmed) throw new Error('Введите название');
+  const store = loadMockStore();
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  const item = store[key].find((i) => i && i.id === taskId);
+  if (!item) throw new Error('Элемент не найден');
+  item.title = trimmed;
+  saveMockStore(store);
+  return { ok: true, mode: 'mock', item: { ...item } };
+}
+
+function deleteMockItem(listKind, taskId) {
+  const store = loadMockStore();
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  const before = store[key].length;
+  store[key] = store[key].filter((i) => i && i.id !== taskId);
+  if (store[key].length === before) throw new Error('Элемент не найден');
+  saveMockStore(store);
+  if (listKind === 'habits') removeHabit(taskId);
+  return { ok: true, mode: 'mock' };
+}
+
 module.exports = {
   getMockPayload,
   addMockItem,
   setMockCompleted,
+  updateMockItem,
+  deleteMockItem,
   loadMockStore,
 };

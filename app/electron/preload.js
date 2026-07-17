@@ -11,8 +11,16 @@ contextBridge.exposeInMainWorld('widgetApi', {
     ipcRenderer.invoke('widget:set-completed', { listKind, taskId, completed }),
   createItem: (listKind, title) =>
     ipcRenderer.invoke('widget:create-item', { listKind, title }),
+  updateItem: (listKind, taskId, title) =>
+    ipcRenderer.invoke('widget:update-item', { listKind, taskId, title }),
+  deleteItem: (listKind, taskId) =>
+    ipcRenderer.invoke('widget:delete-item', { listKind, taskId }),
   getSettings: () => ipcRenderer.invoke('widget:get-settings'),
   setSettings: (patch) => ipcRenderer.invoke('widget:set-settings', patch),
+  getCredentialsStatus: () => ipcRenderer.invoke('widget:credentials-status'),
+  saveCredentials: (payload) => ipcRenderer.invoke('widget:save-credentials', payload || {}),
+  skipCredentials: () => ipcRenderer.invoke('widget:skip-credentials'),
+  sampleWallpaperPalette: () => ipcRenderer.invoke('widget:sample-wallpaper-palette'),
   onSwitchView: (handler) => {
     const listener = () => handler();
     ipcRenderer.on('widget:switch-view', listener);

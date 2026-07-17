@@ -10,15 +10,19 @@ const {
   Tray,
   Menu,
   nativeImage,
+  Notification,
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { loadConfig } = require('../lib/config');
+const { pathToFileURL } = require('url');
+const { loadConfig, getGoogleCredentialsStatus, saveGoogleCredentials } = require('../lib/config');
 const {
   getWidgetData,
   loginGoogle,
   setTaskCompleted,
   createItem,
+  updateItem,
+  deleteItem,
   invalidateListCache,
   invalidatePayloadCache,
   clearOfflineCache,
@@ -31,6 +35,19 @@ const {
   DEFAULT_TOGGLE_HOTKEY,
   DEFAULT_SWITCH_HOTKEY,
 } = require('../lib/settings-store');
+const { sampleWallpaperPalette } = require('../lib/wallpaper-palette');
+const { loadReminderState, markNotified } = require('../lib/reminder-store');
+
+function credentialsPayload() {
+  const status = getGoogleCredentialsStatus();
+  const settings = loadSettings();
+  return {
+    configured: status.configured,
+    needsOnboarding: !status.configured && !settings.onboardingSkipped,
+    clientId: status.clientId,
+    redirectPort: status.redirectPort,
+  };
+}
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
@@ -44,6 +61,15 @@ let moveSettleTimer = null;
 let applyingBounds = false;
 /** @type {boolean | null} */
 let trayMenuVisible = null;
+
+/** @type {ReturnType<typeof setInterval> | null} */
+let reminderInterval = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let reminderStartupTimer = null;
+let reminderCheckInFlight = false;
+
+const REMINDER_INTERVAL_MS = 45 * 60 * 1000;
+const REMINDER_STARTUP_DELAY_MS = 40 * 1000;
 
 // Minimal 16×16 accent PNG (glass-tasks red square with check hint)
 const TRAY_PNG_BASE64 =
@@ -361,7 +387,17 @@ function createWindow() {
   }
 
   mainWindow = new BrowserWindow(opts);
-  mainWindow.loadFile(path.join(__dirname, '..', 'src', 'index.html'));
+  const indexHtml = path.join(__dirname, '..', 'src', 'index.html');
+  mainWindow.loadFile(indexHtml);
+
+  // Harden: local widget only — block popups / unexpected navigations
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  const allowedPageUrl = pathToFileURL(indexHtml).href;
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url !== allowedPageUrl && !url.startsWith(`${allowedPageUrl}#`)) {
+      event.preventDefault();
+    }
+  });
 
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -400,14 +436,152 @@ function createWindow() {
   }
 }
 
+/**
+ * Collect actionable open items for toast reminders.
+ * @param {any} data
+ * @returns {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string }[]}
+ */
+function collectReminderCandidates(data) {
+  /** @type {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string }[]} */
+  const out = [];
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  for (const t of tasks) {
+    if (!t || t.completed || !t.id) continue;
+    if (t.dueKind !== 'today' && t.dueKind !== 'overdue') continue;
+    out.push({
+      id: `task:${t.id}`,
+      kind: 'task',
+      title: String(t.title || 'Задача').trim() || 'Задача',
+      dueKind: t.dueKind,
+    });
+  }
+  const habits = Array.isArray(data?.habits) ? data.habits : [];
+  for (const h of habits) {
+    if (!h || h.completed || !h.id) continue;
+    out.push({
+      id: `habit:${h.id}`,
+      kind: 'habit',
+      title: String(h.title || 'Привычка').trim() || 'Привычка',
+    });
+  }
+  return out;
+}
+
+/**
+ * Build Russian title/body for a reminder toast.
+ * @param {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string }[]} items
+ */
+function formatReminderToast(items) {
+  const overdue = items.filter((i) => i.dueKind === 'overdue');
+  const today = items.filter((i) => i.dueKind === 'today');
+  const habits = items.filter((i) => i.kind === 'habit');
+  const parts = [];
+  if (overdue.length) parts.push(`просрочено: ${overdue.length}`);
+  if (today.length) parts.push(`на сегодня: ${today.length}`);
+  if (habits.length) parts.push(`привычки: ${habits.length}`);
+
+  const title =
+    overdue.length && !today.length && !habits.length
+      ? 'Просроченные задачи'
+      : habits.length && !overdue.length && !today.length
+        ? 'Привычки на сегодня'
+        : 'Напоминание Glass Tasks';
+
+  const names = items
+    .slice(0, 3)
+    .map((i) => i.title)
+    .join(', ');
+  const more = items.length > 3 ? ` и ещё ${items.length - 3}` : '';
+  const body = parts.length
+    ? `${parts.join(' · ')}. ${names}${more}`
+    : `${names}${more}`;
+
+  return { title, body };
+}
+
+function stopRemindersScheduler() {
+  if (reminderStartupTimer) {
+    clearTimeout(reminderStartupTimer);
+    reminderStartupTimer = null;
+  }
+  if (reminderInterval) {
+    clearInterval(reminderInterval);
+    reminderInterval = null;
+  }
+}
+
+async function runReminderCheck() {
+  if (reminderCheckInFlight || isQuitting) return;
+  const settings = loadSettings();
+  if (!settings.remindersEnabled) return;
+  if (!Notification.isSupported()) return;
+
+  reminderCheckInFlight = true;
+  try {
+    const data = await getWidgetData();
+    const candidates = collectReminderCandidates(data);
+    const state = loadReminderState();
+    const notified = new Set(state.notifiedIds);
+    const fresh = candidates.filter((c) => !notified.has(c.id));
+    if (!fresh.length) return;
+
+    const { title, body } = formatReminderToast(fresh);
+    const n = new Notification({
+      title,
+      body,
+      silent: false,
+    });
+    n.on('click', () => {
+      showWidget();
+      syncTrayMenu();
+    });
+    n.show();
+    markNotified(fresh.map((c) => c.id));
+  } catch (err) {
+    console.warn('[reminders]', err && err.message ? err.message : err);
+  } finally {
+    reminderCheckInFlight = false;
+  }
+}
+
+/**
+ * @param {boolean} enabled
+ * @param {{ immediate?: boolean }} [opts]
+ */
+function syncRemindersScheduler(enabled, opts = {}) {
+  stopRemindersScheduler();
+  if (!enabled) return;
+
+  const delay = opts.immediate ? 2500 : REMINDER_STARTUP_DELAY_MS;
+  reminderStartupTimer = setTimeout(() => {
+    reminderStartupTimer = null;
+    runReminderCheck();
+  }, delay);
+
+  reminderInterval = setInterval(() => {
+    runReminderCheck();
+  }, REMINDER_INTERVAL_MS);
+  if (typeof reminderInterval.unref === 'function') reminderInterval.unref();
+}
+
 function applySettingsPatch(patch) {
   const allowed = {};
   if (patch.theme === 'light' || patch.theme === 'dark') allowed.theme = patch.theme;
   if (patch.size === 'normal' || patch.size === 'compact') allowed.size = patch.size;
   if (typeof patch.autostart === 'boolean') allowed.autostart = patch.autostart;
   if (typeof patch.snapToEdge === 'boolean') allowed.snapToEdge = patch.snapToEdge;
+  if (typeof patch.autoPalette === 'boolean') allowed.autoPalette = patch.autoPalette;
+  if (patch.accentColor === null) allowed.accentColor = null;
+  else if (typeof patch.accentColor === 'string') allowed.accentColor = patch.accentColor;
+  if (typeof patch.bgOpacity === 'number' && Number.isFinite(patch.bgOpacity)) {
+    allowed.bgOpacity = patch.bgOpacity;
+  }
+  if (typeof patch.remindersEnabled === 'boolean') {
+    allowed.remindersEnabled = patch.remindersEnabled;
+  }
   if (typeof patch.toggleHotkey === 'string') allowed.toggleHotkey = patch.toggleHotkey;
   if (typeof patch.switchViewHotkey === 'string') allowed.switchViewHotkey = patch.switchViewHotkey;
+  if (typeof patch.onboardingSkipped === 'boolean') allowed.onboardingSkipped = patch.onboardingSkipped;
   if (patch.pos && typeof patch.pos.x === 'number' && typeof patch.pos.y === 'number') {
     allowed.pos = { x: patch.pos.x, y: patch.pos.y };
   }
@@ -430,24 +604,123 @@ function applySettingsPatch(patch) {
   ) {
     registerHotkeys(next);
   }
+  if (
+    typeof allowed.remindersEnabled === 'boolean' &&
+    allowed.remindersEnabled !== prev.remindersEnabled
+  ) {
+    syncRemindersScheduler(next.remindersEnabled, { immediate: next.remindersEnabled });
+  }
 
   return settingsForRenderer();
+}
+
+/**
+ * Sample wallpaper and optionally persist accent when autoPalette is on.
+ * @returns {{ accent: string, path?: string }}
+ */
+function sampleAndPersistPalette() {
+  const result = sampleWallpaperPalette();
+  const settings = loadSettings();
+  if (settings.autoPalette) {
+    saveSettings({ accentColor: result.accent });
+  }
+  return { accent: result.accent, path: result.path };
+}
+
+/**
+ * Apply auto-palette accent onto widget data payload when enabled.
+ * Uses persisted accent when present — avoids resampling wallpaper on every IPC.
+ * @param {any} data
+ * @returns {any}
+ */
+function applyAutoPaletteToData(data) {
+  const settings = loadSettings();
+  const config = loadConfig();
+  const defaultAccent = config.accentColor || '#C4122E';
+  if (!data || typeof data !== 'object') return data;
+  const base = { ...data, defaultAccent };
+  if (!settings.autoPalette) return base;
+  if (settings.accentColor) {
+    return { ...base, accentColor: settings.accentColor };
+  }
+  try {
+    const { accent } = sampleAndPersistPalette();
+    return { ...base, accentColor: accent };
+  } catch (err) {
+    console.warn('[palette]', err.message || err);
+    return base;
+  }
 }
 
 function registerIpc() {
   ipcMain.handle('widget:bootstrap', async (event) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const data = await getWidgetData();
-    return { settings: settingsForRenderer(), data };
+    const data = applyAutoPaletteToData(await getWidgetData());
+    return {
+      settings: settingsForRenderer(),
+      data,
+      credentials: credentialsPayload(),
+    };
   });
 
   ipcMain.handle('widget:get-data', async (event, opts) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    return getWidgetData(opts && typeof opts === 'object' ? opts : undefined);
+    const data = await getWidgetData(opts && typeof opts === 'object' ? opts : undefined);
+    return applyAutoPaletteToData(data);
+  });
+
+  ipcMain.handle('widget:credentials-status', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    return credentialsPayload();
+  });
+
+  ipcMain.handle('widget:save-credentials', async (event, payload) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    if (!payload || typeof payload !== 'object') throw new Error('Invalid credentials');
+    const existing = getGoogleCredentialsStatus();
+    const clientId = String(payload.clientId || '').trim();
+    let clientSecret = String(payload.clientSecret || '').trim();
+    if (!clientSecret && existing.configured && process.env.GOOGLE_CLIENT_SECRET) {
+      clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    }
+    saveGoogleCredentials({
+      clientId,
+      clientSecret,
+      redirectPort: payload.redirectPort,
+    });
+    saveSettings({ onboardingSkipped: false });
+    invalidateListCache();
+    invalidatePayloadCache();
+    const data = applyAutoPaletteToData(await getWidgetData({ force: true }));
+    return {
+      credentials: credentialsPayload(),
+      settings: settingsForRenderer(),
+      data,
+    };
+  });
+
+  ipcMain.handle('widget:skip-credentials', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    saveSettings({ onboardingSkipped: true });
+    const data = applyAutoPaletteToData(await getWidgetData({ force: true }));
+    return {
+      credentials: credentialsPayload(),
+      settings: settingsForRenderer(),
+      data,
+    };
+  });
+
+  ipcMain.handle('widget:sample-wallpaper-palette', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    return sampleAndPersistPalette();
   });
 
   ipcMain.handle('widget:login', async (event) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
+    const creds = getGoogleCredentialsStatus();
+    if (!creds.configured) {
+      throw new Error('Сначала сохраните Google Client ID и Secret');
+    }
     return loginGoogle();
   });
 
@@ -457,7 +730,7 @@ function registerIpc() {
     invalidateListCache();
     invalidatePayloadCache();
     clearOfflineCache();
-    return getWidgetData({ force: true });
+    return applyAutoPaletteToData(await getWidgetData({ force: true }));
   });
 
   ipcMain.handle('widget:set-completed', async (event, payload) => {
@@ -470,6 +743,18 @@ function registerIpc() {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
     const { listKind, title } = payload || {};
     return createItem(listKind, title);
+  });
+
+  ipcMain.handle('widget:update-item', async (event, payload) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    const { listKind, taskId, title } = payload || {};
+    return updateItem(listKind, taskId, title);
+  });
+
+  ipcMain.handle('widget:delete-item', async (event, payload) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    const { listKind, taskId } = payload || {};
+    return deleteItem(listKind, taskId);
   });
 
   ipcMain.handle('widget:get-settings', async (event) => {
@@ -511,12 +796,16 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
+    if (process.platform === 'win32') {
+      app.setAppUserModelId('com.glasstasks.widget');
+    }
     const settings = loadSettings();
     applyAutostart(settings.autostart);
     registerIpc();
     createWindow();
     createTray();
     registerHotkeys(settings);
+    syncRemindersScheduler(settings.remindersEnabled !== false);
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -526,10 +815,12 @@ if (!gotTheLock) {
 
   app.on('before-quit', () => {
     isQuitting = true;
+    stopRemindersScheduler();
   });
 
   app.on('will-quit', () => {
     unregisterHotkeys();
+    stopRemindersScheduler();
     if (tray) {
       tray.destroy();
       tray = null;

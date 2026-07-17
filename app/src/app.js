@@ -13,17 +13,73 @@ const offlinePill = document.getElementById('offlinePill');
 const btnAuth = document.getElementById('btnAuth');
 const btnSettings = document.getElementById('btnSettings');
 const settingsPanel = document.getElementById('settingsPanel');
+const onboardingPanel = document.getElementById('onboardingPanel');
+const onboardingTitle = document.getElementById('onboardingTitle');
+const onboardingError = document.getElementById('onboardingError');
+const inputClientId = document.getElementById('inputClientId');
+const inputClientSecret = document.getElementById('inputClientSecret');
+const inputRedirectPort = document.getElementById('inputRedirectPort');
+const btnSaveCredentials = document.getElementById('btnSaveCredentials');
+const btnSkipCredentials = document.getElementById('btnSkipCredentials');
+const btnOpenConsole = document.getElementById('btnOpenConsole');
+const btnGoogleKeys = document.getElementById('btnGoogleKeys');
 const optAutostart = document.getElementById('optAutostart');
 const optSnap = document.getElementById('optSnap');
+const optAutoPalette = document.getElementById('optAutoPalette');
+const optBgOpacity = document.getElementById('optBgOpacity');
+const bgOpacityValue = document.getElementById('bgOpacityValue');
+const optReminders = document.getElementById('optReminders');
+const btnRefreshPalette = document.getElementById('btnRefreshPalette');
 const hkToggle = document.getElementById('hkToggle');
 const hkSwitch = document.getElementById('hkSwitch');
 const inputAddTasks = document.getElementById('input-add-tasks');
 const inputAddHabits = document.getElementById('input-add-habits');
 
+/** Config accent from last server payload (before wallpaper override). */
+let configAccent = '#C4122E';
+/** @type {ReturnType<typeof setTimeout> | null} */
+let slideClearTimer = null;
+
 const icons = {
   tasks: '<svg viewBox="0 0 24 24"><path d="M5 12l4 4L19 6"/></svg>',
   habits: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg>',
 };
+
+/** Inline SVGs for habit rows — stroke icons, 24 viewBox. */
+const HABIT_ICON_SVGS = {
+  water:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c-2.8 4.2-6 7.6-6 11a6 6 0 0 0 12 0c0-3.4-3.2-6.8-6-11z"/><path d="M9.5 14.5c.4 1.6 1.6 2.5 2.5 2.5"/></svg>',
+  read:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H12v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H12v16h5.5A2.5 2.5 0 0 1 20 21.5z"/></svg>',
+  sport:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 9.5v5M17.5 9.5v5M4 11v2M20 11v2M8.5 12h7M6.5 9.5h-1a1.5 1.5 0 0 0 0 3h1M17.5 9.5h1a1.5 1.5 0 0 1 0 3h-1"/></svg>',
+  meditate:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7" r="2.25"/><path d="M8.5 21c.5-3 2-5 3.5-5.5M15.5 21c-.5-3-2-5-3.5-5.5M7 14.5c1.5-1 3.2-1.5 5-1.5s3.5.5 5 1.5"/><path d="M9.5 11.5c.8.6 1.7.9 2.5.9s1.7-.3 2.5-.9"/></svg>',
+  sleep:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 13.5A6.5 6.5 0 0 1 10 4.2 7.5 7.5 0 1 0 19.8 14a6.4 6.4 0 0 1-3.3-.5z"/></svg>',
+  default:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c.4 3.2 2.2 5.5 5.5 6.2C14.2 10 12.4 12.3 12 15.5 11.6 12.3 9.8 10 6.5 9.2 9.8 8.5 11.6 6.2 12 3z"/><path d="M12 15.5V21"/></svg>',
+};
+
+/**
+ * Pick a habit icon key from title keywords (EN + RU).
+ * @param {string} title
+ * @returns {keyof typeof HABIT_ICON_SVGS}
+ */
+function habitIconKey(title) {
+  const t = String(title || '').toLowerCase();
+  if (/water|hydrat|вод|пить|напит/.test(t)) return 'water';
+  if (/read|book|чита|книг/.test(t)) return 'read';
+  if (/sport|exercis|workout|gym|run|jog|спорт|тренир|упражн|бег|зарядк/.test(t)) return 'sport';
+  if (/meditat|yoga|mindful|медита|йог|дыхани/.test(t)) return 'meditate';
+  if (/sleep|rest|сон|спат|отдых/.test(t)) return 'sleep';
+  return 'default';
+}
+
+/** @param {string} title */
+function habitIconHtml(title) {
+  return HABIT_ICON_SVGS[habitIconKey(title)] || HABIT_ICON_SVGS.default;
+}
 
 /** @type {any} */
 let state = {
@@ -42,7 +98,16 @@ let settings = {
   size: 'normal',
   autostart: false,
   snapToEdge: false,
+  autoPalette: false,
+  bgOpacity: 0.72,
+  remindersEnabled: true,
+  onboardingSkipped: false,
 };
+
+/** @type {{ configured: boolean, needsOnboarding: boolean, clientId: string | null, redirectPort: number } | null} */
+let credentials = null;
+/** true when user opened credentials form from Settings (allow close without skip) */
+let credentialsFromSettings = false;
 
 let view = 'tasks';
 /** @type {Set<string>} */
@@ -73,9 +138,41 @@ function applySize(size) {
   document.documentElement.setAttribute('data-size', size === 'compact' ? 'compact' : 'normal');
 }
 
+/**
+ * Clamp and apply glass fill alpha (0.2–0.95). Keeps strong fill ~0.1 above.
+ * @param {unknown} value
+ * @returns {number}
+ */
+function normalizeBgOpacity(value) {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return 0.72;
+  return Math.round(Math.min(0.95, Math.max(0.2, n)) * 100) / 100;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {number} normalized opacity
+ */
+function applyBgOpacity(value) {
+  const opacity = normalizeBgOpacity(value);
+  const strong = Math.min(0.98, Math.round((opacity + 0.1) * 100) / 100);
+  const root = document.documentElement;
+  root.style.setProperty('--glass-opacity', String(opacity));
+  root.style.setProperty('--glass-opacity-strong', String(strong));
+
+  const pct = Math.round(opacity * 100);
+  if (optBgOpacity) {
+    optBgOpacity.value = String(pct);
+    optBgOpacity.setAttribute('aria-valuenow', String(pct));
+  }
+  if (bgOpacityValue) bgOpacityValue.textContent = `${pct}%`;
+  return opacity;
+}
+
 function syncSettingsUi() {
   applyTheme(settings.theme);
   applySize(settings.size);
+  applyBgOpacity(settings.bgOpacity);
 
   document.querySelectorAll('.seg-btn[data-setting="theme"]').forEach((el) => {
     el.setAttribute('aria-pressed', String(el.dataset.value === settings.theme));
@@ -86,6 +183,8 @@ function syncSettingsUi() {
 
   optAutostart.checked = Boolean(settings.autostart);
   optSnap.checked = Boolean(settings.snapToEdge);
+  if (optAutoPalette) optAutoPalette.checked = Boolean(settings.autoPalette);
+  if (optReminders) optReminders.checked = settings.remindersEnabled !== false;
 
   const hotkeys = settings.hotkeys || {};
   hkToggle.textContent = formatAccel(hotkeys.toggleHotkey || settings.toggleHotkey || 'Control+Alt+W');
@@ -97,6 +196,62 @@ function syncSettingsUi() {
 function setSettingsOpen(open) {
   settingsPanel.hidden = !open;
   btnSettings.setAttribute('aria-expanded', String(open));
+}
+
+function setOnboardingError(msg) {
+  if (!onboardingError) return;
+  if (!msg) {
+    onboardingError.hidden = true;
+    onboardingError.textContent = '';
+    return;
+  }
+  onboardingError.hidden = false;
+  onboardingError.textContent = msg;
+}
+
+/**
+ * @param {{ open?: boolean, fromSettings?: boolean }} [opts]
+ */
+function syncCredentialsForm(opts = {}) {
+  const open = Boolean(opts.open);
+  credentialsFromSettings = Boolean(opts.fromSettings);
+  if (!onboardingPanel) return;
+
+  if (onboardingTitle) {
+    onboardingTitle.textContent = credentialsFromSettings
+      ? 'Google API ключи'
+      : 'Подключение Google';
+  }
+  if (btnSkipCredentials) {
+    btnSkipCredentials.hidden = credentialsFromSettings && Boolean(credentials?.configured);
+    btnSkipCredentials.textContent = credentialsFromSettings
+      ? 'Отмена'
+      : 'Продолжить в демо';
+  }
+
+  if (inputClientId) {
+    inputClientId.value = credentials?.clientId || '';
+  }
+  if (inputClientSecret) {
+    inputClientSecret.value = '';
+    inputClientSecret.placeholder = credentials?.configured
+      ? 'Оставьте пустым, чтобы не менять'
+      : 'Секрет клиента';
+  }
+  if (inputRedirectPort) {
+    inputRedirectPort.value = String(credentials?.redirectPort || 42813);
+  }
+  setOnboardingError('');
+  onboardingPanel.hidden = !open;
+  if (open) setSettingsOpen(false);
+}
+
+function maybeShowFirstRunOnboarding() {
+  if (!credentials?.needsOnboarding) {
+    if (onboardingPanel && !credentialsFromSettings) onboardingPanel.hidden = true;
+    return;
+  }
+  syncCredentialsForm({ open: true, fromSettings: false });
 }
 
 async function flushSettingsWrites() {
@@ -120,8 +275,15 @@ function patchSettings(patch) {
   Object.assign(settings, patch);
   if (patch.theme) applyTheme(patch.theme);
   if (patch.size) applySize(patch.size);
+  if (typeof patch.bgOpacity === 'number') applyBgOpacity(patch.bgOpacity);
   if (typeof patch.autostart === 'boolean') optAutostart.checked = patch.autostart;
   if (typeof patch.snapToEdge === 'boolean') optSnap.checked = patch.snapToEdge;
+  if (typeof patch.autoPalette === 'boolean' && optAutoPalette) {
+    optAutoPalette.checked = patch.autoPalette;
+  }
+  if (typeof patch.remindersEnabled === 'boolean' && optReminders) {
+    optReminders.checked = patch.remindersEnabled;
+  }
 
   document.querySelectorAll('.seg-btn[data-setting="theme"]').forEach((el) => {
     el.setAttribute('aria-pressed', String(el.dataset.value === settings.theme));
@@ -135,12 +297,21 @@ function patchSettings(patch) {
   settingsWriteTimer = setTimeout(() => {
     settingsWriteTimer = null;
     flushSettingsWrites();
-  }, 120);
+  }, typeof patch.bgOpacity === 'number' ? 220 : 120);
+}
+
+function normalizeAccentHex(value) {
+  if (typeof value !== 'string') return null;
+  const m = value.trim().match(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/);
+  if (!m) return null;
+  let h = m[1];
+  if (h.length === 3) h = h.split('').map((c) => c + c).join('');
+  return `#${h.toUpperCase()}`;
 }
 
 function applyAccent(hex) {
-  if (!hex || typeof hex !== 'string') return;
-  const accent = hex.trim();
+  const accent = normalizeAccentHex(hex);
+  if (!accent) return;
   if (accent === lastAccent) return;
   lastAccent = accent;
   document.documentElement.style.setProperty('--accent', accent);
@@ -175,7 +346,29 @@ function updateSourceLabel() {
 function setView(next, force) {
   if (next !== 'tasks' && next !== 'habits') return;
   if (!force && next === view) return;
+  const prev = view;
   view = next;
+
+  if (!force && prev !== view) {
+    panels.classList.add('is-sliding');
+    if (slideClearTimer) clearTimeout(slideClearTimer);
+    const onEnd = (e) => {
+      if (e.target !== panels || e.propertyName !== 'transform') return;
+      panels.classList.remove('is-sliding');
+      panels.removeEventListener('transitionend', onEnd);
+      if (slideClearTimer) {
+        clearTimeout(slideClearTimer);
+        slideClearTimer = null;
+      }
+    };
+    panels.addEventListener('transitionend', onEnd);
+    slideClearTimer = setTimeout(() => {
+      panels.classList.remove('is-sliding');
+      panels.removeEventListener('transitionend', onEnd);
+      slideClearTimer = null;
+    }, 700);
+  }
+
   panels.dataset.view = view;
 
   document.querySelectorAll('.tab').forEach((el) => {
@@ -241,7 +434,6 @@ function buildTaskRow(task) {
 function buildHabitRow(habit) {
   const week = habit.week || [false, false, false, false, false, false, false];
   const streak = habit.streak || 0;
-  const ring = habit.ring != null ? habit.ring : 50;
   const done = Boolean(habit.completed);
 
   const li = document.createElement('li');
@@ -256,7 +448,7 @@ function buildHabitRow(habit) {
     .join('');
 
   li.innerHTML = `
-    <span class="ring" style="--p: ${ring}%" aria-hidden="true"></span>
+    <span class="habit-icon" aria-hidden="true">${habitIconHtml(habit.title)}</span>
     <div class="row-body">
       <div class="row-title"></div>
       <div class="row-meta"></div>
@@ -296,8 +488,8 @@ function renderHabits() {
 }
 
 function rowById(listEl, id) {
-  // Prefer getElementById-style scan; ids are Google/mock tokens without quotes
-  return listEl.querySelector(`li.row[data-id="${id.replace(/"/g, '')}"]`);
+  const safe = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(String(id)) : String(id).replace(/"/g, '');
+  return listEl.querySelector(`li.row[data-id="${safe}"]`);
 }
 
 function syncListOrder(listEl, items) {
@@ -342,8 +534,8 @@ function patchHabitRow(habit) {
   } else {
     const done = Boolean(habit.completed);
     li.className = `row${done ? ' done' : ''}`;
-    const ring = li.querySelector('.ring');
-    if (ring) ring.style.setProperty('--p', `${habit.ring != null ? habit.ring : 50}%`);
+    const icon = li.querySelector('.habit-icon');
+    if (icon) icon.innerHTML = habitIconHtml(habit.title);
     const title = li.querySelector('.row-title');
     if (title) title.textContent = habit.title;
     const meta = li.querySelector('.row-meta');
@@ -410,7 +602,7 @@ function renderAll() {
       ? `Офлайн: ${state.warning}`
       : 'Офлайн — показаны последние загруженные данные.';
   } else if (state.mode === 'mock') {
-    banner = 'Демо-режим: нет .env с Google OAuth. UI работает на mock-данных.';
+    banner = 'Демо-режим: UI на mock-данных. Подключите Google в настройках (Google API ключи).';
   } else if (state.mode === 'needs_auth') {
     banner = 'Учётные данные есть — нажмите Google для входа.';
   } else if (state.warning) {
@@ -435,6 +627,7 @@ async function loadData(force) {
   loadInFlight = (async () => {
     try {
       state = await window.widgetApi.getData(force ? { force: true } : {});
+      if (state.defaultAccent) configAccent = state.defaultAccent;
       renderAll();
     } catch (err) {
       setBanner(`Ошибка загрузки: ${err.message || err}`);
@@ -562,8 +755,252 @@ async function onAddSubmit(listKind, input) {
   }
 }
 
+function guardMutate(actionLabel) {
+  if (!window.widgetApi) return false;
+  if (state.offline && state.mode === 'google') {
+    setBanner(`Офлайн: нельзя ${actionLabel} в Google. Обновите, когда сеть появится.`);
+    return false;
+  }
+  if (state.mode === 'needs_auth') {
+    setBanner('Сначала войдите через Google.');
+    return false;
+  }
+  return true;
+}
+
+async function renameItem(listKind, item, nextTitle) {
+  const trimmed = String(nextTitle || '').trim();
+  if (!trimmed || trimmed === item.title) return;
+  if (!guardMutate('изменить задачу')) return;
+  if (pendingIds.has(item.id)) return;
+
+  pendingIds.add(item.id);
+  const prevTitle = item.title;
+  item.title = trimmed;
+  if (listKind === 'habits') patchHabitRow(item);
+  else patchTaskRow(item);
+
+  try {
+    await window.widgetApi.updateItem(listKind, item.id, trimmed);
+  } catch (err) {
+    item.title = prevTitle;
+    if (listKind === 'habits') patchHabitRow(item);
+    else patchTaskRow(item);
+    setBanner(`Не удалось изменить: ${err.message || err}`);
+  } finally {
+    pendingIds.delete(item.id);
+  }
+}
+
+async function removeItem(listKind, item) {
+  if (!guardMutate('удалить задачу')) return;
+  if (pendingIds.has(item.id)) return;
+  const label = listKind === 'habits' ? 'привычку' : 'задачу';
+  if (!window.confirm(`Удалить ${label} «${item.title}»?`)) return;
+
+  pendingIds.add(item.id);
+  const listKey = listKind === 'habits' ? 'habits' : 'tasks';
+  const prevList = state[listKey].slice();
+  state[listKey] = prevList.filter((i) => i.id !== item.id);
+
+  const listEl = listKind === 'habits' ? listHabits : listTasks;
+  const row = rowById(listEl, item.id);
+  if (row) row.remove();
+  if (!state[listKey].length) {
+    listEl.innerHTML =
+      listKind === 'habits'
+        ? '<li class="empty">Нет привычек. Добавьте ниже или создайте список «Habits».</li>'
+        : '<li class="empty">Нет задач. Добавьте ниже или создайте список Google Tasks.</li>';
+  }
+
+  try {
+    await window.widgetApi.deleteItem(listKind, item.id);
+  } catch (err) {
+    state[listKey] = prevList;
+    if (listKind === 'habits') renderHabits();
+    else renderTasks();
+    setBanner(`Не удалось удалить: ${err.message || err}`);
+  } finally {
+    pendingIds.delete(item.id);
+  }
+}
+
+function beginInlineEdit(listKind, item, row) {
+  if (!row || row.classList.contains('is-editing')) return;
+  if (!guardMutate('изменить задачу')) return;
+
+  const titleEl = row.querySelector('.row-title');
+  if (!titleEl) return;
+  row.classList.add('is-editing');
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'row-title-edit';
+  input.maxLength = 200;
+  input.value = item.title;
+  input.setAttribute('aria-label', 'Новое название');
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let finished = false;
+  const finish = async (save) => {
+    if (finished) return;
+    finished = true;
+    row.classList.remove('is-editing');
+    const next = document.createElement('div');
+    next.className = 'row-title';
+    const value = String(input.value || '').trim();
+    next.textContent = save && value ? value : item.title;
+    if (input.parentNode) input.replaceWith(next);
+    if (save && value && value !== item.title) await renameItem(listKind, item, value);
+    else next.textContent = item.title;
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(true);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => {
+    finish(true);
+  });
+  input.addEventListener('click', (e) => e.stopPropagation());
+}
+
+/** @type {{ listKind: 'tasks' | 'habits', itemId: string } | null} */
+let ctxMenuTarget = null;
+let ctxMenuEl = null;
+
+function ensureCtxMenu() {
+  if (ctxMenuEl) return ctxMenuEl;
+  ctxMenuEl = document.createElement('div');
+  ctxMenuEl.id = 'rowCtxMenu';
+  ctxMenuEl.className = 'ctx-menu';
+  ctxMenuEl.hidden = true;
+  ctxMenuEl.setAttribute('role', 'menu');
+  ctxMenuEl.innerHTML =
+    '<button type="button" class="ctx-menu-item" role="menuitem" data-action="edit">' +
+      '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.2 4.8l5 5M4 20l1.4-5.2L15 5.2l3.8 3.8L9.2 18.6 4 20z"/></svg>' +
+      '<span>Изменить</span>' +
+    '</button>' +
+    '<button type="button" class="ctx-menu-item danger" role="menuitem" data-action="delete">' +
+      '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M10 11v6M14 11v6M6 7l1 12h10l1-12"/></svg>' +
+      '<span>Удалить</span>' +
+    '</button>';
+  document.body.appendChild(ctxMenuEl);
+
+  ctxMenuEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('.ctx-menu-item[data-action]');
+    if (!btn || !ctxMenuTarget) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const { listKind, itemId } = ctxMenuTarget;
+    const items = listKind === 'habits' ? state.habits : state.tasks;
+    const item = items.find((i) => i.id === itemId);
+    const listEl = listKind === 'habits' ? listHabits : listTasks;
+    const row = item ? rowById(listEl, item.id) : null;
+    hideCtxMenu();
+    if (!item) return;
+    if (btn.dataset.action === 'edit') beginInlineEdit(listKind, item, row);
+    else if (btn.dataset.action === 'delete') removeItem(listKind, item);
+  });
+
+  return ctxMenuEl;
+}
+
+function hideCtxMenu() {
+  if (!ctxMenuEl || ctxMenuEl.hidden) return;
+  ctxMenuEl.hidden = true;
+  ctxMenuTarget = null;
+}
+
+function showCtxMenu(listKind, item, e) {
+  const menu = ensureCtxMenu();
+  ctxMenuTarget = { listKind, itemId: item.id };
+  menu.hidden = false;
+
+  // Measure off-screen then clamp into viewport
+  menu.style.left = '0px';
+  menu.style.top = '0px';
+  const { width, height } = menu.getBoundingClientRect();
+  const pad = 8;
+  const x = Math.min(e.clientX, window.innerWidth - width - pad);
+  const y = Math.min(e.clientY, window.innerHeight - height - pad);
+  menu.style.left = `${Math.max(pad, x)}px`;
+  menu.style.top = `${Math.max(pad, y)}px`;
+}
+
+function handleRowContextMenu(listKind, e) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.target.closest('.row-title-edit')) {
+    hideCtxMenu();
+    return;
+  }
+  const listEl = listKind === 'habits' ? listHabits : listTasks;
+  const li = e.target.closest('li.row[data-id]');
+  if (!li || !listEl.contains(li) || li.classList.contains('is-editing')) {
+    hideCtxMenu();
+    return;
+  }
+  const items = listKind === 'habits' ? state.habits : state.tasks;
+  const item = items.find((i) => i.id === li.dataset.id);
+  if (!item) {
+    hideCtxMenu();
+    return;
+  }
+  showCtxMenu(listKind, item, e);
+}
+
+async function applyWallpaperPalette({ persistAuto } = {}) {
+  if (!window.widgetApi?.sampleWallpaperPalette) {
+    setBanner('Палитра с обоев недоступна.');
+    return;
+  }
+  try {
+    if (persistAuto) {
+      patchSettings({ autoPalette: true });
+      await flushSettingsWrites();
+    }
+    const result = await window.widgetApi.sampleWallpaperPalette();
+    if (result && result.accent) {
+      state.accentColor = result.accent;
+      lastAccent = '';
+      applyAccent(result.accent);
+      patchSettings({ accentColor: result.accent });
+      setBanner('');
+    }
+  } catch (err) {
+    setBanner(`Палитра: ${err.message || err}`);
+    if (optAutoPalette) optAutoPalette.checked = Boolean(settings.autoPalette);
+  }
+}
+
+async function onAutoPaletteChange() {
+  const enabled = Boolean(optAutoPalette?.checked);
+  if (enabled) {
+    await applyWallpaperPalette({ persistAuto: true });
+    return;
+  }
+  patchSettings({ autoPalette: false, accentColor: null });
+  lastAccent = '';
+  state.accentColor = configAccent;
+  applyAccent(configAccent);
+}
+
 async function onAuthClick() {
   if (!window.widgetApi || addBusy) return;
+  if (state.mode !== 'google' && !state.offline && credentials && !credentials.configured) {
+    syncCredentialsForm({ open: true, fromSettings: true });
+    return;
+  }
   addBusy = true;
   try {
     if (state.mode === 'google' || state.offline) {
@@ -580,6 +1017,75 @@ async function onAuthClick() {
   }
 }
 
+async function onSaveCredentials() {
+  if (!window.widgetApi || addBusy) return;
+  const clientId = (inputClientId?.value || '').trim();
+  const clientSecret = (inputClientSecret?.value || '').trim();
+  const redirectPort = Number(inputRedirectPort?.value || 42813);
+  if (!clientId) {
+    setOnboardingError('Укажите Client ID');
+    return;
+  }
+  if (!clientSecret && !credentials?.configured) {
+    setOnboardingError('Укажите Client Secret');
+    return;
+  }
+  addBusy = true;
+  if (btnSaveCredentials) btnSaveCredentials.disabled = true;
+  if (btnSkipCredentials) btnSkipCredentials.disabled = true;
+  setOnboardingError('');
+  try {
+    const result = await window.widgetApi.saveCredentials({
+      clientId,
+      clientSecret,
+      redirectPort,
+    });
+    credentials = result.credentials || credentials;
+    if (result.settings) settings = result.settings;
+    if (result.data) state = result.data;
+    syncCredentialsForm({ open: false });
+    syncSettingsUi();
+    renderAll();
+    setBanner(
+      state.mode === 'needs_auth'
+        ? 'Ключи сохранены — нажмите Google для входа.'
+        : 'Ключи сохранены.'
+    );
+  } catch (err) {
+    setOnboardingError(err.message || String(err));
+  } finally {
+    addBusy = false;
+    if (btnSaveCredentials) btnSaveCredentials.disabled = false;
+    if (btnSkipCredentials) btnSkipCredentials.disabled = false;
+  }
+}
+
+async function onSkipCredentials() {
+  if (!window.widgetApi || addBusy) return;
+  if (credentialsFromSettings) {
+    syncCredentialsForm({ open: false });
+    return;
+  }
+  addBusy = true;
+  if (btnSaveCredentials) btnSaveCredentials.disabled = true;
+  if (btnSkipCredentials) btnSkipCredentials.disabled = true;
+  try {
+    const result = await window.widgetApi.skipCredentials();
+    credentials = result.credentials || credentials;
+    if (result.settings) settings = result.settings;
+    if (result.data) state = result.data;
+    syncCredentialsForm({ open: false });
+    syncSettingsUi();
+    renderAll();
+  } catch (err) {
+    setOnboardingError(err.message || String(err));
+  } finally {
+    addBusy = false;
+    if (btnSaveCredentials) btnSaveCredentials.disabled = false;
+    if (btnSkipCredentials) btnSkipCredentials.disabled = false;
+  }
+}
+
 async function bootstrap() {
   if (!window.widgetApi) {
     setBanner('Запустите через Electron (npm start), не открывайте HTML напрямую.');
@@ -591,13 +1097,21 @@ async function bootstrap() {
       const boot = await window.widgetApi.bootstrap();
       settings = boot.settings || settings;
       state = boot.data || state;
+      credentials = boot.credentials || null;
+      if (state.defaultAccent) configAccent = state.defaultAccent;
+      else if (!settings.autoPalette && state.accentColor) configAccent = state.accentColor;
       syncSettingsUi();
       renderAll();
+      maybeShowFirstRunOnboarding();
       return;
     }
     settings = await window.widgetApi.getSettings();
+    if (window.widgetApi.getCredentialsStatus) {
+      credentials = await window.widgetApi.getCredentialsStatus();
+    }
     syncSettingsUi();
     await loadData();
+    maybeShowFirstRunOnboarding();
   } catch (err) {
     syncSettingsUi();
     setBanner(`Ошибка загрузки: ${err.message || err}`);
@@ -606,18 +1120,37 @@ async function bootstrap() {
 
 // Event delegation — one listener per list instead of N per-row handlers
 listTasks.addEventListener('click', (e) => {
+  hideCtxMenu();
+  if (e.target.closest('.row-title-edit')) return;
   const li = e.target.closest('li.row[data-id]');
-  if (!li || !listTasks.contains(li)) return;
+  if (!li || !listTasks.contains(li) || li.classList.contains('is-editing')) return;
   const item = state.tasks.find((t) => t.id === li.dataset.id);
   if (item) toggleItem('tasks', item);
 });
 
 listHabits.addEventListener('click', (e) => {
+  hideCtxMenu();
+  if (e.target.closest('.row-title-edit')) return;
   const li = e.target.closest('li.row[data-id]');
-  if (!li || !listHabits.contains(li)) return;
+  if (!li || !listHabits.contains(li) || li.classList.contains('is-editing')) return;
   const item = state.habits.find((h) => h.id === li.dataset.id);
   if (item) toggleItem('habits', item);
 });
+
+listTasks.addEventListener('contextmenu', (e) => handleRowContextMenu('tasks', e));
+listHabits.addEventListener('contextmenu', (e) => handleRowContextMenu('habits', e));
+
+document.addEventListener('pointerdown', (e) => {
+  if (ctxMenuEl && !ctxMenuEl.hidden && !ctxMenuEl.contains(e.target)) hideCtxMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') hideCtxMenu();
+});
+window.addEventListener('blur', hideCtxMenu);
+window.addEventListener('resize', hideCtxMenu);
+panels?.addEventListener('scroll', hideCtxMenu, true);
+panelTasks?.addEventListener('scroll', hideCtxMenu);
+panelHabits?.addEventListener('scroll', hideCtxMenu);
 
 document.querySelectorAll('.tab, .dot').forEach((el) => {
   el.addEventListener('click', () => setView(el.dataset.view));
@@ -634,9 +1167,36 @@ document.querySelectorAll('.seg-btn').forEach((el) => {
 
 optAutostart.addEventListener('change', () => patchSettings({ autostart: optAutostart.checked }));
 optSnap.addEventListener('change', () => patchSettings({ snapToEdge: optSnap.checked }));
+if (optReminders) {
+  optReminders.addEventListener('change', () =>
+    patchSettings({ remindersEnabled: optReminders.checked })
+  );
+}
+if (optBgOpacity) {
+  optBgOpacity.addEventListener('input', () => {
+    const opacity = normalizeBgOpacity(Number(optBgOpacity.value) / 100);
+    patchSettings({ bgOpacity: opacity });
+  });
+}
+if (optAutoPalette) {
+  optAutoPalette.addEventListener('change', () => {
+    onAutoPaletteChange();
+  });
+}
+if (btnRefreshPalette) {
+  btnRefreshPalette.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    applyWallpaperPalette({ persistAuto: true });
+  });
+}
 
 btnSettings.addEventListener('click', (e) => {
   e.stopPropagation();
+  if (onboardingPanel && !onboardingPanel.hidden && !credentialsFromSettings) return;
+  if (onboardingPanel && !onboardingPanel.hidden && credentialsFromSettings) {
+    syncCredentialsForm({ open: false });
+  }
   setSettingsOpen(settingsPanel.hidden);
 });
 
@@ -644,6 +1204,7 @@ document.addEventListener('click', (e) => {
   if (settingsPanel.hidden) return;
   const t = e.target;
   if (settingsPanel.contains(t) || btnSettings.contains(t)) return;
+  if (onboardingPanel && !onboardingPanel.hidden && onboardingPanel.contains(t)) return;
   setSettingsOpen(false);
 });
 
@@ -651,6 +1212,32 @@ document.getElementById('btnMin').addEventListener('click', () => window.widgetA
 document.getElementById('btnClose').addEventListener('click', () => window.widgetApi?.close());
 document.getElementById('btnRefresh').addEventListener('click', () => loadData(true));
 btnAuth.addEventListener('click', onAuthClick);
+
+if (btnGoogleKeys) {
+  btnGoogleKeys.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    syncCredentialsForm({ open: true, fromSettings: true });
+  });
+}
+if (btnSaveCredentials) {
+  btnSaveCredentials.addEventListener('click', (e) => {
+    e.preventDefault();
+    onSaveCredentials();
+  });
+}
+if (btnSkipCredentials) {
+  btnSkipCredentials.addEventListener('click', (e) => {
+    e.preventDefault();
+    onSkipCredentials();
+  });
+}
+if (btnOpenConsole) {
+  btnOpenConsole.addEventListener('click', (e) => {
+    e.preventDefault();
+    window.widgetApi?.openExternal('https://console.cloud.google.com/apis/credentials');
+  });
+}
 
 document.getElementById('form-add-tasks').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -665,7 +1252,7 @@ const viewport = document.getElementById('viewport');
 let startX = 0;
 let swipeArmed = false;
 viewport.addEventListener('pointerdown', (e) => {
-  if (e.target.closest('.add-row, .settings-panel, button, input')) {
+  if (e.target.closest('.add-row, .settings-panel, .onboarding-panel, button, input')) {
     swipeArmed = false;
     return;
   }

@@ -5,6 +5,10 @@ data/streaks.json
 data/settings.json
 data/mock-items.json
 data/offline-cache.json
+data/credentials.json
+data/reminders.json
 dist/
+dist-*/
+dist-build/
 *.log
 .DS_Store

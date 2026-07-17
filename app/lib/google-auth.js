@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const { URL } = require('url');
-const { loadEnvFile, readJson, writeJson, dataPath, hasGoogleCredentials } = require('./config');
+const { loadEnvFile, readJson, writeSecretJson, dataPath, hasGoogleCredentials } = require('./config');
 
 const SCOPES = ['https://www.googleapis.com/auth/tasks'];
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
@@ -61,7 +61,7 @@ function loadSavedTokens() {
 }
 
 function saveTokens(tokens) {
-  writeJson(tokensFile(), tokens);
+  writeSecretJson(tokensFile(), tokens);
 }
 
 function clearTokens() {
@@ -71,7 +71,7 @@ function clearTokens() {
   try {
     if (fs.existsSync(file)) fs.unlinkSync(file);
   } catch {
-    writeJson(file, {});
+    writeSecretJson(file, {});
   }
 }
 

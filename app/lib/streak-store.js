@@ -143,10 +143,23 @@ function enrichHabits(habits) {
   });
 }
 
+/**
+ * Drop local streak history when a habit is deleted.
+ * @param {string} habitId
+ */
+function removeHabit(habitId) {
+  if (!habitId) return;
+  const store = loadStore();
+  if (!store.habits[habitId]) return;
+  delete store.habits[habitId];
+  saveStore(store);
+}
+
 module.exports = {
   todayIso,
   markCompleted,
   unmarkCompleted,
+  removeHabit,
   getHabitStats,
   enrichHabits,
   loadStore,

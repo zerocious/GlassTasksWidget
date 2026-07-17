@@ -18,7 +18,7 @@ npm install
 npm start
 ```
 
-Без файла `.env` виджет запускается в **mock-режиме** с демо-задачами и локальными стриками.
+При первом запуске без ключей виджет покажет **онбординг** (Client ID / Secret) или кнопку «Продолжить в демо». Ручной `.env` больше не обязателен для обычных пользователей — ключи сохраняются в `%APPDATA%\glass-tasks-widget\.env` (и `data/credentials.json`).
 
 ## Сборка установщика (.exe)
 
@@ -31,12 +31,16 @@ npm run dist
 
 Готовый установщик: `app\dist\Glass Tasks Widget-Setup-1.0.0.exe`
 
+После каждой сборки (`npm run dist` / `npm run pack`) ярлык на Desktop **обновляется автоматически**  
+(`scripts/update-desktop-shortcut.ps1` → `dist\win-unpacked\...` или установленный exe).
+
 Если ошибка `winCodeSign` / symbolic link — включите **Режим разработчика** Windows и повторите. В конфиге `signAndEditExecutable: false`. Если `app.asar` занят — закройте запущенный виджет и удалите `app\dist`, затем снова `npm run dist`.
 
 | Команда | Результат |
 |---------|-----------|
-| `npm run dist` | NSIS-установщик в `app/dist/` |
-| `npm run pack` | `app/dist/win-unpacked/` без инсталлятора |
+| `npm run dist` / `npm run build:win` | NSIS-установщик + автоярлык Desktop |
+| `npm run pack` / `npm run pack:desktop` | `app/dist/win-unpacked/` + автоярлык |
+| `npm run shortcut` | Только обновить ярлык |
 
 Установленная версия: `.env` и данные в `%APPDATA%\glass-tasks-widget\` (см. `.env.example` в ресурсах).
 
@@ -55,8 +59,10 @@ npm run dist
 |----------|----------|
 | Тема стекла | Тёмная / Светлая |
 | Размер | Обычный (380×460) / Компакт (300×360) |
+| Прозрачность фона | Слайдер плотности стекла (`bgOpacity`, по умолчанию ~72%) |
 | Автозапуск с Windows | `setLoginItemSettings` |
 | Прилипание к краю | После перетаскивания — к ближайшему краю (лево/право/верх) |
+| Напоминания | Windows toast: просроченные / на сегодня / незакрытые привычки (раз в ~45 мин, без повтора в тот же день) |
 
 ### Горячие клавиши
 
@@ -71,9 +77,10 @@ npm run dist
 
 1. Google Cloud → Tasks API → OAuth Desktop client.
 2. Списки с именами из `app/config.json` (`Tasks`, `Habits`).
-3. `Copy-Item .env.example .env` → вставьте Client ID/Secret → `npm start` → кнопка **Google**.
+3. При первом запуске введите Client ID / Secret в UI виджета (или Настройки → **Google API ключи**), затем кнопка **Google**.
+4. Альтернатива для разработчиков: `Copy-Item .env.example .env` → вставьте ключи → `npm start`.
 
-Токены: `app/data/tokens.json` (dev) или AppData (установка). Стрики: `streaks.json` (локально, не зависят от офлайн-кэша задач).
+Ключи: `%APPDATA%\glass-tasks-widget\.env` (установка) или `app/.env` / AppData в dev. Токены: `app/data/tokens.json` (dev) или AppData (установка). Стрики: `streaks.json` (локально).
 
 OAuth loopback использует **state** + **PKCE (S256)** против CSRF при входе.
 

@@ -1,8 +1,20 @@
 'use strict';
 
 const { getAuthorizedClient } = require('./google-auth');
-const { enrichHabits, markCompleted, unmarkCompleted, todayIso } = require('./streak-store');
-const { getMockPayload, addMockItem, setMockCompleted } = require('./mock-data');
+const {
+  enrichHabits,
+  markCompleted,
+  unmarkCompleted,
+  removeHabit,
+  todayIso,
+} = require('./streak-store');
+const {
+  getMockPayload,
+  addMockItem,
+  setMockCompleted,
+  updateMockItem,
+  deleteMockItem,
+} = require('./mock-data');
 const { loadConfig, hasGoogleCredentials } = require('./config');
 const {
   saveOfflineCache,
@@ -394,7 +406,7 @@ async function getWidgetData(opts = {}) {
 async function loginGoogle() {
   const config = loadConfig();
   if (!hasGoogleCredentials()) {
-    throw new Error('Добавьте GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET в файл .env');
+    throw new Error('Сначала сохраните Google Client ID и Secret в настройках виджета');
   }
   invalidateListCache();
   invalidatePayloadCache();
@@ -561,11 +573,119 @@ async function createItem(listKind, title) {
   return run;
 }
 
+async function updateItem(listKind, taskId, title) {
+  if (listKind !== 'tasks' && listKind !== 'habits') {
+    throw new Error('Некорректный тип списка');
+  }
+  if (typeof taskId !== 'string' || !taskId.trim()) {
+    throw new Error('Некорректный id задачи');
+  }
+  let trimmed = String(title || '').trim();
+  if (!trimmed) throw new Error('Введите название');
+  if (trimmed.length > MAX_TITLE_LEN) trimmed = trimmed.slice(0, MAX_TITLE_LEN);
+
+  const flightKey = `update:${listKind}:${taskId}`;
+  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
+
+  const run = (async () => {
+    const config = loadConfig();
+
+    if (!hasGoogleCredentials()) {
+      const result = updateMockItem(listKind, taskId, trimmed);
+      if (result.item) {
+        const item =
+          listKind === 'habits'
+            ? withHabits([result.item])[0]
+            : decorateTasks([result.item])[0];
+        result.item = item;
+        patchPayloadCache(listKind, taskId, { title: item.title, meta: item.meta });
+      } else {
+        invalidatePayloadCache();
+      }
+      return result;
+    }
+
+    const auth = await getAuthorizedClient({ interactive: false });
+    if (!auth) throw new Error('Не авторизован');
+
+    const tasksApi = getGoogle().tasks({ version: 'v1', auth });
+    const listName = listKind === 'habits' ? config.habitsListName : config.tasksListName;
+    const listId = await resolveListId(tasksApi, listName);
+    if (!listId) throw new Error(`Список «${listName}» не найден`);
+
+    await tasksApi.tasks.patch({
+      tasklist: listId,
+      task: taskId,
+      requestBody: { title: trimmed },
+    });
+
+    const itemPatch = { title: trimmed };
+    patchOfflineCache(listKind, taskId, itemPatch);
+    patchPayloadCache(listKind, taskId, itemPatch);
+
+    return { ok: true, mode: 'google', item: { id: taskId, title: trimmed } };
+  })().finally(() => {
+    mutationInFlight.delete(flightKey);
+  });
+
+  mutationInFlight.set(flightKey, run);
+  return run;
+}
+
+async function deleteItem(listKind, taskId) {
+  if (listKind !== 'tasks' && listKind !== 'habits') {
+    throw new Error('Некорректный тип списка');
+  }
+  if (typeof taskId !== 'string' || !taskId.trim()) {
+    throw new Error('Некорректный id задачи');
+  }
+
+  const flightKey = `delete:${listKind}:${taskId}`;
+  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
+
+  const run = (async () => {
+    const config = loadConfig();
+
+    if (!hasGoogleCredentials()) {
+      const result = deleteMockItem(listKind, taskId);
+      patchPayloadCache(listKind, taskId, null);
+      return result;
+    }
+
+    const auth = await getAuthorizedClient({ interactive: false });
+    if (!auth) throw new Error('Не авторизован');
+
+    const tasksApi = getGoogle().tasks({ version: 'v1', auth });
+    const listName = listKind === 'habits' ? config.habitsListName : config.tasksListName;
+    const listId = await resolveListId(tasksApi, listName);
+    if (!listId) throw new Error(`Список «${listName}» не найден`);
+
+    await tasksApi.tasks.delete({
+      tasklist: listId,
+      task: taskId,
+    });
+
+    if (listKind === 'habits') removeHabit(taskId);
+
+    patchOfflineCache(listKind, taskId, null);
+    patchPayloadCache(listKind, taskId, null);
+
+    return { ok: true, mode: 'google' };
+  })().finally(() => {
+    mutationInFlight.delete(flightKey);
+  });
+
+  mutationInFlight.set(flightKey, run);
+  return run;
+}
+
 module.exports = {
   getWidgetData,
   loginGoogle,
   setTaskCompleted,
   createItem,
+  updateItem,
+  deleteItem,
   invalidateListCache,
   invalidatePayloadCache,
   clearOfflineCache,
