@@ -519,11 +519,17 @@ async function runReminderCheck() {
   reminderCheckInFlight = true;
   try {
     const data = await getWidgetData();
+    // Re-check after await: user may have quit or disabled reminders mid-fetch.
+    if (isQuitting || !loadSettings().remindersEnabled) return;
+
     const candidates = collectReminderCandidates(data);
     const state = loadReminderState();
     const notified = new Set(state.notifiedIds);
     const fresh = candidates.filter((c) => !notified.has(c.id));
     if (!fresh.length) return;
+
+    // Persist before show so a slow toast / overlapping edge case cannot spam.
+    markNotified(fresh.map((c) => c.id));
 
     const { title, body } = formatReminderToast(fresh);
     const n = new Notification({
@@ -532,11 +538,11 @@ async function runReminderCheck() {
       silent: false,
     });
     n.on('click', () => {
+      if (isQuitting) return;
       showWidget();
       syncTrayMenu();
     });
     n.show();
-    markNotified(fresh.map((c) => c.id));
   } catch (err) {
     console.warn('[reminders]', err && err.message ? err.message : err);
   } finally {
@@ -557,6 +563,7 @@ function syncRemindersScheduler(enabled, opts = {}) {
     reminderStartupTimer = null;
     runReminderCheck();
   }, delay);
+  if (typeof reminderStartupTimer.unref === 'function') reminderStartupTimer.unref();
 
   reminderInterval = setInterval(() => {
     runReminderCheck();

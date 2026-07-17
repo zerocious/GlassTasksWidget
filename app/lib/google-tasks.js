@@ -323,7 +323,7 @@ function offlineFromCache(config, errMessage) {
 }
 
 /**
- * Serve warm memory payload when fresh; re-enrich habits for day-rollover correctness.
+ * Serve warm memory payload when fresh; re-enrich habits + task dueKind for day-rollover.
  */
 function fromPayloadCache() {
   if (!payloadCache) return null;
@@ -341,7 +341,14 @@ function fromPayloadCache() {
       meta: h.meta && h.meta !== 'Task' ? h.meta : 'Daily',
     }))
   );
-  const next = { ...p, habits, offline: false };
+  // Recompute dueKind/meta so midnight rollover is correct within the soft TTL.
+  const tasks = decorateTasks(
+    (p.tasks || []).map((t) => ({
+      ...t,
+      completed: Boolean(t.completed),
+    }))
+  );
+  const next = { ...p, tasks, habits, offline: false };
   setPayloadCache(next);
   return next;
 }
