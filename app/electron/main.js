@@ -20,6 +20,7 @@ const {
   setTaskCompleted,
   createItem,
   invalidateListCache,
+  invalidatePayloadCache,
   clearOfflineCache,
 } = require('../lib/google-tasks');
 const { clearTokens } = require('../lib/google-auth');
@@ -41,6 +42,8 @@ let isQuitting = false;
 let hotkeyState = { toggle: null, switchView: null, switchFallback: false };
 let moveSettleTimer = null;
 let applyingBounds = false;
+/** @type {boolean | null} */
+let trayMenuVisible = null;
 
 // Minimal 16×16 accent PNG (glass-tasks red square with check hint)
 const TRAY_PNG_BASE64 =
@@ -81,7 +84,7 @@ function scheduleMoveSettled() {
     if (applyingBounds) return;
     if (loadSettings().snapToEdge) snapToNearestEdge();
     else persistPosition();
-  }, 180);
+  }, 320);
 }
 
 function snapToNearestEdge() {
@@ -134,6 +137,18 @@ function applyWindowSize(size) {
   else persistPosition();
 }
 
+function isWidgetVisible() {
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+}
+
+function syncTrayMenu(force) {
+  if (!tray) return;
+  const visible = isWidgetVisible();
+  if (!force && trayMenuVisible === visible) return;
+  trayMenuVisible = visible;
+  tray.setContextMenu(buildTrayMenu());
+}
+
 function showWidget() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
@@ -142,13 +157,14 @@ function showWidget() {
   mainWindow.show();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.focus();
+  syncTrayMenu();
 }
 
 function hideWidget() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   persistPosition();
   mainWindow.hide();
-  if (tray) tray.setContextMenu(buildTrayMenu());
+  syncTrayMenu();
 }
 
 function sendToRenderer(channel) {
@@ -238,7 +254,7 @@ function settingsForRenderer() {
 }
 
 function buildTrayMenu() {
-  const visible = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+  const visible = isWidgetVisible();
   return Menu.buildFromTemplate([
     {
       label: visible ? 'Скрыть виджет' : 'Показать виджет',
@@ -278,14 +294,28 @@ function createTray() {
   const icon = createTrayIcon();
   tray = new Tray(icon);
   tray.setToolTip('Glass Tasks Widget');
-  tray.setContextMenu(buildTrayMenu());
+  syncTrayMenu(true);
   tray.on('click', () => {
-    if (tray) tray.setContextMenu(buildTrayMenu());
     showWidget();
   });
   tray.on('right-click', () => {
-    if (tray) tray.popUpContextMenu(buildTrayMenu());
+    syncTrayMenu(true);
+    if (tray) tray.popUpContextMenu();
   });
+}
+
+function clampPosToDisplays(x, y, width, height) {
+  const display = screen.getDisplayNearestPoint({ x, y });
+  const wa = display.workArea;
+  const margin = 8;
+  const maxX = wa.x + wa.width - width - margin;
+  const minX = wa.x + margin;
+  const minY = wa.y + margin;
+  const maxY = wa.y + wa.height - height - margin;
+  return {
+    x: Math.round(clamp(x, minX, Math.max(minX, maxX))),
+    y: Math.round(clamp(y, minY, Math.max(minY, maxY))),
+  };
 }
 
 function createWindow() {
@@ -314,12 +344,20 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: true,
+      spellcheck: false,
     },
   };
 
   if (settings.pos) {
-    opts.x = settings.pos.x;
-    opts.y = settings.pos.y;
+    const safe = clampPosToDisplays(
+      settings.pos.x,
+      settings.pos.y,
+      preset.width,
+      preset.height
+    );
+    opts.x = safe.x;
+    opts.y = safe.y;
   }
 
   mainWindow = new BrowserWindow(opts);
@@ -329,6 +367,7 @@ function createWindow() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     if (settings.snapToEdge) snapToNearestEdge();
     mainWindow.show();
+    syncTrayMenu();
   });
 
   mainWindow.on('moved', () => {
@@ -345,12 +384,15 @@ function createWindow() {
     if (!isQuitting) {
       e.preventDefault();
       hideWidget();
+      return;
     }
+    // Quit path: save bounds before the window is destroyed
+    persistPosition();
   });
 
   mainWindow.on('closed', () => {
-    persistPosition();
     mainWindow = null;
+    trayMenuVisible = null;
   });
 
   if (process.argv.includes('--dev')) {
@@ -393,9 +435,15 @@ function applySettingsPatch(patch) {
 }
 
 function registerIpc() {
-  ipcMain.handle('widget:get-data', async (event) => {
+  ipcMain.handle('widget:bootstrap', async (event) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    return getWidgetData();
+    const data = await getWidgetData();
+    return { settings: settingsForRenderer(), data };
+  });
+
+  ipcMain.handle('widget:get-data', async (event, opts) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    return getWidgetData(opts && typeof opts === 'object' ? opts : undefined);
   });
 
   ipcMain.handle('widget:login', async (event) => {
@@ -407,8 +455,9 @@ function registerIpc() {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
     clearTokens();
     invalidateListCache();
+    invalidatePayloadCache();
     clearOfflineCache();
-    return getWidgetData();
+    return getWidgetData({ force: true });
   });
 
   ipcMain.handle('widget:set-completed', async (event, payload) => {
@@ -458,7 +507,7 @@ if (!gotTheLock) {
 } else {
   app.on('second-instance', () => {
     showWidget();
-    if (tray) tray.setContextMenu(buildTrayMenu());
+    syncTrayMenu();
   });
 
   app.whenReady().then(() => {

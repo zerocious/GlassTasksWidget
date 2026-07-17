@@ -35,6 +35,9 @@ const SIZE_PRESETS = {
   compact: { width: 300, height: 360, minWidth: 280, minHeight: 300 },
 };
 
+/** @type {AppSettings | null} */
+let settingsCache = null;
+
 function settingsFile() {
   return dataPath('settings.json');
 }
@@ -45,10 +48,10 @@ function normalizeHotkey(value, fallback) {
 }
 
 /**
+ * @param {any} raw
  * @returns {AppSettings}
  */
-function loadSettings() {
-  const raw = readJson(settingsFile(), {});
+function normalizeSettings(raw) {
   const theme = raw.theme === 'light' ? 'light' : 'dark';
   const size = raw.size === 'compact' ? 'compact' : 'normal';
   let pos = null;
@@ -73,33 +76,41 @@ function loadSettings() {
 }
 
 /**
+ * @returns {AppSettings}
+ */
+function loadSettings() {
+  if (settingsCache) return settingsCache;
+  settingsCache = normalizeSettings(readJson(settingsFile(), {}));
+  return settingsCache;
+}
+
+/**
  * @param {Partial<AppSettings>} patch
  * @returns {AppSettings}
  */
 function saveSettings(patch) {
   const current = loadSettings();
-  const next = { ...current, ...patch };
+  const next = normalizeSettings({ ...current, ...patch });
 
-  next.theme = next.theme === 'light' ? 'light' : 'dark';
-  next.size = next.size === 'compact' ? 'compact' : 'normal';
-  next.autostart = Boolean(next.autostart);
-  next.snapToEdge = Boolean(next.snapToEdge);
-  next.toggleHotkey = normalizeHotkey(next.toggleHotkey, DEFAULT_TOGGLE_HOTKEY);
-  next.switchViewHotkey = normalizeHotkey(next.switchViewHotkey, DEFAULT_SWITCH_HOTKEY);
-
+  // Skip disk write when nothing meaningful changed (e.g. same pos after snap)
   if (
-    next.pos &&
-    typeof next.pos.x === 'number' &&
-    typeof next.pos.y === 'number' &&
-    Number.isFinite(next.pos.x) &&
-    Number.isFinite(next.pos.y)
+    next.theme === current.theme &&
+    next.size === current.size &&
+    next.autostart === current.autostart &&
+    next.snapToEdge === current.snapToEdge &&
+    next.toggleHotkey === current.toggleHotkey &&
+    next.switchViewHotkey === current.switchViewHotkey &&
+    ((next.pos === null && current.pos === null) ||
+      (next.pos &&
+        current.pos &&
+        next.pos.x === current.pos.x &&
+        next.pos.y === current.pos.y))
   ) {
-    next.pos = { x: Math.round(next.pos.x), y: Math.round(next.pos.y) };
-  } else {
-    next.pos = null;
+    return current;
   }
 
   writeJson(settingsFile(), next);
+  settingsCache = next;
   return next;
 }
 

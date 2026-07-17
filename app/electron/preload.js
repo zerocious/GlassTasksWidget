@@ -3,7 +3,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('widgetApi', {
-  getData: () => ipcRenderer.invoke('widget:get-data'),
+  bootstrap: () => ipcRenderer.invoke('widget:bootstrap'),
+  getData: (opts) => ipcRenderer.invoke('widget:get-data', opts || {}),
   login: () => ipcRenderer.invoke('widget:login'),
   logout: () => ipcRenderer.invoke('widget:logout'),
   setCompleted: (listKind, taskId, completed) =>

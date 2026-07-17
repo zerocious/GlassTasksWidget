@@ -4,11 +4,15 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const { URL } = require('url');
-const { google } = require('googleapis');
 const { loadEnvFile, readJson, writeJson, dataPath, hasGoogleCredentials } = require('./config');
 
 const SCOPES = ['https://www.googleapis.com/auth/tasks'];
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Lazy-load heavy googleapis only when OAuth is needed. */
+function getGoogle() {
+  return require('googleapis').google;
+}
 
 function randomUrlSafe(bytes = 32) {
   return crypto.randomBytes(bytes).toString('base64url');
@@ -44,6 +48,7 @@ function getOAuthClient() {
   }
   const port = Number(process.env.OAUTH_REDIRECT_PORT || 42813);
   const redirectUri = `http://127.0.0.1:${port}/oauth2callback`;
+  const google = getGoogle();
   return {
     oauth2: new google.auth.OAuth2(clientId, clientSecret, redirectUri),
     redirectUri,
@@ -179,6 +184,7 @@ function interactiveLogin(oauth2, port) {
         if (!code) {
           res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end('<h1>Нет кода авторизации</h1>');
+          finish(new Error('OAuth: нет кода авторизации'));
           return;
         }
         const { tokens } = await oauth2.getToken({ code, codeVerifier });

@@ -1,6 +1,5 @@
 'use strict';
 
-const { google } = require('googleapis');
 const { getAuthorizedClient } = require('./google-auth');
 const { enrichHabits, markCompleted, unmarkCompleted, todayIso } = require('./streak-store');
 const { getMockPayload, addMockItem, setMockCompleted } = require('./mock-data');
@@ -15,11 +14,22 @@ const {
 const MAX_TITLE_LEN = 200;
 
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000;
+/** Soft TTL for in-memory widget payload — avoids double network on rapid IPC. */
+const PAYLOAD_CACHE_TTL_MS = 45 * 1000;
 
 /** @type {{ at: number, byTitle: Map<string, string> } | null} */
 let listCache = null;
 /** @type {Promise<any> | null} */
 let dataInFlight = null;
+/** @type {{ at: number, payload: any } | null} */
+let payloadCache = null;
+/** @type {Map<string, Promise<any>>} */
+const mutationInFlight = new Map();
+
+/** Lazy-load heavy googleapis only on first Google API use. */
+function getGoogle() {
+  return require('googleapis').google;
+}
 
 function localDateKey(date = new Date()) {
   return todayIso(date);
@@ -31,7 +41,6 @@ function dueDateKey(due) {
   try {
     const d = new Date(due);
     if (Number.isNaN(d.getTime())) return null;
-    // Prefer UTC Y-M-D for typical Google all-day dues
     const y = d.getUTCFullYear();
     const m = String(d.getUTCMonth() + 1).padStart(2, '0');
     const day = String(d.getUTCDate()).padStart(2, '0');
@@ -112,7 +121,6 @@ function sortTasks(tasks) {
 function decorateTasks(tasks) {
   return sortTasks(
     tasks.map((t) => {
-      // Always recompute dueKind (offline cache may be from another day)
       const dueKind = dueKindFor(t.due, Boolean(t.completed));
       const meta =
         t.due || !t.meta
@@ -126,6 +134,52 @@ function decorateTasks(tasks) {
 
 function invalidateListCache() {
   listCache = null;
+}
+
+function invalidatePayloadCache() {
+  payloadCache = null;
+}
+
+function setPayloadCache(payload) {
+  if (!payload) {
+    payloadCache = null;
+    return;
+  }
+  payloadCache = { at: Date.now(), payload };
+}
+
+function patchPayloadCache(listKind, taskId, patch, append = null) {
+  if (!payloadCache || !payloadCache.payload) return;
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  const prev = payloadCache.payload;
+  let list = Array.isArray(prev[key]) ? prev[key].slice() : [];
+  if (append) {
+    list = [append, ...list.filter((item) => item && item.id !== append.id)];
+    if (listKind === 'tasks') list = decorateTasks(list);
+    else list = withHabits(list);
+  } else if (patch === null) {
+    list = list.filter((item) => item && item.id !== taskId);
+  } else {
+    list = list.map((item) =>
+      item && item.id === taskId ? { ...item, ...patch } : item
+    );
+    if (listKind === 'tasks') list = decorateTasks(list);
+    else {
+      list = list
+        .map((h) => ({
+          ...h,
+          completed: Boolean(h.completedToday != null ? h.completedToday : h.completed),
+          status: (h.completedToday != null ? h.completedToday : h.completed)
+            ? 'completed'
+            : 'needsAction',
+        }))
+        .sort((a, b) => {
+          if (a.completed !== b.completed) return a.completed ? 1 : -1;
+          return String(a.title).localeCompare(String(b.title));
+        });
+    }
+  }
+  setPayloadCache({ ...prev, [key]: list, offline: false });
 }
 
 async function getListMap(tasksApi) {
@@ -160,16 +214,38 @@ async function listTasks(tasksApi, listId) {
   return decorateTasks(items.map(mapTask));
 }
 
+/**
+ * Habits are daily: UI "done" is local streak today, not Google's sticky completed status.
+ * Also re-sort without truncating — listTasks may have dropped "done" Google items.
+ */
 function withHabits(habitsRaw) {
   return enrichHabits(
     habitsRaw.map((h) => ({
       ...h,
       meta: h.meta && h.meta !== 'Task' ? h.meta : 'Daily',
     }))
-  ).map((h) => ({
-    ...h,
-    completed: h.completedToday || h.completed,
-  }));
+  )
+    .map((h) => ({
+      ...h,
+      completed: Boolean(h.completedToday),
+      status: h.completedToday ? 'completed' : 'needsAction',
+    }))
+    .sort((a, b) => {
+      if (a.completed !== b.completed) return a.completed ? 1 : -1;
+      return String(a.title).localeCompare(String(b.title));
+    });
+}
+
+/** List habits without the tasks "open + 5 done" truncation. */
+async function listHabitTasks(tasksApi, listId) {
+  if (!listId) return [];
+  const res = await tasksApi.tasks.list({
+    tasklist: listId,
+    showCompleted: true,
+    showHidden: false,
+    maxResults: 50,
+  });
+  return (res.data.items || []).map(mapTask);
 }
 
 async function fetchLivePayload(config) {
@@ -187,14 +263,14 @@ async function fetchLivePayload(config) {
     };
   }
 
-  const tasksApi = google.tasks({ version: 'v1', auth });
+  const tasksApi = getGoogle().tasks({ version: 'v1', auth });
   const listMap = await getListMap(tasksApi);
   const tasksListId = listMap.get(String(config.tasksListName || '').trim()) || null;
   const habitsListId = listMap.get(String(config.habitsListName || '').trim()) || null;
 
   const [tasks, habitsRawBase] = await Promise.all([
     listTasks(tasksApi, tasksListId),
-    listTasks(tasksApi, habitsListId),
+    listHabitTasks(tasksApi, habitsListId),
   ]);
 
   const habits = withHabits(habitsRawBase);
@@ -212,6 +288,7 @@ async function fetchLivePayload(config) {
   };
 
   saveOfflineCache(payload);
+  setPayloadCache(payload);
   return payload;
 }
 
@@ -233,11 +310,41 @@ function offlineFromCache(config, errMessage) {
   };
 }
 
-async function getWidgetDataUncached() {
+/**
+ * Serve warm memory payload when fresh; re-enrich habits for day-rollover correctness.
+ */
+function fromPayloadCache() {
+  if (!payloadCache) return null;
+  if (Date.now() - payloadCache.at > PAYLOAD_CACHE_TTL_MS) return null;
+  const p = payloadCache.payload;
+  if (!p || p.mode !== 'google' || p.offline) return null;
+  const habits = withHabits(
+    (p.habits || []).map((h) => ({
+      id: h.id,
+      title: h.title,
+      notes: h.notes || '',
+      due: h.due || null,
+      status: h.status || 'needsAction',
+      completed: false,
+      meta: h.meta && h.meta !== 'Task' ? h.meta : 'Daily',
+    }))
+  );
+  const next = { ...p, habits, offline: false };
+  setPayloadCache(next);
+  return next;
+}
+
+async function getWidgetDataUncached(force) {
+  if (!force) {
+    const warm = fromPayloadCache();
+    if (warm) return warm;
+  }
+
   const config = loadConfig();
   if (!hasGoogleCredentials()) {
     const mock = getMockPayload(config);
     mock.tasks = decorateTasks(mock.tasks);
+    setPayloadCache(mock);
     return mock;
   }
   try {
@@ -245,8 +352,10 @@ async function getWidgetDataUncached() {
   } catch (err) {
     console.error('Google Tasks fetch failed:', err.message);
     const offline = offlineFromCache(config, err.message);
-    if (offline) return offline;
-    // Credentials present but no cache — don't silently switch to demo mock
+    if (offline) {
+      setPayloadCache(offline);
+      return offline;
+    }
     return {
       mode: 'google',
       tasksListName: config.tasksListName,
@@ -262,9 +371,21 @@ async function getWidgetDataUncached() {
   }
 }
 
-async function getWidgetData() {
-  if (dataInFlight) return dataInFlight;
-  dataInFlight = getWidgetDataUncached().finally(() => {
+/**
+ * @param {{ force?: boolean }} [opts]
+ */
+async function getWidgetData(opts = {}) {
+  const force = Boolean(opts && opts.force);
+  if (dataInFlight && !force) return dataInFlight;
+  if (force && dataInFlight) {
+    // Wait for in-flight then force-refresh so callers don't race
+    try {
+      await dataInFlight;
+    } catch {
+      /* ignore */
+    }
+  }
+  dataInFlight = getWidgetDataUncached(force).finally(() => {
     dataInFlight = null;
   });
   return dataInFlight;
@@ -276,8 +397,26 @@ async function loginGoogle() {
     throw new Error('Добавьте GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET в файл .env');
   }
   invalidateListCache();
+  invalidatePayloadCache();
   await getAuthorizedClient({ interactive: true });
   return fetchLivePayload(config);
+}
+
+/**
+ * Find item fields from warm caches to avoid tasks.get before patch.
+ */
+function lookupCachedItem(listKind, taskId) {
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  const fromMem = payloadCache && payloadCache.payload && payloadCache.payload[key];
+  if (Array.isArray(fromMem)) {
+    const hit = fromMem.find((i) => i && i.id === taskId);
+    if (hit) return hit;
+  }
+  const offline = loadOfflineCache();
+  if (offline && Array.isArray(offline[key])) {
+    return offline[key].find((i) => i && i.id === taskId) || null;
+  }
+  return null;
 }
 
 async function setTaskCompleted(listKind, taskId, completed) {
@@ -288,63 +427,76 @@ async function setTaskCompleted(listKind, taskId, completed) {
     throw new Error('Некорректный id задачи');
   }
 
-  const config = loadConfig();
+  const flightKey = `set:${listKind}:${taskId}`;
+  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
 
-  if (!hasGoogleCredentials()) {
-    return setMockCompleted(listKind, taskId, completed);
-  }
+  const run = (async () => {
+    const config = loadConfig();
 
-  const auth = await getAuthorizedClient({ interactive: false });
-  if (!auth) throw new Error('Не авторизован');
+    if (!hasGoogleCredentials()) {
+      const result = setMockCompleted(listKind, taskId, completed);
+      invalidatePayloadCache();
+      return result;
+    }
 
-  const tasksApi = google.tasks({ version: 'v1', auth });
-  const listName = listKind === 'habits' ? config.habitsListName : config.tasksListName;
-  const listId = await resolveListId(tasksApi, listName);
-  if (!listId) throw new Error(`Список «${listName}» не найден`);
+    const auth = await getAuthorizedClient({ interactive: false });
+    if (!auth) throw new Error('Не авторизован');
 
-  const existing = await tasksApi.tasks.get({ tasklist: listId, task: taskId });
-  const body = {
-    id: existing.data.id,
-    title: existing.data.title,
-    notes: existing.data.notes,
-    status: completed ? 'completed' : 'needsAction',
-  };
-  if (existing.data.due) body.due = existing.data.due;
-  if (completed) body.completed = new Date().toISOString();
+    const tasksApi = getGoogle().tasks({ version: 'v1', auth });
+    const listName = listKind === 'habits' ? config.habitsListName : config.tasksListName;
+    const listId = await resolveListId(tasksApi, listName);
+    if (!listId) throw new Error(`Список «${listName}» не найден`);
 
-  await tasksApi.tasks.update({
-    tasklist: listId,
-    task: taskId,
-    requestBody: body,
+    const cached = lookupCachedItem(listKind, taskId);
+    const status = completed ? 'completed' : 'needsAction';
+
+    // Patch-only: skip redundant tasks.get (saves one round-trip per toggle)
+    const requestBody = { status };
+    if (completed) requestBody.completed = new Date().toISOString();
+
+    await tasksApi.tasks.patch({
+      tasklist: listId,
+      task: taskId,
+      requestBody,
+    });
+
+    let stats = null;
+    if (listKind === 'habits') {
+      stats = completed ? markCompleted(taskId) : unmarkCompleted(taskId);
+    }
+
+    const due = cached && cached.due ? cached.due : null;
+    const notes = cached && cached.notes ? cached.notes : '';
+    const dueKind = dueKindFor(due, completed);
+    const meta =
+      formatMeta({ due, notes, status }) ||
+      (completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
+
+    const itemPatch = {
+      status,
+      completed,
+      dueKind,
+      meta: listKind === 'habits' ? (cached && cached.meta) || 'Daily' : meta,
+      ...(stats
+        ? {
+            streak: stats.streak,
+            week: stats.week,
+            ring: stats.ring,
+            completedToday: stats.completedToday,
+          }
+        : {}),
+    };
+
+    patchOfflineCache(listKind, taskId, itemPatch);
+    patchPayloadCache(listKind, taskId, itemPatch);
+
+    return { ok: true, mode: 'google', stats };
+  })().finally(() => {
+    mutationInFlight.delete(flightKey);
   });
 
-  let stats = null;
-  if (listKind === 'habits') {
-    stats = completed ? markCompleted(taskId) : unmarkCompleted(taskId);
-  }
-
-  const dueKind = dueKindFor(existing.data.due || null, completed);
-  patchOfflineCache(listKind, taskId, {
-    status: body.status,
-    completed,
-    due: existing.data.due || null,
-    dueKind,
-    meta: formatMeta({
-      due: existing.data.due,
-      notes: existing.data.notes,
-      status: body.status,
-    }) || (completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task'),
-    ...(stats
-      ? {
-          streak: stats.streak,
-          week: stats.week,
-          ring: stats.ring,
-          completedToday: stats.completedToday,
-        }
-      : {}),
-  });
-
-  return { ok: true, mode: 'google', stats };
+  mutationInFlight.set(flightKey, run);
+  return run;
 }
 
 async function createItem(listKind, title) {
@@ -355,36 +507,58 @@ async function createItem(listKind, title) {
   if (!trimmed) throw new Error('Введите название');
   if (trimmed.length > MAX_TITLE_LEN) trimmed = trimmed.slice(0, MAX_TITLE_LEN);
 
-  const config = loadConfig();
+  const flightKey = `create:${listKind}:${trimmed.toLowerCase()}`;
+  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
 
-  if (!hasGoogleCredentials()) {
-    return addMockItem(listKind, trimmed);
-  }
+  const run = (async () => {
+    const config = loadConfig();
 
-  const auth = await getAuthorizedClient({ interactive: false });
-  if (!auth) throw new Error('Не авторизован');
+    if (!hasGoogleCredentials()) {
+      const result = addMockItem(listKind, trimmed);
+      if (result.item) {
+        const item =
+          listKind === 'habits'
+            ? withHabits([result.item])[0]
+            : decorateTasks([result.item])[0];
+        result.item = item;
+        patchPayloadCache(listKind, item.id, null, item);
+      } else {
+        invalidatePayloadCache();
+      }
+      return result;
+    }
 
-  const tasksApi = google.tasks({ version: 'v1', auth });
-  const listName = listKind === 'habits' ? config.habitsListName : config.tasksListName;
-  const listId = await resolveListId(tasksApi, listName);
-  if (!listId) throw new Error(`Список «${listName}» не найден`);
+    const auth = await getAuthorizedClient({ interactive: false });
+    if (!auth) throw new Error('Не авторизован');
 
-  const res = await tasksApi.tasks.insert({
-    tasklist: listId,
-    requestBody: {
-      title: trimmed,
-      status: 'needsAction',
-    },
+    const tasksApi = getGoogle().tasks({ version: 'v1', auth });
+    const listName = listKind === 'habits' ? config.habitsListName : config.tasksListName;
+    const listId = await resolveListId(tasksApi, listName);
+    if (!listId) throw new Error(`Список «${listName}» не найден`);
+
+    const res = await tasksApi.tasks.insert({
+      tasklist: listId,
+      requestBody: {
+        title: trimmed,
+        status: 'needsAction',
+      },
+    });
+
+    let mapped = mapTask(res.data);
+    if (listKind === 'habits') {
+      mapped = withHabits([mapped])[0];
+    }
+
+    patchOfflineCache(listKind, mapped.id, null, mapped);
+    patchPayloadCache(listKind, mapped.id, null, mapped);
+
+    return { ok: true, mode: 'google', item: mapped };
+  })().finally(() => {
+    mutationInFlight.delete(flightKey);
   });
 
-  const mapped = mapTask(res.data);
-  if (listKind === 'habits') {
-    mapped.meta = 'Daily';
-  }
-
-  patchOfflineCache(listKind, mapped.id, null, mapped);
-
-  return { ok: true, mode: 'google', item: mapped };
+  mutationInFlight.set(flightKey, run);
+  return run;
 }
 
 module.exports = {
@@ -393,5 +567,6 @@ module.exports = {
   setTaskCompleted,
   createItem,
   invalidateListCache,
+  invalidatePayloadCache,
   clearOfflineCache,
 };

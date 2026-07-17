@@ -45,9 +45,17 @@ let settings = {
 };
 
 let view = 'tasks';
-let busy = false;
+/** @type {Set<string>} */
+const pendingIds = new Set();
+let addBusy = false;
 /** @type {Promise<void> | null} */
 let loadInFlight = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let settingsWriteTimer = null;
+/** @type {Record<string, any>} */
+let settingsWritePending = {};
+let lastAccent = '';
+let lastIconView = '';
 
 function formatAccel(accel) {
   return String(accel || '')
@@ -91,8 +99,14 @@ function setSettingsOpen(open) {
   btnSettings.setAttribute('aria-expanded', String(open));
 }
 
-async function patchSettings(patch) {
-  if (!window.widgetApi) return;
+async function flushSettingsWrites() {
+  if (settingsWriteTimer) {
+    clearTimeout(settingsWriteTimer);
+    settingsWriteTimer = null;
+  }
+  const patch = settingsWritePending;
+  settingsWritePending = {};
+  if (!Object.keys(patch).length || !window.widgetApi) return;
   try {
     settings = await window.widgetApi.setSettings(patch);
     syncSettingsUi();
@@ -101,9 +115,34 @@ async function patchSettings(patch) {
   }
 }
 
+function patchSettings(patch) {
+  // Apply locally first for snappy UI
+  Object.assign(settings, patch);
+  if (patch.theme) applyTheme(patch.theme);
+  if (patch.size) applySize(patch.size);
+  if (typeof patch.autostart === 'boolean') optAutostart.checked = patch.autostart;
+  if (typeof patch.snapToEdge === 'boolean') optSnap.checked = patch.snapToEdge;
+
+  document.querySelectorAll('.seg-btn[data-setting="theme"]').forEach((el) => {
+    el.setAttribute('aria-pressed', String(el.dataset.value === settings.theme));
+  });
+  document.querySelectorAll('.seg-btn[data-setting="size"]').forEach((el) => {
+    el.setAttribute('aria-pressed', String(el.dataset.value === settings.size));
+  });
+
+  Object.assign(settingsWritePending, patch);
+  if (settingsWriteTimer) clearTimeout(settingsWriteTimer);
+  settingsWriteTimer = setTimeout(() => {
+    settingsWriteTimer = null;
+    flushSettingsWrites();
+  }, 120);
+}
+
 function applyAccent(hex) {
   if (!hex || typeof hex !== 'string') return;
   const accent = hex.trim();
+  if (accent === lastAccent) return;
+  lastAccent = accent;
   document.documentElement.style.setProperty('--accent', accent);
   document.documentElement.style.setProperty('--accent-soft', hexToRgba(accent, 0.22));
   document.documentElement.style.setProperty('--accent-glow', hexToRgba(accent, 0.35));
@@ -120,8 +159,22 @@ function hexToRgba(hex, a) {
   return `rgba(${r}, ${g}, ${b}, ${a})`;
 }
 
-function setView(next) {
+function updateSourceLabel() {
+  const listName = view === 'tasks' ? state.tasksListName : state.habitsListName;
+  const prefix =
+    state.mode === 'mock'
+      ? 'Demo'
+      : state.mode === 'needs_auth'
+        ? 'Google · вход'
+        : state.offline
+          ? 'Кэш'
+          : 'Google Tasks';
+  sourceLabel.textContent = `${prefix} · ${listName}`;
+}
+
+function setView(next, force) {
   if (next !== 'tasks' && next !== 'habits') return;
+  if (!force && next === view) return;
   view = next;
   panels.dataset.view = view;
 
@@ -136,17 +189,11 @@ function setView(next) {
   panelHabits.setAttribute('aria-hidden', String(view !== 'habits'));
 
   viewTitle.textContent = view === 'tasks' ? 'Tasks' : 'Habits';
-  const listName = view === 'tasks' ? state.tasksListName : state.habitsListName;
-  const prefix =
-    state.mode === 'mock'
-      ? 'Demo'
-      : state.mode === 'needs_auth'
-        ? 'Google · вход'
-        : state.offline
-          ? 'Кэш'
-          : 'Google Tasks';
-  sourceLabel.textContent = `${prefix} · ${listName}`;
-  viewIcon.innerHTML = icons[view];
+  updateSourceLabel();
+  if (lastIconView !== view) {
+    lastIconView = view;
+    viewIcon.innerHTML = icons[view];
+  }
 }
 
 function toggleView() {
@@ -168,82 +215,192 @@ function setBanner(text) {
   statusBanner.classList.add('visible');
 }
 
+function taskDueClass(task) {
+  if (task.completed) return '';
+  if (task.dueKind === 'overdue') return ' due-overdue';
+  if (task.dueKind === 'today') return ' due-today';
+  return '';
+}
+
+function buildTaskRow(task) {
+  const li = document.createElement('li');
+  li.className = `row${task.completed ? ' done' : ''}${taskDueClass(task)}`;
+  li.dataset.id = task.id;
+  li.innerHTML = `
+    <span class="check${task.completed ? ' done' : ''}" aria-hidden="true"></span>
+    <div class="row-body">
+      <div class="row-title"></div>
+      <div class="row-meta"></div>
+    </div>
+  `;
+  li.querySelector('.row-title').textContent = task.title;
+  li.querySelector('.row-meta').textContent = task.meta || '';
+  return li;
+}
+
+function buildHabitRow(habit) {
+  const week = habit.week || [false, false, false, false, false, false, false];
+  const streak = habit.streak || 0;
+  const ring = habit.ring != null ? habit.ring : 50;
+  const done = Boolean(habit.completed);
+
+  const li = document.createElement('li');
+  li.className = `row${done ? ' done' : ''}`;
+  li.dataset.id = habit.id;
+
+  const pills = week
+    .map(
+      (d, i) =>
+        `<span class="day-pill" style="--i:${i}" data-done="${d ? 'true' : 'false'}"></span>`
+    )
+    .join('');
+
+  li.innerHTML = `
+    <span class="ring" style="--p: ${ring}%" aria-hidden="true"></span>
+    <div class="row-body">
+      <div class="row-title"></div>
+      <div class="row-meta"></div>
+    </div>
+    <div class="streak" aria-label="Стрик ${streak} дней">
+      <div class="week-strip" aria-hidden="true">${pills}</div>
+      <span class="streak-badge">${streak} <span class="unit">дн.</span></span>
+    </div>
+  `;
+  li.querySelector('.row-title').textContent = habit.title;
+  li.querySelector('.row-meta').textContent = habit.meta || 'Daily';
+  return li;
+}
+
 function renderTasks() {
-  listTasks.innerHTML = '';
+  const frag = document.createDocumentFragment();
   if (!state.tasks.length) {
     listTasks.innerHTML = '<li class="empty">Нет задач. Добавьте ниже или создайте список Google Tasks.</li>';
     return;
   }
   for (const task of state.tasks) {
-    const li = document.createElement('li');
-    const dueClass =
-      !task.completed && task.dueKind === 'overdue'
-        ? ' due-overdue'
-        : !task.completed && task.dueKind === 'today'
-          ? ' due-today'
-          : '';
-    li.className = `row${task.completed ? ' done' : ''}${dueClass}`;
-    li.dataset.id = task.id;
-    li.innerHTML = `
-      <span class="check${task.completed ? ' done' : ''}" aria-hidden="true"></span>
-      <div class="row-body">
-        <div class="row-title"></div>
-        <div class="row-meta"></div>
-      </div>
-    `;
-    li.querySelector('.row-title').textContent = task.title;
-    li.querySelector('.row-meta').textContent = task.meta || '';
-    li.addEventListener('click', () => toggleItem('tasks', task));
-    listTasks.appendChild(li);
+    frag.appendChild(buildTaskRow(task));
   }
+  listTasks.replaceChildren(frag);
 }
 
 function renderHabits() {
-  listHabits.innerHTML = '';
+  const frag = document.createDocumentFragment();
   if (!state.habits.length) {
     listHabits.innerHTML = '<li class="empty">Нет привычек. Добавьте ниже или создайте список «Habits».</li>';
     return;
   }
   for (const habit of state.habits) {
-    const week = habit.week || [false, false, false, false, false, false, false];
-    const streak = habit.streak || 0;
-    const ring = habit.ring != null ? habit.ring : 50;
-    const done = Boolean(habit.completed);
-
-    const li = document.createElement('li');
-    li.className = `row${done ? ' done' : ''}`;
-    li.dataset.id = habit.id;
-
-    const pills = week
-      .map(
-        (d, i) =>
-          `<span class="day-pill" style="--i:${i}" data-done="${d ? 'true' : 'false'}"></span>`
-      )
-      .join('');
-
-    li.innerHTML = `
-      <span class="ring" style="--p: ${ring}%" aria-hidden="true"></span>
-      <div class="row-body">
-        <div class="row-title"></div>
-        <div class="row-meta"></div>
-      </div>
-      <div class="streak" aria-label="Стрик ${streak} дней">
-        <div class="week-strip" aria-hidden="true">${pills}</div>
-        <span class="streak-badge">${streak} <span class="unit">дн.</span></span>
-      </div>
-    `;
-    li.querySelector('.row-title').textContent = habit.title;
-    li.querySelector('.row-meta').textContent = habit.meta || 'Daily';
-    li.addEventListener('click', () => toggleItem('habits', habit));
-    listHabits.appendChild(li);
+    frag.appendChild(buildHabitRow(habit));
   }
+  listHabits.replaceChildren(frag);
+}
+
+function rowById(listEl, id) {
+  // Prefer getElementById-style scan; ids are Google/mock tokens without quotes
+  return listEl.querySelector(`li.row[data-id="${id.replace(/"/g, '')}"]`);
+}
+
+function syncListOrder(listEl, items) {
+  for (const item of items) {
+    const row = rowById(listEl, item.id);
+    if (row) listEl.appendChild(row);
+  }
+  for (const row of [...listEl.querySelectorAll('li.row')]) {
+    if (!items.some((it) => it.id === row.dataset.id)) row.remove();
+  }
+}
+
+function patchTaskRow(task) {
+  const empty = listTasks.querySelector('.empty');
+  if (empty) empty.remove();
+  let li = rowById(listTasks, task.id);
+  if (!li) {
+    li = buildTaskRow(task);
+    listTasks.appendChild(li);
+  } else {
+    li.className = `row${task.completed ? ' done' : ''}${taskDueClass(task)}`;
+    const check = li.querySelector('.check');
+    if (check) check.className = `check${task.completed ? ' done' : ''}`;
+    const title = li.querySelector('.row-title');
+    if (title) title.textContent = task.title;
+    const meta = li.querySelector('.row-meta');
+    if (meta) meta.textContent = task.meta || '';
+  }
+  syncListOrder(listTasks, state.tasks);
+  if (!state.tasks.length) {
+    listTasks.innerHTML = '<li class="empty">Нет задач. Добавьте ниже или создайте список Google Tasks.</li>';
+  }
+}
+
+function patchHabitRow(habit) {
+  const empty = listHabits.querySelector('.empty');
+  if (empty) empty.remove();
+  let li = rowById(listHabits, habit.id);
+  if (!li) {
+    li = buildHabitRow(habit);
+    listHabits.appendChild(li);
+  } else {
+    const done = Boolean(habit.completed);
+    li.className = `row${done ? ' done' : ''}`;
+    const ring = li.querySelector('.ring');
+    if (ring) ring.style.setProperty('--p', `${habit.ring != null ? habit.ring : 50}%`);
+    const title = li.querySelector('.row-title');
+    if (title) title.textContent = habit.title;
+    const meta = li.querySelector('.row-meta');
+    if (meta) meta.textContent = habit.meta || 'Daily';
+    const streakEl = li.querySelector('.streak');
+    if (streakEl) {
+      const streak = habit.streak || 0;
+      streakEl.setAttribute('aria-label', `Стрик ${streak} дней`);
+      const badge = streakEl.querySelector('.streak-badge');
+      if (badge) {
+        badge.textContent = '';
+        badge.appendChild(document.createTextNode(`${streak} `));
+        const unit = document.createElement('span');
+        unit.className = 'unit';
+        unit.textContent = 'дн.';
+        badge.appendChild(unit);
+      }
+      const week = habit.week || [false, false, false, false, false, false, false];
+      streakEl.querySelectorAll('.day-pill').forEach((pill, i) => {
+        pill.setAttribute('data-done', week[i] ? 'true' : 'false');
+      });
+    }
+  }
+  syncListOrder(listHabits, state.habits);
+  if (!state.habits.length) {
+    listHabits.innerHTML = '<li class="empty">Нет привычек. Добавьте ниже или создайте список «Habits».</li>';
+  }
+}
+
+function resortTasksLocal() {
+  const rank = { overdue: 0, today: 1, later: 2, null: 3, undefined: 3 };
+  const open = state.tasks.filter((t) => !t.completed);
+  const done = state.tasks.filter((t) => t.completed).slice(0, 5);
+  open.sort((a, b) => {
+    const ra = rank[a.dueKind] ?? 3;
+    const rb = rank[b.dueKind] ?? 3;
+    if (ra !== rb) return ra - rb;
+    const da = a.due || '';
+    const db = b.due || '';
+    if (da !== db) return da < db ? -1 : 1;
+    return String(a.title).localeCompare(String(b.title));
+  });
+  state.tasks = [...open, ...done];
+}
+
+function resortHabitsLocal() {
+  state.habits.sort((a, b) => {
+    if (a.completed !== b.completed) return a.completed ? 1 : -1;
+    return String(a.title).localeCompare(String(b.title));
+  });
 }
 
 function renderAll() {
   applyAccent(state.accentColor);
   renderTasks();
   renderHabits();
-  setView(view);
+  setView(view, true);
 
   offlinePill.hidden = !state.offline;
 
@@ -269,7 +426,7 @@ function renderAll() {
   btnAuth.textContent = state.mode === 'google' || state.offline ? 'Выйти' : 'Google';
 }
 
-async function loadData() {
+async function loadData(force) {
   if (!window.widgetApi) {
     setBanner('Запустите через Electron (npm start), не открывайте HTML напрямую.');
     return;
@@ -277,7 +434,7 @@ async function loadData() {
   if (loadInFlight) return loadInFlight;
   loadInFlight = (async () => {
     try {
-      state = await window.widgetApi.getData();
+      state = await window.widgetApi.getData(force ? { force: true } : {});
       renderAll();
     } catch (err) {
       setBanner(`Ошибка загрузки: ${err.message || err}`);
@@ -299,12 +456,12 @@ function applyHabitStats(item, stats) {
 }
 
 async function toggleItem(listKind, item) {
-  if (busy || !window.widgetApi) return;
+  if (!window.widgetApi || pendingIds.has(item.id)) return;
   if (state.offline && state.mode === 'google') {
     setBanner('Офлайн: нельзя изменить задачу в Google. Обновите, когда сеть появится.');
     return;
   }
-  busy = true;
+  pendingIds.add(item.id);
   const prevCompleted = Boolean(item.completed);
   const prevSnapshot =
     listKind === 'habits'
@@ -315,41 +472,70 @@ async function toggleItem(listKind, item) {
           completedToday: item.completedToday,
           status: item.status,
         }
-      : { status: item.status, meta: item.meta };
+      : { status: item.status, meta: item.meta, dueKind: item.dueKind };
 
   const next = !prevCompleted;
   item.completed = next;
   item.status = next ? 'completed' : 'needsAction';
   if (listKind === 'tasks') {
     item.meta = next ? 'Done' : item.meta === 'Done' ? 'Task' : item.meta;
+    item.dueKind = next ? null : item.dueKind;
+    resortTasksLocal();
+    patchTaskRow(item);
+  } else {
+    // Optimistic habit: flip today pill / ring lightly before server stats
+    if (Array.isArray(item.week) && item.week.length) {
+      item.week = item.week.slice();
+      item.week[item.week.length - 1] = next;
+      item.ring = Math.round((item.week.filter(Boolean).length / 7) * 100);
+    }
+    item.completedToday = next;
+    item.streak = next ? (item.streak || 0) + (prevCompleted ? 0 : 1) : Math.max(0, (item.streak || 1) - 1);
+    resortHabitsLocal();
+    patchHabitRow(item);
   }
-  if (listKind === 'habits') renderHabits();
-  else renderTasks();
 
   try {
     const result = await window.widgetApi.setCompleted(listKind, item.id, next);
     if (listKind === 'habits' && result && result.stats) {
       applyHabitStats(item, result.stats);
-      renderHabits();
+      resortHabitsLocal();
+      patchHabitRow(item);
     }
   } catch (err) {
     item.completed = prevCompleted;
     if (listKind === 'habits') {
       Object.assign(item, prevSnapshot);
-      renderHabits();
+      resortHabitsLocal();
+      patchHabitRow(item);
     } else {
       item.status = prevSnapshot.status;
       item.meta = prevSnapshot.meta;
-      renderTasks();
+      item.dueKind = prevSnapshot.dueKind;
+      resortTasksLocal();
+      patchTaskRow(item);
     }
     setBanner(`Не удалось обновить: ${err.message || err}`);
   } finally {
-    busy = false;
+    pendingIds.delete(item.id);
+  }
+}
+
+function insertCreatedItem(listKind, item) {
+  if (!item || !item.id) return;
+  if (listKind === 'habits') {
+    state.habits = [item, ...state.habits.filter((h) => h.id !== item.id)];
+    resortHabitsLocal();
+    patchHabitRow(item);
+  } else {
+    state.tasks = [item, ...state.tasks.filter((t) => t.id !== item.id)];
+    resortTasksLocal();
+    patchTaskRow(item);
   }
 }
 
 async function onAddSubmit(listKind, input) {
-  if (busy || !window.widgetApi) return;
+  if (addBusy || !window.widgetApi) return;
   const title = String(input.value || '').trim();
   if (!title) return;
   if (state.offline && state.mode === 'google') {
@@ -360,21 +546,25 @@ async function onAddSubmit(listKind, input) {
     setBanner('Сначала войдите через Google.');
     return;
   }
-  busy = true;
+  addBusy = true;
   try {
-    await window.widgetApi.createItem(listKind, title);
+    const result = await window.widgetApi.createItem(listKind, title);
     input.value = '';
-    await loadData();
+    if (result && result.item) {
+      insertCreatedItem(listKind, result.item);
+    } else {
+      await loadData(true);
+    }
   } catch (err) {
     setBanner(`Не удалось добавить: ${err.message || err}`);
   } finally {
-    busy = false;
+    addBusy = false;
   }
 }
 
 async function onAuthClick() {
-  if (!window.widgetApi || busy) return;
-  busy = true;
+  if (!window.widgetApi || addBusy) return;
+  addBusy = true;
   try {
     if (state.mode === 'google' || state.offline) {
       state = await window.widgetApi.logout();
@@ -386,22 +576,48 @@ async function onAuthClick() {
   } catch (err) {
     setBanner(`OAuth: ${err.message || err}`);
   } finally {
-    busy = false;
+    addBusy = false;
   }
 }
 
-async function initSettings() {
-  if (!window.widgetApi?.getSettings) {
+async function bootstrap() {
+  if (!window.widgetApi) {
+    setBanner('Запустите через Electron (npm start), не открывайте HTML напрямую.');
     syncSettingsUi();
     return;
   }
   try {
+    if (typeof window.widgetApi.bootstrap === 'function') {
+      const boot = await window.widgetApi.bootstrap();
+      settings = boot.settings || settings;
+      state = boot.data || state;
+      syncSettingsUi();
+      renderAll();
+      return;
+    }
     settings = await window.widgetApi.getSettings();
     syncSettingsUi();
-  } catch {
+    await loadData();
+  } catch (err) {
     syncSettingsUi();
+    setBanner(`Ошибка загрузки: ${err.message || err}`);
   }
 }
+
+// Event delegation — one listener per list instead of N per-row handlers
+listTasks.addEventListener('click', (e) => {
+  const li = e.target.closest('li.row[data-id]');
+  if (!li || !listTasks.contains(li)) return;
+  const item = state.tasks.find((t) => t.id === li.dataset.id);
+  if (item) toggleItem('tasks', item);
+});
+
+listHabits.addEventListener('click', (e) => {
+  const li = e.target.closest('li.row[data-id]');
+  if (!li || !listHabits.contains(li)) return;
+  const item = state.habits.find((h) => h.id === li.dataset.id);
+  if (item) toggleItem('habits', item);
+});
 
 document.querySelectorAll('.tab, .dot').forEach((el) => {
   el.addEventListener('click', () => setView(el.dataset.view));
@@ -433,7 +649,7 @@ document.addEventListener('click', (e) => {
 
 document.getElementById('btnMin').addEventListener('click', () => window.widgetApi?.minimize());
 document.getElementById('btnClose').addEventListener('click', () => window.widgetApi?.close());
-document.getElementById('btnRefresh').addEventListener('click', () => loadData());
+document.getElementById('btnRefresh').addEventListener('click', () => loadData(true));
 btnAuth.addEventListener('click', onAuthClick);
 
 document.getElementById('form-add-tasks').addEventListener('submit', (e) => {
@@ -479,5 +695,5 @@ if (window.widgetApi?.onFocusAdd) {
   window.widgetApi.onFocusAdd(() => focusAddInput());
 }
 
-setView('tasks');
-initSettings().then(() => loadData());
+setView('tasks', true);
+bootstrap();

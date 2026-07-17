@@ -5,6 +5,9 @@ const { readJson, writeJson, dataPath } = require('./config');
 /** @typedef {{ dates: string[] }} HabitHistory */
 /** @typedef {{ habits: Record<string, HabitHistory> }} StreakStore */
 
+/** @type {StreakStore | null} */
+let storeCache = null;
+
 function streaksFile() {
   return dataPath('streaks.json');
 }
@@ -24,13 +27,16 @@ function addDaysIso(iso, delta) {
 }
 
 function loadStore() {
+  if (storeCache) return storeCache;
   /** @type {StreakStore} */
   const store = readJson(streaksFile(), { habits: {} });
   if (!store.habits || typeof store.habits !== 'object') store.habits = {};
+  storeCache = store;
   return store;
 }
 
 function saveStore(store) {
+  storeCache = store;
   writeJson(streaksFile(), store);
 }
 
@@ -89,8 +95,7 @@ function computeStreak(dates, today = todayIso()) {
 }
 
 /**
- * Last 7 days Mon→Sun or rolling last 7 including today?
- * Demo uses a week strip of 7 pills — we use rolling last 7 days ending today (index 6 = today).
+ * Last 7 days rolling ending today (index 6 = today).
  * @param {string[]} dates
  * @param {string} today
  */

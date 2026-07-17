@@ -2,6 +2,9 @@
 
 const { readJson, writeJson, dataPath } = require('./config');
 
+/** @type {object | null | undefined} undefined = not loaded yet */
+let memoryCache = undefined;
+
 function cacheFile() {
   return dataPath('offline-cache.json');
 }
@@ -23,6 +26,7 @@ function saveOfflineCache(payload) {
     tasks: payload.tasks || [],
     habits: payload.habits || [],
   };
+  memoryCache = slim;
   writeJson(cacheFile(), slim);
 }
 
@@ -30,12 +34,18 @@ function saveOfflineCache(payload) {
  * @returns {object | null}
  */
 function loadOfflineCache() {
+  if (memoryCache !== undefined) return memoryCache;
   const raw = readJson(cacheFile(), null);
-  if (!raw || !Array.isArray(raw.tasks) || !Array.isArray(raw.habits)) return null;
+  if (!raw || !Array.isArray(raw.tasks) || !Array.isArray(raw.habits)) {
+    memoryCache = null;
+    return null;
+  }
+  memoryCache = raw;
   return raw;
 }
 
 function clearOfflineCache() {
+  memoryCache = null;
   const fs = require('fs');
   const file = cacheFile();
   try {
