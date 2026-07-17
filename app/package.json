@@ -1,0 +1,17 @@
+{
+  "name": "glass-tasks-widget",
+  "version": "1.0.0",
+  "description": "Glass Tasks ↔ Habits desktop widget powered by Google Tasks",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "electron": "^33.2.0",
+    "googleapis": "^144.0.0",
+    "open": "^8.4.2"
+  }
+}

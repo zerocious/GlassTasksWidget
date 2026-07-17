@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;" />
+  <title>Glass Tasks Widget</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <article class="widget" aria-label="Tasks and Habits widget">
+    <div class="widget-inner">
+      <header class="header">
+        <div class="title-row">
+          <div class="icon" id="viewIcon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M5 12l4 4L19 6"/></svg>
+          </div>
+          <h1 class="title" id="viewTitle">Tasks</h1>
+        </div>
+        <div class="header-right">
+          <div class="tabs" role="tablist" aria-label="Вид">
+            <button class="tab" role="tab" id="tab-tasks" aria-selected="true" data-view="tasks" type="button">Tasks</button>
+            <button class="tab" role="tab" id="tab-habits" aria-selected="false" data-view="habits" type="button">Habits</button>
+          </div>
+          <div class="win-controls">
+            <button class="win-btn" type="button" id="btnMin" title="Свернуть" aria-label="Свернуть">–</button>
+            <button class="win-btn close" type="button" id="btnClose" title="Закрыть" aria-label="Закрыть">×</button>
+          </div>
+        </div>
+      </header>
+
+      <div class="status-banner" id="statusBanner" role="status"></div>
+
+      <div class="viewport" id="viewport">
+        <div class="panels" id="panels" data-view="tasks">
+          <section class="panel" id="panel-tasks" role="tabpanel" aria-labelledby="tab-tasks">
+            <div class="section-label">Today</div>
+            <ul class="list" id="list-tasks"></ul>
+          </section>
+          <section class="panel" id="panel-habits" role="tabpanel" aria-labelledby="tab-habits" aria-hidden="true">
+            <div class="section-label">Today</div>
+            <ul class="list" id="list-habits"></ul>
+          </section>
+        </div>
+      </div>
+
+      <footer class="footer">
+        <span id="sourceLabel">Google Tasks · Tasks list</span>
+        <div class="footer-actions">
+          <button class="footer-btn" type="button" id="btnRefresh" title="Обновить">↻</button>
+          <button class="footer-btn" type="button" id="btnAuth" title="Google">Google</button>
+          <div class="dots" aria-label="Страницы">
+            <button class="dot" type="button" data-view="tasks" aria-current="true" aria-label="Tasks"></button>
+            <button class="dot" type="button" data-view="habits" aria-current="false" aria-label="Habits"></button>
+          </div>
+        </div>
+      </footer>
+    </div>
+  </article>
+
+  <script src="app.js"></script>
+</body>
+</html>

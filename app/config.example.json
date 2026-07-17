@@ -1,0 +1,11 @@
+{
+  "tasksListName": "Tasks",
+  "habitsListName": "Habits",
+  "accentColor": "#C4122E",
+  "window": {
+    "width": 380,
+    "height": 460,
+    "alwaysOnTop": true,
+    "skipTaskbar": true
+  }
+}
