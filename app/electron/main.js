@@ -336,7 +336,7 @@ function createWindow() {
     alwaysOnTop: winCfg.alwaysOnTop !== false,
     skipTaskbar: winCfg.skipTaskbar !== false,
     resizable: true,
-    hasShadow: true,
+    hasShadow: false,
     backgroundColor: '#00000000',
     show: false,
     webPreferences: {
