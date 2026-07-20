@@ -15,7 +15,6 @@ const {
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const { loadConfig, getGoogleCredentialsStatus, saveGoogleCredentials } = require('../lib/config');
 const {
@@ -32,6 +31,7 @@ const {
   resolveTaskDueAt,
   resetCompletedHabitsForNewDay,
 } = require('../lib/google-tasks');
+const { windowsToastsGloballyEnabled } = require('../lib/windows-toasts');
 const { clearTokens } = require('../lib/google-auth');
 const {
   loadSettings,
@@ -89,26 +89,6 @@ const EXACT_REMINDER_HORIZON_MS = 24 * 60 * 60 * 1000;
 // Windows toasts require a matching AppUserModelID before ready (and a Start Menu .lnk).
 if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID);
-}
-
-/**
- * HKCU PushNotifications\ToastEnabled — master switch in
- * Settings → System → Notifications. 0 blocks all Electron toasts.
- * @returns {boolean}
- */
-function windowsToastsGloballyEnabled() {
-  if (process.platform !== 'win32') return true;
-  try {
-    const out = execSync(
-      'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications" /v ToastEnabled',
-      { encoding: 'utf8', windowsHide: true }
-    );
-    const m = out.match(/ToastEnabled\s+REG_DWORD\s+0x([0-9a-fA-F]+)/i);
-    if (!m) return true;
-    return parseInt(m[1], 16) !== 0;
-  } catch {
-    return true;
-  }
 }
 
 // Minimal 16×16 accent PNG (glass-tasks red square with check hint)
@@ -1352,7 +1332,8 @@ function registerIpc() {
 
   ipcMain.handle('widget:move-item', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const { listKind, taskId, previousId, orderedIds } = payload || {};
+    if (!payload || typeof payload !== 'object') throw new Error('Invalid payload');
+    const { listKind, taskId, previousId, orderedIds } = payload;
     return moveItem(listKind, taskId, previousId || null, orderedIds || []);
   });
 

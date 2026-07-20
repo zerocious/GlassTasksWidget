@@ -8,6 +8,7 @@ const {
   removeHabit,
 } = require('./streak-store');
 const { readJson, writeJson, dataPath } = require('./config');
+const { reorderByIds } = require('./reorder-by-ids');
 
 function mockFile() {
   return dataPath('mock-items.json');
@@ -248,22 +249,7 @@ function reorderMockItems(listKind, orderedIds) {
   }
   const store = loadMockStore();
   const key = listKind === 'habits' ? 'habits' : 'tasks';
-  const byId = new Map();
-  for (const item of store[key] || []) {
-    if (item && item.id) byId.set(item.id, item);
-  }
-  const next = [];
-  const seen = new Set();
-  for (const id of orderedIds) {
-    if (typeof id !== 'string' || !id || seen.has(id)) continue;
-    const item = byId.get(id);
-    if (!item) continue;
-    next.push(item);
-    seen.add(id);
-  }
-  for (const item of store[key] || []) {
-    if (item && item.id && !seen.has(item.id)) next.push(item);
-  }
+  const next = reorderByIds(store[key] || [], orderedIds);
   if (!next.length) throw new Error('Элемент не найден');
   store[key] = next;
   saveMockStore(store);

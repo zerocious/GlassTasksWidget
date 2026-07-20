@@ -5,25 +5,10 @@
 const { app, Notification, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { windowsToastsGloballyEnabled } = require('../lib/windows-toasts');
 
 const APP_USER_MODEL_ID = 'com.glasstasks.widget';
 app.setAppUserModelId(APP_USER_MODEL_ID);
-
-function windowsToastsGloballyEnabled() {
-  if (process.platform !== 'win32') return true;
-  try {
-    const out = execSync(
-      'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications" /v ToastEnabled',
-      { encoding: 'utf8' }
-    );
-    const m = out.match(/ToastEnabled\s+REG_DWORD\s+0x([0-9a-fA-F]+)/);
-    if (!m) return true;
-    return parseInt(m[1], 16) !== 0;
-  } catch {
-    return true;
-  }
-}
 
 app.whenReady().then(async () => {
   const { loadSettings } = require('../lib/settings-store');
@@ -56,7 +41,7 @@ app.whenReady().then(async () => {
   }
 
   const settings = loadSettings();
-  const toastOs = windowsToastsGloballyEnabled();
+  const toastOs = windowsToastsGloballyEnabled({ bypassCache: true });
   const supported = Notification.isSupported();
 
   console.log(

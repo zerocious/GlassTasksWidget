@@ -26,8 +26,11 @@ const {
   patchOfflineCache,
   reorderOfflineCache,
 } = require('./offline-cache');
+const { reorderByIds, normalizeOrderedIds } = require('./reorder-by-ids');
 
 const MAX_TITLE_LEN = 200;
+/** Cap IPC reorder payloads (Google list page size is ≤100). */
+const MAX_ORDERED_IDS = 200;
 
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000;
 /** Soft TTL for in-memory widget payload — avoids double network on rapid IPC. */
@@ -285,25 +288,7 @@ function reorderPayloadCache(listKind, orderedIds, movedPatch = null) {
   const key = listKind === 'habits' ? 'habits' : 'tasks';
   const prev = payloadCache.payload;
   const list = Array.isArray(prev[key]) ? prev[key].slice() : [];
-  const byId = new Map();
-  for (const item of list) {
-    if (item && item.id) byId.set(item.id, item);
-  }
-  const next = [];
-  const seen = new Set();
-  for (const id of orderedIds) {
-    if (typeof id !== 'string' || !id || seen.has(id)) continue;
-    let item = byId.get(id);
-    if (!item) continue;
-    if (movedPatch && movedPatch.id === id) {
-      item = { ...item, ...movedPatch };
-    }
-    next.push(item);
-    seen.add(id);
-  }
-  for (const item of list) {
-    if (item && item.id && !seen.has(item.id)) next.push(item);
-  }
+  const next = reorderByIds(list, orderedIds, movedPatch);
   const ordered =
     listKind === 'tasks'
       ? decorateTasks(next)
@@ -996,21 +981,32 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
   if (typeof taskId !== 'string' || !taskId.trim()) {
     throw new Error('Некорректный id задачи');
   }
-  const ids = Array.isArray(orderedIds)
-    ? orderedIds.filter((id) => typeof id === 'string' && id)
-    : [];
-  if (!ids.length || !ids.includes(taskId)) {
+  const id = taskId.trim();
+  const ids = normalizeOrderedIds(orderedIds, MAX_ORDERED_IDS);
+  if (!ids.length || !ids.includes(id)) {
     throw new Error('Некорректный порядок');
   }
-  const prev =
-    previousId == null || previousId === ''
-      ? null
-      : String(previousId);
-  if (prev && prev === taskId) {
+
+  let prev = null;
+  if (previousId != null && previousId !== '') {
+    if (typeof previousId !== 'string') {
+      throw new Error('Некорректная позиция');
+    }
+    prev = previousId.trim();
+    if (!prev || prev === id || !ids.includes(prev)) {
+      throw new Error('Некорректная позиция');
+    }
+  }
+
+  // previousId must match the sibling immediately before taskId in orderedIds
+  // so Google move and local caches stay consistent.
+  const at = ids.indexOf(id);
+  const expectedPrev = at > 0 ? ids[at - 1] : null;
+  if (prev !== expectedPrev) {
     throw new Error('Некорректная позиция');
   }
 
-  const flightKey = `move:${listKind}:${taskId}`;
+  const flightKey = `move:${listKind}:${id}`;
   if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
 
   const run = (async () => {
@@ -1039,15 +1035,15 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
 
     const moveParams = {
       tasklist: listId,
-      task: taskId,
+      task: id,
     };
     if (prev) moveParams.previous = prev;
-    const cached = lookupCachedItem(listKind, taskId);
+    const cached = lookupCachedItem(listKind, id);
     if (cached && cached.parent) moveParams.parent = cached.parent;
 
     const res = await tasksApi.tasks.move(moveParams);
     const movedPatch = {
-      id: taskId,
+      id,
       position: (res && res.data && res.data.position) || '',
       parent: (res && res.data && res.data.parent) || null,
     };
