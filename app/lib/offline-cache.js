@@ -86,9 +86,39 @@ function patchOfflineCache(listKind, taskId, patch, append = null) {
   saveOfflineCache({ ...cached, mode: 'google', [key]: list });
 }
 
+/**
+ * Replace list order in offline cache (after Google tasks.move).
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string[]} orderedIds
+ */
+function reorderOfflineCache(listKind, orderedIds) {
+  const cached = loadOfflineCache();
+  if (!cached || !Array.isArray(orderedIds) || !orderedIds.length) return;
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  const list = Array.isArray(cached[key]) ? cached[key] : [];
+  const byId = new Map();
+  for (const item of list) {
+    if (item && item.id) byId.set(item.id, item);
+  }
+  const next = [];
+  const seen = new Set();
+  for (const id of orderedIds) {
+    if (typeof id !== 'string' || !id || seen.has(id)) continue;
+    const item = byId.get(id);
+    if (!item) continue;
+    next.push(item);
+    seen.add(id);
+  }
+  for (const item of list) {
+    if (item && item.id && !seen.has(item.id)) next.push(item);
+  }
+  saveOfflineCache({ ...cached, mode: 'google', [key]: next });
+}
+
 module.exports = {
   saveOfflineCache,
   loadOfflineCache,
   clearOfflineCache,
   patchOfflineCache,
+  reorderOfflineCache,
 };

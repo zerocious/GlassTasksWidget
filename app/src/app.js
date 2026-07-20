@@ -209,7 +209,7 @@ function setSettingsOpen(open) {
 }
 
 /**
- * @param {{ notificationsSupported?: boolean, remindersEnabled?: boolean } | null} [settings]
+ * @param {{ notificationsSupported?: boolean, windowsToastsEnabled?: boolean, remindersEnabled?: boolean } | null} [settings]
  * @param {{ forceShow?: boolean, tone?: 'error' | 'ok' | '', text?: string }} [opts]
  */
 function syncRemindersHint(settings, opts = {}) {
@@ -222,10 +222,12 @@ function syncRemindersHint(settings, opts = {}) {
     return;
   }
   const unsupported = settings && settings.notificationsSupported === false;
-  if (unsupported || opts.forceShow) {
+  const osDisabled = settings && settings.windowsToastsEnabled === false;
+  if (unsupported || osDisabled || opts.forceShow) {
     remindersHint.hidden = false;
-    remindersHint.textContent =
-      'Если тосты не появляются: Параметры Windows → Система → Уведомления — разрешите «Glass Tasks Widget». Отключите Фокусировку внимания (Focus Assist).';
+    remindersHint.textContent = osDisabled
+      ? 'Уведомления Windows выключены глобально. Параметры → Система → Уведомления — включите переключатель «Уведомления».'
+      : 'Если тосты не появляются: Параметры Windows → Система → Уведомления — разрешите «Glass Tasks Widget». Отключите Фокусировку внимания (Focus Assist).';
     remindersHint.classList.add('is-error');
     remindersHint.classList.remove('is-ok');
     return;
@@ -475,6 +477,9 @@ function buildTaskRow(task) {
   li.className = `row${task.completed ? ' done' : ''}${taskDueClass(task)}`;
   li.dataset.id = task.id;
   li.innerHTML = `
+    <button type="button" class="drag-handle" aria-label="Перетащить" tabindex="-1" title="Перетащить">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.2"/><circle cx="11" cy="4" r="1.2"/><circle cx="5" cy="8" r="1.2"/><circle cx="11" cy="8" r="1.2"/><circle cx="5" cy="12" r="1.2"/><circle cx="11" cy="12" r="1.2"/></svg>
+    </button>
     <span class="check${task.completed ? ' done' : ''}" aria-hidden="true"></span>
     <div class="row-body">
       <div class="row-title"></div>
@@ -503,6 +508,9 @@ function buildHabitRow(habit) {
     .join('');
 
   li.innerHTML = `
+    <button type="button" class="drag-handle" aria-label="Перетащить" tabindex="-1" title="Перетащить">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.2"/><circle cx="11" cy="4" r="1.2"/><circle cx="5" cy="8" r="1.2"/><circle cx="11" cy="8" r="1.2"/><circle cx="5" cy="12" r="1.2"/><circle cx="11" cy="12" r="1.2"/></svg>
+    </button>
     <span class="habit-icon" aria-hidden="true">${habitIconHtml(habit.title)}</span>
     <div class="row-body">
       <div class="row-title"></div>
@@ -621,29 +629,16 @@ function patchHabitRow(habit) {
 }
 
 function resortTasksLocal() {
-  const rank = { overdue: 0, today: 1, later: 2, null: 3, undefined: 3 };
+  // Preserve manual / Google position order; only partition open vs done.
   const open = state.tasks.filter((t) => !t.completed);
   const done = state.tasks.filter((t) => t.completed).slice(0, 5);
-  open.sort((a, b) => {
-    const ra = rank[a.dueKind] ?? 3;
-    const rb = rank[b.dueKind] ?? 3;
-    if (ra !== rb) return ra - rb;
-    const da = a.due || '';
-    const db = b.due || '';
-    if (da !== db) return da < db ? -1 : 1;
-    const ta = a.dueTime || '99:99';
-    const tb = b.dueTime || '99:99';
-    if (ta !== tb) return ta < tb ? -1 : 1;
-    return String(a.title).localeCompare(String(b.title));
-  });
   state.tasks = [...open, ...done];
 }
 
 function resortHabitsLocal() {
-  state.habits.sort((a, b) => {
-    if (a.completed !== b.completed) return a.completed ? 1 : -1;
-    return String(a.title).localeCompare(String(b.title));
-  });
+  const open = state.habits.filter((h) => !h.completed);
+  const done = state.habits.filter((h) => h.completed);
+  state.habits = [...open, ...done];
 }
 
 function renderAll() {
@@ -835,6 +830,243 @@ function guardMutate(actionLabel) {
   }
   return true;
 }
+
+/** @type {boolean} */
+let dndActive = false;
+/** @type {boolean} */
+let swipeArmed = false;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let dndClickBlockTimer = null;
+
+/**
+ * Pointer-based row reorder (drag handle). Avoids HTML5 DnD + window drag conflicts.
+ * @param {'tasks' | 'habits'} listKind
+ * @param {HTMLElement} listEl
+ */
+function bindListReorder(listKind, listEl) {
+  /** @type {{
+   *   pointerId: number,
+   *   row: HTMLElement,
+   *   ghost: HTMLElement,
+   *   indicator: HTMLElement,
+   *   startY: number,
+   *   offsetY: number,
+   *   fromIndex: number,
+   *   toIndex: number,
+   *   ids: string[],
+   *   moved: boolean,
+   * } | null} */
+  let session = null;
+
+  function clearDropIndicator() {
+    listEl.querySelectorAll('.row.drop-before, .row.drop-after').forEach((el) => {
+      el.classList.remove('drop-before', 'drop-after');
+    });
+  }
+
+  function rowIds() {
+    return [...listEl.querySelectorAll('li.row[data-id]')].map((r) => r.dataset.id);
+  }
+
+  function endSession(commit) {
+    if (!session) return;
+    detachDocListeners();
+    const { pointerId, row, ghost, fromIndex, toIndex, ids, moved } = session;
+    try {
+      row.releasePointerCapture(pointerId);
+    } catch {
+      /* ignore */
+    }
+    ghost.remove();
+    row.classList.remove('is-dragging');
+    listEl.classList.remove('is-reordering');
+    clearDropIndicator();
+    document.body.classList.remove('is-dnd');
+    const wasMoved = moved;
+    session = null;
+    dndActive = false;
+
+    if (wasMoved) {
+      if (dndClickBlockTimer) clearTimeout(dndClickBlockTimer);
+      dndClickBlockTimer = setTimeout(() => {
+        dndClickBlockTimer = null;
+      }, 120);
+    }
+
+    if (!commit || !moved || fromIndex === toIndex) return;
+
+    const nextIds = ids.slice();
+    const [movedId] = nextIds.splice(fromIndex, 1);
+    nextIds.splice(toIndex, 0, movedId);
+    applyLocalReorder(listKind, nextIds);
+    const finalIds = (listKind === 'habits' ? state.habits : state.tasks).map((it) => it.id);
+    const newIndex = finalIds.indexOf(movedId);
+    const previousId = newIndex > 0 ? finalIds[newIndex - 1] : null;
+    if (newIndex < 0 || finalIds.join('\0') === ids.join('\0')) return;
+    persistReorder(listKind, movedId, previousId, finalIds);
+  }
+
+  function applyLocalReorder(kind, orderedIds) {
+    const key = kind === 'habits' ? 'habits' : 'tasks';
+    const byId = new Map(state[key].map((it) => [it.id, it]));
+    const next = [];
+    for (const id of orderedIds) {
+      const it = byId.get(id);
+      if (it) next.push(it);
+    }
+    for (const it of state[key]) {
+      if (!orderedIds.includes(it.id)) next.push(it);
+    }
+    state[key] = next;
+    if (kind === 'habits') {
+      resortHabitsLocal();
+      syncListOrder(listHabits, state.habits);
+    } else {
+      resortTasksLocal();
+      syncListOrder(listTasks, state.tasks);
+    }
+  }
+
+  async function persistReorder(kind, taskId, previousId, orderedIds) {
+    if (!guardMutate('изменить порядок')) {
+      await loadData(true);
+      return;
+    }
+    if (!window.widgetApi?.moveItem) {
+      setBanner('Обновите приложение: перестановка недоступна.');
+      return;
+    }
+    try {
+      await window.widgetApi.moveItem(kind, taskId, previousId, orderedIds);
+    } catch (err) {
+      setBanner(`Не удалось изменить порядок: ${err.message || err}`);
+      await loadData(true);
+    }
+  }
+
+  function updateDropTarget(clientY) {
+    if (!session) return;
+    const others = [...listEl.querySelectorAll('li.row[data-id]')].filter(
+      (r) => r !== session.row
+    );
+    clearDropIndicator();
+
+    let insertAt = others.length;
+    for (let i = 0; i < others.length; i++) {
+      const rect = others[i].getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) {
+        insertAt = i;
+        break;
+      }
+    }
+
+    session.toIndex = insertAt;
+    if (!others.length) return;
+    if (insertAt < others.length) {
+      others[insertAt].classList.add('drop-before');
+    } else {
+      others[others.length - 1].classList.add('drop-after');
+    }
+  }
+
+  function onPointerMove(e) {
+    if (!session || e.pointerId !== session.pointerId) return;
+    const dy = e.clientY - session.startY;
+    if (!session.moved && Math.abs(dy) < 4) return;
+    session.moved = true;
+    dndActive = true;
+    swipeArmed = false;
+
+    session.ghost.style.top = `${e.clientY - session.offsetY}px`;
+    updateDropTarget(e.clientY);
+  }
+
+  function onPointerUp(e) {
+    if (!session || e.pointerId !== session.pointerId) return;
+    endSession(true);
+  }
+
+  function onPointerCancel(e) {
+    if (!session || e.pointerId !== session.pointerId) return;
+    endSession(false);
+  }
+
+  function attachDocListeners() {
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+    document.addEventListener('pointercancel', onPointerCancel);
+  }
+
+  function detachDocListeners() {
+    document.removeEventListener('pointermove', onPointerMove);
+    document.removeEventListener('pointerup', onPointerUp);
+    document.removeEventListener('pointercancel', onPointerCancel);
+  }
+
+  listEl.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle || !listEl.contains(handle)) return;
+    if (e.button !== 0) return;
+    const row = handle.closest('li.row[data-id]');
+    if (!row || row.classList.contains('is-editing')) return;
+    if (pendingIds.has(row.dataset.id)) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    hideCtxMenu();
+
+    if (state.offline && state.mode === 'google') {
+      setBanner('Офлайн: нельзя изменить порядок в Google. Обновите, когда сеть появится.');
+      return;
+    }
+    if (state.mode === 'needs_auth') {
+      setBanner('Сначала войдите через Google.');
+      return;
+    }
+
+    const ids = rowIds();
+    const fromIndex = ids.indexOf(row.dataset.id);
+    if (fromIndex < 0) return;
+
+    const rect = row.getBoundingClientRect();
+    const ghost = row.cloneNode(true);
+    ghost.classList.add('row-ghost');
+    ghost.style.width = `${rect.width}px`;
+    ghost.style.left = `${rect.left}px`;
+    ghost.style.top = `${rect.top}px`;
+    ghost.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(ghost);
+
+    row.classList.add('is-dragging');
+    listEl.classList.add('is-reordering');
+    document.body.classList.add('is-dnd');
+    dndActive = true;
+    swipeArmed = false;
+
+    session = {
+      pointerId: e.pointerId,
+      row,
+      ghost,
+      indicator: null,
+      startY: e.clientY,
+      offsetY: e.clientY - rect.top,
+      fromIndex,
+      toIndex: fromIndex,
+      ids,
+      moved: false,
+    };
+
+    attachDocListeners();
+    try {
+      row.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+bindListReorder('tasks', listTasks);
+bindListReorder('habits', listHabits);
 
 async function renameItem(listKind, item, nextTitle) {
   const trimmed = String(nextTitle || '').trim();
@@ -1189,7 +1421,8 @@ async function bootstrap() {
 // Event delegation — one listener per list instead of N per-row handlers
 listTasks.addEventListener('click', (e) => {
   hideCtxMenu();
-  if (e.target.closest('.row-title-edit')) return;
+  if (e.target.closest('.row-title-edit, .drag-handle')) return;
+  if (dndActive || dndClickBlockTimer) return;
   const li = e.target.closest('li.row[data-id]');
   if (!li || !listTasks.contains(li) || li.classList.contains('is-editing')) return;
   const item = state.tasks.find((t) => t.id === li.dataset.id);
@@ -1198,7 +1431,8 @@ listTasks.addEventListener('click', (e) => {
 
 listHabits.addEventListener('click', (e) => {
   hideCtxMenu();
-  if (e.target.closest('.row-title-edit')) return;
+  if (e.target.closest('.row-title-edit, .drag-handle')) return;
+  if (dndActive || dndClickBlockTimer) return;
   const li = e.target.closest('li.row[data-id]');
   if (!li || !listHabits.contains(li) || li.classList.contains('is-editing')) return;
   const item = state.habits.find((h) => h.id === li.dataset.id);
@@ -1258,7 +1492,11 @@ if (btnCheckReminders) {
           text: `Отправлено: ${result.count || 0}. Проверьте область уведомлений Windows.`,
           tone: 'ok',
         });
-      } else if (result?.reason === 'unsupported' || result?.reason === 'failed') {
+      } else if (
+        result?.reason === 'unsupported' ||
+        result?.reason === 'failed' ||
+        result?.reason === 'os-disabled'
+      ) {
         syncRemindersHint(null, {
           text:
             result.message ||
@@ -1384,9 +1622,13 @@ document.getElementById('form-add-habits').addEventListener('submit', (e) => {
 
 const viewport = document.getElementById('viewport');
 let startX = 0;
-let swipeArmed = false;
 viewport.addEventListener('pointerdown', (e) => {
-  if (e.target.closest('.add-row, .settings-panel, .onboarding-panel, button, input')) {
+  if (
+    dndActive ||
+    e.target.closest(
+      '.add-row, .settings-panel, .onboarding-panel, button, input, .drag-handle'
+    )
+  ) {
     swipeArmed = false;
     return;
   }
@@ -1394,7 +1636,10 @@ viewport.addEventListener('pointerdown', (e) => {
   startX = e.clientX;
 });
 viewport.addEventListener('pointerup', (e) => {
-  if (!swipeArmed) return;
+  if (!swipeArmed || dndActive) {
+    swipeArmed = false;
+    return;
+  }
   swipeArmed = false;
   const dx = e.clientX - startX;
   if (Math.abs(dx) < 40) return;

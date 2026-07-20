@@ -15,6 +15,13 @@ contextBridge.exposeInMainWorld('widgetApi', {
     ipcRenderer.invoke('widget:update-item', { listKind, taskId, title }),
   deleteItem: (listKind, taskId) =>
     ipcRenderer.invoke('widget:delete-item', { listKind, taskId }),
+  moveItem: (listKind, taskId, previousId, orderedIds) =>
+    ipcRenderer.invoke('widget:move-item', {
+      listKind,
+      taskId,
+      previousId: previousId || null,
+      orderedIds: orderedIds || [],
+    }),
   getSettings: () => ipcRenderer.invoke('widget:get-settings'),
   setSettings: (patch) => ipcRenderer.invoke('widget:set-settings', patch),
   getCredentialsStatus: () => ipcRenderer.invoke('widget:credentials-status'),

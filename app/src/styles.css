@@ -343,6 +343,100 @@ body {
   position: relative;
 }
 
+.drag-handle {
+  flex-shrink: 0;
+  width: 18px;
+  height: 28px;
+  margin: 0 -2px 0 -4px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: grab;
+  display: grid;
+  place-items: center;
+  opacity: 0.45;
+  transition: opacity 0.15s var(--ease), background 0.15s var(--ease), color 0.15s var(--ease);
+  -webkit-app-region: no-drag;
+}
+
+.drag-handle svg {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+}
+
+.row:hover .drag-handle,
+.row.is-dragging .drag-handle {
+  opacity: 0.9;
+}
+
+.drag-handle:hover {
+  background: color-mix(in srgb, var(--row-hover) 80%, transparent);
+  color: var(--text);
+}
+
+.drag-handle:active,
+body.is-dnd .drag-handle {
+  cursor: grabbing;
+}
+
+.row.is-dragging {
+  opacity: 0.35;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.row.drop-before::before,
+.row.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 75%, #fff);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 35%, transparent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.row.drop-before::before {
+  top: -3px;
+}
+
+.row.drop-after::after {
+  bottom: -3px;
+}
+
+.list.is-reordering {
+  cursor: grabbing;
+}
+
+.row-ghost {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  margin: 0;
+  opacity: 0.92;
+  background: color-mix(in srgb, var(--glass-fill) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--glass-border));
+  box-shadow:
+    0 8px 28px color-mix(in srgb, #000 28%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transform: scale(1.02);
+}
+
+body.is-dnd {
+  cursor: grabbing !important;
+}
+
+body.is-dnd .row {
+  cursor: grabbing;
+}
+
 .row:hover {
   background: var(--row-hover);
 }
@@ -1106,6 +1200,17 @@ body {
 [data-size="compact"] .row {
   padding: 7px 6px;
   gap: 9px;
+}
+
+[data-size="compact"] .drag-handle {
+  width: 14px;
+  height: 22px;
+  margin: 0 -2px 0 -2px;
+}
+
+[data-size="compact"] .drag-handle svg {
+  width: 10px;
+  height: 10px;
 }
 
 [data-size="compact"] .row-title {

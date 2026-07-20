@@ -14,6 +14,7 @@ const {
   setMockCompleted,
   updateMockItem,
   deleteMockItem,
+  reorderMockItems,
   resetMockHabitsCompleted,
 } = require('./mock-data');
 const { loadConfig, hasGoogleCredentials } = require('./config');
@@ -23,6 +24,7 @@ const {
   loadOfflineCache,
   clearOfflineCache,
   patchOfflineCache,
+  reorderOfflineCache,
 } = require('./offline-cache');
 
 const MAX_TITLE_LEN = 200;
@@ -240,30 +242,19 @@ function mapTask(item) {
     dueTime,
     status: item.status || 'needsAction',
     completed,
+    position: item.position || '',
+    parent: item.parent || null,
     meta: formatMeta(item) || (completed ? 'Done' : 'Task'),
   };
 }
 
+/**
+ * Open first, then up to 5 completed — preserve relative order within each group
+ * (Google Tasks list order / manual DnD), not due-date sort.
+ */
 function sortTasks(tasks) {
-  const rank = { overdue: 0, today: 1, later: 2, null: 3, undefined: 3 };
   const open = tasks.filter((t) => !t.completed);
   const done = tasks.filter((t) => t.completed).slice(0, 5);
-  open.sort((a, b) => {
-    const ra = rank[a.dueKind] ?? 3;
-    const rb = rank[b.dueKind] ?? 3;
-    if (ra !== rb) return ra - rb;
-    const da = a.due || '';
-    const db = b.due || '';
-    if (da !== db) {
-      const ka = dueDateKey(da) || da;
-      const kb = dueDateKey(db) || db;
-      if (ka !== kb) return ka < kb ? -1 : 1;
-    }
-    const ta = a.dueTime || resolveTaskTime(a) || '99:99';
-    const tb = b.dueTime || resolveTaskTime(b) || '99:99';
-    if (ta !== tb) return ta < tb ? -1 : 1;
-    return String(a.title).localeCompare(String(b.title));
-  });
   return [...open, ...done];
 }
 
@@ -280,6 +271,48 @@ function decorateTasks(tasks) {
       return { ...t, dueKind, dueTime, meta };
     })
   );
+}
+
+/**
+ * Reorder in-memory payload list to match orderedIds (stable partition after).
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string[]} orderedIds
+ * @param {{ id?: string, position?: string } | null} [movedPatch]
+ */
+function reorderPayloadCache(listKind, orderedIds, movedPatch = null) {
+  if (!payloadCache || !payloadCache.payload) return;
+  if (!Array.isArray(orderedIds) || !orderedIds.length) return;
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  const prev = payloadCache.payload;
+  const list = Array.isArray(prev[key]) ? prev[key].slice() : [];
+  const byId = new Map();
+  for (const item of list) {
+    if (item && item.id) byId.set(item.id, item);
+  }
+  const next = [];
+  const seen = new Set();
+  for (const id of orderedIds) {
+    if (typeof id !== 'string' || !id || seen.has(id)) continue;
+    let item = byId.get(id);
+    if (!item) continue;
+    if (movedPatch && movedPatch.id === id) {
+      item = { ...item, ...movedPatch };
+    }
+    next.push(item);
+    seen.add(id);
+  }
+  for (const item of list) {
+    if (item && item.id && !seen.has(item.id)) next.push(item);
+  }
+  const ordered =
+    listKind === 'tasks'
+      ? decorateTasks(next)
+      : (() => {
+          const open = next.filter((h) => !h.completed);
+          const done = next.filter((h) => h.completed);
+          return [...open, ...done];
+        })();
+  setPayloadCache({ ...prev, [key]: ordered, offline: false });
 }
 
 function invalidateListCache() {
@@ -315,18 +348,16 @@ function patchPayloadCache(listKind, taskId, patch, append = null) {
     );
     if (listKind === 'tasks') list = decorateTasks(list);
     else {
-      list = list
-        .map((h) => ({
-          ...h,
-          completed: Boolean(h.completedToday != null ? h.completedToday : h.completed),
-          status: (h.completedToday != null ? h.completedToday : h.completed)
-            ? 'completed'
-            : 'needsAction',
-        }))
-        .sort((a, b) => {
-          if (a.completed !== b.completed) return a.completed ? 1 : -1;
-          return String(a.title).localeCompare(String(b.title));
-        });
+      list = list.map((h) => ({
+        ...h,
+        completed: Boolean(h.completedToday != null ? h.completedToday : h.completed),
+        status: (h.completedToday != null ? h.completedToday : h.completed)
+          ? 'completed'
+          : 'needsAction',
+      }));
+      const open = list.filter((h) => !h.completed);
+      const done = list.filter((h) => h.completed);
+      list = [...open, ...done];
     }
   }
   setPayloadCache({ ...prev, [key]: list, offline: false });
@@ -369,21 +400,20 @@ async function listTasks(tasksApi, listId) {
  * Also re-sort without truncating — listTasks may have dropped "done" Google items.
  */
 function withHabits(habitsRaw) {
-  return enrichHabits(
+  const enriched = enrichHabits(
     habitsRaw.map((h) => ({
       ...h,
       meta: h.meta && h.meta !== 'Task' ? h.meta : 'Daily',
     }))
-  )
-    .map((h) => ({
-      ...h,
-      completed: Boolean(h.completedToday),
-      status: h.completedToday ? 'completed' : 'needsAction',
-    }))
-    .sort((a, b) => {
-      if (a.completed !== b.completed) return a.completed ? 1 : -1;
-      return String(a.title).localeCompare(String(b.title));
-    });
+  ).map((h) => ({
+    ...h,
+    completed: Boolean(h.completedToday),
+    status: h.completedToday ? 'completed' : 'needsAction',
+  }));
+  // Preserve Google/manual order; only partition open vs done for today.
+  const open = enriched.filter((h) => !h.completed);
+  const done = enriched.filter((h) => h.completed);
+  return [...open, ...done];
 }
 
 /** List habits without the tasks "open + 5 done" truncation. */
@@ -952,6 +982,95 @@ async function deleteItem(listKind, taskId) {
   return run;
 }
 
+/**
+ * Move a task/habit within its list (Google tasks.move) or reorder mock store.
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string} taskId
+ * @param {string | null} previousId  sibling that should precede taskId (null = top)
+ * @param {string[]} orderedIds       full visible order after drop (for caches)
+ */
+async function moveItem(listKind, taskId, previousId, orderedIds) {
+  if (listKind !== 'tasks' && listKind !== 'habits') {
+    throw new Error('Некорректный тип списка');
+  }
+  if (typeof taskId !== 'string' || !taskId.trim()) {
+    throw new Error('Некорректный id задачи');
+  }
+  const ids = Array.isArray(orderedIds)
+    ? orderedIds.filter((id) => typeof id === 'string' && id)
+    : [];
+  if (!ids.length || !ids.includes(taskId)) {
+    throw new Error('Некорректный порядок');
+  }
+  const prev =
+    previousId == null || previousId === ''
+      ? null
+      : String(previousId);
+  if (prev && prev === taskId) {
+    throw new Error('Некорректная позиция');
+  }
+
+  const flightKey = `move:${listKind}:${taskId}`;
+  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
+
+  const run = (async () => {
+    const config = loadConfig();
+
+    if (!hasGoogleCredentials()) {
+      const result = reorderMockItems(listKind, ids);
+      const mock = getMockPayload(config);
+      mock.tasks = decorateTasks(mock.tasks);
+      mock.habits = withHabits(mock.habits);
+      setPayloadCache(mock);
+      return {
+        ok: true,
+        mode: 'mock',
+        orderedIds: (result.orderedIds || ids).slice(),
+      };
+    }
+
+    const auth = await getAuthorizedClient({ interactive: false });
+    if (!auth) throw new Error('Не авторизован');
+
+    const tasksApi = getGoogle().tasks({ version: 'v1', auth });
+    const listName = listKind === 'habits' ? config.habitsListName : config.tasksListName;
+    const listId = await resolveListId(tasksApi, listName);
+    if (!listId) throw new Error(`Список «${listName}» не найден`);
+
+    const moveParams = {
+      tasklist: listId,
+      task: taskId,
+    };
+    if (prev) moveParams.previous = prev;
+    const cached = lookupCachedItem(listKind, taskId);
+    if (cached && cached.parent) moveParams.parent = cached.parent;
+
+    const res = await tasksApi.tasks.move(moveParams);
+    const movedPatch = {
+      id: taskId,
+      position: (res && res.data && res.data.position) || '',
+      parent: (res && res.data && res.data.parent) || null,
+    };
+
+    reorderOfflineCache(listKind, ids);
+    reorderPayloadCache(listKind, ids, movedPatch);
+    // Drop soft TTL so next getData picks up moved order if cache was stale-shaped
+    if (payloadCache) payloadCache.at = Date.now();
+
+    return {
+      ok: true,
+      mode: 'google',
+      orderedIds: ids,
+      item: movedPatch,
+    };
+  })().finally(() => {
+    mutationInFlight.delete(flightKey);
+  });
+
+  mutationInFlight.set(flightKey, run);
+  return run;
+}
+
 module.exports = {
   getWidgetData,
   loginGoogle,
@@ -959,6 +1078,7 @@ module.exports = {
   createItem,
   updateItem,
   deleteItem,
+  moveItem,
   invalidateListCache,
   invalidatePayloadCache,
   clearOfflineCache,

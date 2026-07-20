@@ -234,6 +234,43 @@ function deleteMockItem(listKind, taskId) {
 }
 
 /**
+ * Reorder mock list by explicit id sequence. Unknown ids are ignored;
+ * items missing from orderedIds stay at the end in prior order.
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string[]} orderedIds
+ */
+function reorderMockItems(listKind, orderedIds) {
+  if (listKind !== 'tasks' && listKind !== 'habits') {
+    throw new Error('Некорректный тип списка');
+  }
+  if (!Array.isArray(orderedIds) || !orderedIds.length) {
+    throw new Error('Некорректный порядок');
+  }
+  const store = loadMockStore();
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  const byId = new Map();
+  for (const item of store[key] || []) {
+    if (item && item.id) byId.set(item.id, item);
+  }
+  const next = [];
+  const seen = new Set();
+  for (const id of orderedIds) {
+    if (typeof id !== 'string' || !id || seen.has(id)) continue;
+    const item = byId.get(id);
+    if (!item) continue;
+    next.push(item);
+    seen.add(id);
+  }
+  for (const item of store[key] || []) {
+    if (item && item.id && !seen.has(item.id)) next.push(item);
+  }
+  if (!next.length) throw new Error('Элемент не найден');
+  store[key] = next;
+  saveMockStore(store);
+  return { ok: true, mode: 'mock', orderedIds: next.map((i) => i.id) };
+}
+
+/**
  * Clear Google-style completed flags on habits for a new day.
  * Does not touch the streak store (completedToday / history stay intact).
  * @returns {number} how many habits were flipped
@@ -260,5 +297,6 @@ module.exports = {
   resetMockHabitsCompleted,
   updateMockItem,
   deleteMockItem,
+  reorderMockItems,
   loadMockStore,
 };
