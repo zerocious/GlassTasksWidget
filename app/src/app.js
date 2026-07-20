@@ -556,12 +556,13 @@ function rowById(listEl, id) {
 }
 
 function syncListOrder(listEl, items) {
+  const idSet = new Set(items.map((it) => it.id));
   for (const item of items) {
     const row = rowById(listEl, item.id);
     if (row) listEl.appendChild(row);
   }
   for (const row of [...listEl.querySelectorAll('li.row')]) {
-    if (!items.some((it) => it.id === row.dataset.id)) row.remove();
+    if (!idSet.has(row.dataset.id)) row.remove();
   }
 }
 
@@ -837,9 +838,12 @@ let dndActive = false;
 let swipeArmed = false;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let dndClickBlockTimer = null;
+/** @type {Set<'tasks' | 'habits'>} */
+const reorderLocks = new Set();
 
 /**
  * Pointer-based row reorder (drag handle). Avoids HTML5 DnD + window drag conflicts.
+ * Drops stay within the same completion group (open ↔ open, done ↔ done).
  * @param {'tasks' | 'habits'} listKind
  * @param {HTMLElement} listEl
  */
@@ -848,12 +852,11 @@ function bindListReorder(listKind, listEl) {
    *   pointerId: number,
    *   row: HTMLElement,
    *   ghost: HTMLElement,
-   *   indicator: HTMLElement,
    *   startY: number,
    *   offsetY: number,
-   *   fromIndex: number,
-   *   toIndex: number,
    *   ids: string[],
+   *   targetIds: string[],
+   *   draggedDone: boolean,
    *   moved: boolean,
    * } | null} */
   let session = null;
@@ -868,10 +871,14 @@ function bindListReorder(listKind, listEl) {
     return [...listEl.querySelectorAll('li.row[data-id]')].map((r) => r.dataset.id);
   }
 
+  function itemsForKind() {
+    return listKind === 'habits' ? state.habits : state.tasks;
+  }
+
   function endSession(commit) {
     if (!session) return;
     detachDocListeners();
-    const { pointerId, row, ghost, fromIndex, toIndex, ids, moved } = session;
+    const { pointerId, row, ghost, ids, targetIds, moved } = session;
     try {
       row.releasePointerCapture(pointerId);
     } catch {
@@ -883,6 +890,7 @@ function bindListReorder(listKind, listEl) {
     clearDropIndicator();
     document.body.classList.remove('is-dnd');
     const wasMoved = moved;
+    const nextIds = targetIds && targetIds.length ? targetIds.slice() : ids.slice();
     session = null;
     dndActive = false;
 
@@ -893,13 +901,12 @@ function bindListReorder(listKind, listEl) {
       }, 120);
     }
 
-    if (!commit || !moved || fromIndex === toIndex) return;
+    if (!commit || !moved) return;
+    if (nextIds.join('\0') === ids.join('\0')) return;
 
-    const nextIds = ids.slice();
-    const [movedId] = nextIds.splice(fromIndex, 1);
-    nextIds.splice(toIndex, 0, movedId);
     applyLocalReorder(listKind, nextIds);
-    const finalIds = (listKind === 'habits' ? state.habits : state.tasks).map((it) => it.id);
+    const finalIds = itemsForKind().map((it) => it.id);
+    const movedId = row.dataset.id;
     const newIndex = finalIds.indexOf(movedId);
     const previousId = newIndex > 0 ? finalIds[newIndex - 1] : null;
     if (newIndex < 0 || finalIds.join('\0') === ids.join('\0')) return;
@@ -910,12 +917,17 @@ function bindListReorder(listKind, listEl) {
     const key = kind === 'habits' ? 'habits' : 'tasks';
     const byId = new Map(state[key].map((it) => [it.id, it]));
     const next = [];
+    const seen = new Set();
     for (const id of orderedIds) {
+      if (seen.has(id)) continue;
       const it = byId.get(id);
-      if (it) next.push(it);
+      if (it) {
+        next.push(it);
+        seen.add(id);
+      }
     }
     for (const it of state[key]) {
-      if (!orderedIds.includes(it.id)) next.push(it);
+      if (!seen.has(it.id)) next.push(it);
     }
     state[key] = next;
     if (kind === 'habits') {
@@ -936,36 +948,71 @@ function bindListReorder(listKind, listEl) {
       setBanner('Обновите приложение: перестановка недоступна.');
       return;
     }
+    if (reorderLocks.has(kind)) {
+      await loadData(true);
+      return;
+    }
+    reorderLocks.add(kind);
     try {
       await window.widgetApi.moveItem(kind, taskId, previousId, orderedIds);
     } catch (err) {
       setBanner(`Не удалось изменить порядок: ${err.message || err}`);
       await loadData(true);
+    } finally {
+      reorderLocks.delete(kind);
     }
   }
 
+  /**
+   * Reorder only within the same completion group, then map back to full list order.
+   * @param {number} clientY
+   */
   function updateDropTarget(clientY) {
     if (!session) return;
-    const others = [...listEl.querySelectorAll('li.row[data-id]')].filter(
-      (r) => r !== session.row
-    );
+    const items = itemsForKind();
+    const byId = new Map(items.map((it) => [it.id, it]));
+    const draggedDone = session.draggedDone;
+
+    const peers = [...listEl.querySelectorAll('li.row[data-id]')].filter((r) => {
+      if (r === session.row) return false;
+      const it = byId.get(r.dataset.id);
+      return it && Boolean(it.completed) === draggedDone;
+    });
+
     clearDropIndicator();
 
-    let insertAt = others.length;
-    for (let i = 0; i < others.length; i++) {
-      const rect = others[i].getBoundingClientRect();
+    let insertAmongPeers = peers.length;
+    for (let i = 0; i < peers.length; i++) {
+      const rect = peers[i].getBoundingClientRect();
       if (clientY < rect.top + rect.height / 2) {
-        insertAt = i;
+        insertAmongPeers = i;
         break;
       }
     }
 
-    session.toIndex = insertAt;
-    if (!others.length) return;
-    if (insertAt < others.length) {
-      others[insertAt].classList.add('drop-before');
+    const groupIds = session.ids.filter((id) => {
+      const it = byId.get(id);
+      return it && Boolean(it.completed) === draggedDone;
+    });
+    const fromInGroup = groupIds.indexOf(session.row.dataset.id);
+    if (fromInGroup < 0) return;
+
+    const nextGroup = groupIds.slice();
+    nextGroup.splice(fromInGroup, 1);
+    nextGroup.splice(Math.min(insertAmongPeers, nextGroup.length), 0, session.row.dataset.id);
+
+    let gi = 0;
+    session.targetIds = session.ids.map((id) => {
+      const it = byId.get(id);
+      if (it && Boolean(it.completed) === draggedDone) return nextGroup[gi++];
+      return id;
+    });
+
+    if (!peers.length) return;
+    if (insertAmongPeers < peers.length) {
+      peers[insertAmongPeers].classList.add('drop-before');
     } else {
-      others[others.length - 1].classList.add('drop-after');
+      peers[peers.length - 1].classList.add('drop-after');
     }
   }
 
@@ -991,16 +1038,26 @@ function bindListReorder(listKind, listEl) {
     endSession(false);
   }
 
+  function onKeyDown(e) {
+    if (!session) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      endSession(false);
+    }
+  }
+
   function attachDocListeners() {
     document.addEventListener('pointermove', onPointerMove);
     document.addEventListener('pointerup', onPointerUp);
     document.addEventListener('pointercancel', onPointerCancel);
+    document.addEventListener('keydown', onKeyDown);
   }
 
   function detachDocListeners() {
     document.removeEventListener('pointermove', onPointerMove);
     document.removeEventListener('pointerup', onPointerUp);
     document.removeEventListener('pointercancel', onPointerCancel);
+    document.removeEventListener('keydown', onKeyDown);
   }
 
   listEl.addEventListener('pointerdown', (e) => {
@@ -1010,6 +1067,7 @@ function bindListReorder(listKind, listEl) {
     const row = handle.closest('li.row[data-id]');
     if (!row || row.classList.contains('is-editing')) return;
     if (pendingIds.has(row.dataset.id)) return;
+    if (reorderLocks.has(listKind) || session) return;
 
     e.preventDefault();
     e.stopPropagation();
@@ -1027,6 +1085,9 @@ function bindListReorder(listKind, listEl) {
     const ids = rowIds();
     const fromIndex = ids.indexOf(row.dataset.id);
     if (fromIndex < 0) return;
+
+    const dragged = itemsForKind().find((it) => it.id === row.dataset.id);
+    if (!dragged) return;
 
     const rect = row.getBoundingClientRect();
     const ghost = row.cloneNode(true);
@@ -1047,12 +1108,11 @@ function bindListReorder(listKind, listEl) {
       pointerId: e.pointerId,
       row,
       ghost,
-      indicator: null,
       startY: e.clientY,
       offsetY: e.clientY - rect.top,
-      fromIndex,
-      toIndex: fromIndex,
       ids,
+      targetIds: ids.slice(),
+      draggedDone: Boolean(dragged.completed),
       moved: false,
     };
 
