@@ -66,10 +66,18 @@ function wasNotifiedToday(id) {
   return state.notifiedIds.includes(id);
 }
 
+/**
+ * Clear today's notified set (used by manual «Проверить» so toasts can fire again).
+ */
+function clearNotifiedToday() {
+  saveReminderState({ date: todayKey(), notifiedIds: [] });
+}
+
 module.exports = {
   todayKey,
   loadReminderState,
   saveReminderState,
   markNotified,
   wasNotifiedToday,
+  clearNotifiedToday,
 };

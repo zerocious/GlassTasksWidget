@@ -85,6 +85,13 @@
         </label>
 
         <label class="settings-row switch-row">
+          <span class="settings-label">Упрощённые анимации</span>
+          <input type="checkbox" id="optSimpleAnim" />
+          <span class="switch-ui" aria-hidden="true"></span>
+        </label>
+        <p class="settings-hint">Мгновенное переключение Tasks ↔ Habits, без stagger стрика — легче для слабых ПК.</p>
+
+        <label class="settings-row switch-row">
           <span class="settings-label">Напоминания</span>
           <input type="checkbox" id="optReminders" checked />
           <span class="switch-ui" aria-hidden="true"></span>
@@ -173,7 +180,28 @@
       <div class="viewport" id="viewport">
         <div class="panels" id="panels" data-view="tasks">
           <section class="panel" id="panel-tasks" role="tabpanel" aria-labelledby="tab-tasks">
-            <div class="section-label">Today</div>
+            <div class="section-head">
+              <div class="section-label">Today</div>
+              <button
+                type="button"
+                class="hide-done-btn"
+                id="btnHideCompleted"
+                title="Скрыть выполненные"
+                aria-label="Скрыть выполненные"
+                aria-pressed="false"
+              >
+                <svg class="hide-done-icon hide-done-icon-show" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+                <svg class="hide-done-icon hide-done-icon-hide" viewBox="0 0 24 24" aria-hidden="true" hidden>
+                  <path d="M2 12s3.5-7 10-7c2.2 0 4.1.7 5.7 1.7"/>
+                  <path d="M22 12s-3.5 7-10 7c-2.2 0-4.1-.7-5.7-1.7"/>
+                  <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>
+                  <path d="M3 3l18 18"/>
+                </svg>
+              </button>
+            </div>
             <ul class="list" id="list-tasks"></ul>
             <form class="add-row" id="form-add-tasks" autocomplete="off">
               <input class="add-input" id="input-add-tasks" type="text" maxlength="200" placeholder="Новая задача…" aria-label="Новая задача" />
@@ -181,7 +209,28 @@
             </form>
           </section>
           <section class="panel" id="panel-habits" role="tabpanel" aria-labelledby="tab-habits" aria-hidden="true">
-            <div class="section-label">Today</div>
+            <div class="section-head">
+              <div class="section-label">Today</div>
+              <button
+                type="button"
+                class="hide-done-btn"
+                id="btnHideCompletedHabits"
+                title="Скрыть выполненные"
+                aria-label="Скрыть выполненные"
+                aria-pressed="false"
+              >
+                <svg class="hide-done-icon hide-done-icon-show" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+                <svg class="hide-done-icon hide-done-icon-hide" viewBox="0 0 24 24" aria-hidden="true" hidden>
+                  <path d="M2 12s3.5-7 10-7c2.2 0 4.1.7 5.7 1.7"/>
+                  <path d="M22 12s-3.5 7-10 7c-2.2 0-4.1-.7-5.7-1.7"/>
+                  <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>
+                  <path d="M3 3l18 18"/>
+                </svg>
+              </button>
+            </div>
             <ul class="list" id="list-habits"></ul>
             <form class="add-row" id="form-add-habits" autocomplete="off">
               <input class="add-input" id="input-add-habits" type="text" maxlength="200" placeholder="Новая привычка…" aria-label="Новая привычка" />
@@ -204,6 +253,51 @@
       </footer>
     </div>
   </article>
+
+  <div class="notes-overlay" id="notesOverlay" hidden>
+    <div class="notes-panel" role="dialog" aria-modal="true" aria-labelledby="notesPanelTitle">
+      <div class="notes-panel-head">
+        <div class="notes-panel-title" id="notesPanelTitle">Заметки</div>
+        <button type="button" class="notes-panel-close" id="btnNotesClose" title="Закрыть" aria-label="Закрыть">×</button>
+      </div>
+      <div class="notes-panel-task" id="notesPanelTask"></div>
+      <textarea
+        class="notes-textarea"
+        id="notesTextarea"
+        maxlength="8000"
+        placeholder="Текст заметки…"
+        aria-label="Заметки к задаче"
+      ></textarea>
+      <div class="notes-panel-actions">
+        <button type="button" class="notes-btn notes-btn-secondary" id="btnNotesCancel">Отмена</button>
+        <button type="button" class="notes-btn notes-btn-primary" id="btnNotesSave">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes-overlay" id="timeOverlay" hidden>
+    <div class="notes-panel time-panel" role="dialog" aria-modal="true" aria-labelledby="timePanelTitle">
+      <div class="notes-panel-head">
+        <div class="notes-panel-title" id="timePanelTitle">Время</div>
+        <button type="button" class="notes-panel-close" id="btnTimeClose" title="Закрыть" aria-label="Закрыть">×</button>
+      </div>
+      <div class="notes-panel-task" id="timePanelTask"></div>
+      <label class="time-field">
+        <span class="time-field-label">Напоминание</span>
+        <input type="time" class="time-input" id="timeInput" step="60" aria-label="Время в формате ЧЧ:ММ" />
+      </label>
+      <div class="notes-panel-actions time-panel-actions">
+        <button type="button" class="notes-btn notes-btn-secondary" id="btnTimeClear">Сбросить</button>
+        <button type="button" class="notes-btn notes-btn-secondary" id="btnTimeCancel">Отмена</button>
+        <button type="button" class="notes-btn notes-btn-primary" id="btnTimeSave">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="in-app-toast" id="inAppToast" hidden role="status" aria-live="polite">
+    <div class="in-app-toast-title" id="inAppToastTitle"></div>
+    <div class="in-app-toast-body" id="inAppToastBody"></div>
+  </div>
 
   <script src="app.js"></script>
 </body>

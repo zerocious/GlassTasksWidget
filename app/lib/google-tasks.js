@@ -10,6 +10,7 @@ const {
 } = require('./streak-store');
 const {
   getMockPayload,
+  getMockItem,
   addMockItem,
   setMockCompleted,
   updateMockItem,
@@ -28,6 +29,7 @@ const {
 } = require('./offline-cache');
 
 const MAX_TITLE_LEN = 200;
+const MAX_NOTES_LEN = 8000;
 
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000;
 /** Soft TTL for in-memory widget payload — avoids double network on rapid IPC. */
@@ -81,31 +83,82 @@ function dueKindFor(due, completed) {
   return 'later';
 }
 
+/** Managed time line written by the widget UI («время HH:MM»). */
+const MANAGED_TIME_LINE_RE =
+  /^(?:время|Время|time)\s*[:\-]?\s*\d{1,2}[:.]\d{2}\s*$/i;
+
 function formatMeta(task) {
-  const time = resolveTaskTime(task);
+  // Time is shown as a row chip (dueTime); meta stays date / notes preview only.
   if (task.due) {
     try {
       const d = new Date(task.due);
       const kind = dueKindFor(task.due, task.status === 'completed');
       const dateLabel = formatDueDateLabel(d, task.due);
-      if (time) {
-        if (kind === 'overdue') return `Просрочено · ${time}`;
-        if (kind === 'today') return `Сегодня · ${time}`;
-        return `${dateLabel} · ${time}`;
-      }
       if (kind === 'overdue') return `Просрочено · ${dateLabel}`;
-      if (kind === 'today') return `Сегодня · ${dateLabel}`;
+      if (kind === 'today') return 'Сегодня';
       return dateLabel;
     } catch {
       return 'Срок';
     }
   }
-  if (time) return time;
   if (task.notes && String(task.notes).trim()) {
-    const line = String(task.notes).trim().split(/\r?\n/)[0];
-    return line.length > 40 ? `${line.slice(0, 37)}…` : line;
+    const line = String(task.notes)
+      .trim()
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l && !MANAGED_TIME_LINE_RE.test(l));
+    if (line) return line.length > 40 ? `${line.slice(0, 37)}…` : line;
   }
   return '';
+}
+
+/**
+ * Normalize UI/API dueTime patch: null clears; 'HH:MM' / 'H:MM' → 'HH:MM'.
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function normalizeDueTimeInput(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value !== 'string') throw new Error('Некорректное время');
+  const m = value.trim().match(/^(\d{1,2})[:.](\d{2})$/);
+  if (!m) throw new Error('Время в формате ЧЧ:ММ');
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (!Number.isFinite(h) || !Number.isFinite(min) || h > 23 || min > 59) {
+    throw new Error('Время в формате ЧЧ:ММ');
+  }
+  return formatHm(h, min);
+}
+
+/**
+ * Upsert/clear managed «время HH:MM» line in notes (Google due is date-only).
+ * @param {string | null | undefined} notes
+ * @param {string | null} dueTime HH:MM or null to clear
+ */
+function applyDueTimeToNotes(notes, dueTime) {
+  const lines = String(notes || '').split(/\r?\n/);
+  const kept = lines.filter((line) => !MANAGED_TIME_LINE_RE.test(String(line).trim()));
+  let rest = kept.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
+
+  if (dueTime == null || dueTime === '') {
+    // Drop standalone time-only lines so Clear fully removes resolvable time.
+    rest = rest
+      .split(/\r?\n/)
+      .filter((line) => {
+        const t = String(line).trim();
+        if (!t) return true;
+        if (/^(?:в|at)\s+\d{1,2}[:.]\d{2}$/i.test(t)) return false;
+        if (/^\d{1,2}:\d{2}$/.test(t)) return false;
+        return true;
+      })
+      .join('\n')
+      .replace(/^\n+/, '')
+      .replace(/\n+$/, '');
+    return rest;
+  }
+
+  const marker = `время ${dueTime}`;
+  return rest ? `${marker}\n${rest}` : marker;
 }
 
 /**
@@ -249,12 +302,47 @@ function mapTask(item) {
 }
 
 /**
+ * Nest children under parents while preserving relative sibling order.
+ * @param {Array<{ id: string, parent?: string | null }>} tasks
+ */
+function nestTasksPreserveOrder(tasks) {
+  const byId = new Map();
+  for (const t of tasks) {
+    if (t && t.id) byId.set(t.id, t);
+  }
+  /** @type {Map<string, typeof tasks>} */
+  const children = new Map();
+  /** @type {typeof tasks} */
+  const roots = [];
+  for (const t of tasks) {
+    if (!t || !t.id) continue;
+    if (t.parent && byId.has(t.parent)) {
+      if (!children.has(t.parent)) children.set(t.parent, []);
+      children.get(t.parent).push(t);
+    } else {
+      roots.push(t);
+    }
+  }
+  /** @type {typeof tasks} */
+  const out = [];
+  const walk = (list) => {
+    for (const t of list) {
+      out.push(t);
+      const kids = children.get(t.id);
+      if (kids && kids.length) walk(kids);
+    }
+  };
+  walk(roots);
+  return out;
+}
+
+/**
  * Open first, then up to 5 completed — preserve relative order within each group
- * (Google Tasks list order / manual DnD), not due-date sort.
+ * (Google Tasks list order / manual DnD), nest subtasks under parents.
  */
 function sortTasks(tasks) {
-  const open = tasks.filter((t) => !t.completed);
-  const done = tasks.filter((t) => t.completed).slice(0, 5);
+  const open = nestTasksPreserveOrder(tasks.filter((t) => !t.completed));
+  const done = nestTasksPreserveOrder(tasks.filter((t) => t.completed)).slice(0, 5);
   return [...open, ...done];
 }
 
@@ -341,7 +429,10 @@ function patchPayloadCache(listKind, taskId, patch, append = null) {
     if (listKind === 'tasks') list = decorateTasks(list);
     else list = withHabits(list);
   } else if (patch === null) {
-    list = list.filter((item) => item && item.id !== taskId);
+    // Cascade: Google deletes subtasks with their parent.
+    list = list.filter(
+      (item) => item && item.id !== taskId && item.parent !== taskId
+    );
   } else {
     list = list.map((item) =>
       item && item.id === taskId ? { ...item, ...patch } : item
@@ -401,14 +492,22 @@ async function listTasks(tasksApi, listId) {
  */
 function withHabits(habitsRaw) {
   const enriched = enrichHabits(
-    habitsRaw.map((h) => ({
-      ...h,
-      meta: h.meta && h.meta !== 'Task' ? h.meta : 'Daily',
-    }))
+    habitsRaw.map((h) => {
+      const status = h.status || 'needsAction';
+      const dueTime = resolveTaskTime(h);
+      const formatted = formatMeta({ ...h, status });
+      const meta =
+        formatted && formatted !== 'Task'
+          ? formatted
+          : h.meta && h.meta !== 'Task'
+            ? h.meta
+            : 'Daily';
+      return { ...h, dueTime, meta };
+    })
   ).map((h) => ({
-    ...h,
-    completed: Boolean(h.completedToday),
-    status: h.completedToday ? 'completed' : 'needsAction',
+      ...h,
+      completed: Boolean(h.completedToday),
+      status: h.completedToday ? 'completed' : 'needsAction',
   }));
   // Preserve Google/manual order; only partition open vs done for today.
   const open = enriched.filter((h) => !h.completed);
@@ -627,6 +726,7 @@ async function getWidgetDataUncached(force) {
   if (!hasGoogleCredentials()) {
     const mock = getMockPayload(config);
     mock.tasks = decorateTasks(mock.tasks);
+    mock.habits = withHabits(mock.habits);
     setPayloadCache(mock);
     return mock;
   }
@@ -814,29 +914,35 @@ async function setTaskCompleted(listKind, taskId, completed) {
   return run;
 }
 
-async function createItem(listKind, title) {
+async function createItem(listKind, title, opts = {}) {
   if (listKind !== 'tasks' && listKind !== 'habits') {
     throw new Error('Некорректный тип списка');
   }
   let trimmed = String(title || '').trim();
   if (!trimmed) throw new Error('Введите название');
   if (trimmed.length > MAX_TITLE_LEN) trimmed = trimmed.slice(0, MAX_TITLE_LEN);
+  const parentId =
+    opts && typeof opts.parentId === 'string' && opts.parentId.trim()
+      ? opts.parentId.trim()
+      : null;
 
-  const flightKey = `create:${listKind}:${trimmed.toLowerCase()}`;
+  const flightKey = `create:${listKind}:${parentId || ''}:${trimmed.toLowerCase()}`;
   if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
 
   const run = (async () => {
     const config = loadConfig();
 
     if (!hasGoogleCredentials()) {
-      const result = addMockItem(listKind, trimmed);
+      const result = addMockItem(listKind, trimmed, { parentId });
       if (result.item) {
         const item =
           listKind === 'habits'
             ? withHabits([result.item])[0]
             : decorateTasks([result.item])[0];
         result.item = item;
-        patchPayloadCache(listKind, item.id, null, item);
+        // Full re-nest for tasks when adding a child
+        if (listKind === 'tasks' && parentId) invalidatePayloadCache();
+        else patchPayloadCache(listKind, item.id, null, item);
       } else {
         invalidatePayloadCache();
       }
@@ -851,21 +957,32 @@ async function createItem(listKind, title) {
     const listId = await resolveListId(tasksApi, listName);
     if (!listId) throw new Error(`Список «${listName}» не найден`);
 
+    /** @type {Record<string, string>} */
+    const body = {
+      title: trimmed,
+      status: 'needsAction',
+    };
+    // `parent` is a query param only (Task.parent is output-only on the resource).
+
     const res = await tasksApi.tasks.insert({
       tasklist: listId,
-      requestBody: {
-        title: trimmed,
-        status: 'needsAction',
-      },
+      parent: parentId || undefined,
+      requestBody: body,
     });
 
     let mapped = mapTask(res.data);
+    if (parentId && !mapped.parent) mapped.parent = parentId;
     if (listKind === 'habits') {
       mapped = withHabits([mapped])[0];
     }
 
-    patchOfflineCache(listKind, mapped.id, null, mapped);
-    patchPayloadCache(listKind, mapped.id, null, mapped);
+    if (listKind === 'tasks' && parentId) {
+      invalidatePayloadCache();
+      invalidateListCache();
+    } else {
+      patchOfflineCache(listKind, mapped.id, null, mapped);
+      patchPayloadCache(listKind, mapped.id, null, mapped);
+    }
 
     return { ok: true, mode: 'google', item: mapped };
   })().finally(() => {
@@ -876,32 +993,103 @@ async function createItem(listKind, title) {
   return run;
 }
 
-async function updateItem(listKind, taskId, title) {
+/**
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string} taskId
+ * @param {string | { title?: string, notes?: string, dueTime?: string | null }} patchOrTitle
+ */
+async function updateItem(listKind, taskId, patchOrTitle) {
   if (listKind !== 'tasks' && listKind !== 'habits') {
     throw new Error('Некорректный тип списка');
   }
   if (typeof taskId !== 'string' || !taskId.trim()) {
     throw new Error('Некорректный id задачи');
   }
-  let trimmed = String(title || '').trim();
-  if (!trimmed) throw new Error('Введите название');
-  if (trimmed.length > MAX_TITLE_LEN) trimmed = trimmed.slice(0, MAX_TITLE_LEN);
 
-  const flightKey = `update:${listKind}:${taskId}`;
+  /** @type {{ title?: string, notes?: string, dueTime?: string | null }} */
+  let patch = {};
+  if (typeof patchOrTitle === 'string') {
+    patch.title = patchOrTitle;
+  } else if (patchOrTitle && typeof patchOrTitle === 'object') {
+    patch = { ...patchOrTitle };
+  }
+
+  /** @type {string | null | undefined} undefined = no dueTime change */
+  let pendingDueTime;
+
+  // Google Tasks due is date-only UTC — persist clock time via notes marker.
+  if (Object.prototype.hasOwnProperty.call(patch, 'dueTime')) {
+    const hm = normalizeDueTimeInput(patch.dueTime);
+    delete patch.dueTime;
+    let currentNotes = typeof patch.notes === 'string' ? patch.notes : null;
+    if (currentNotes === null) {
+      if (!hasGoogleCredentials()) {
+        const mockItem = getMockItem(listKind, taskId);
+        if (!mockItem) throw new Error('Элемент не найден');
+        currentNotes = mockItem.notes || '';
+      } else {
+        const cached = lookupCachedItem(listKind, taskId);
+        if (cached && typeof cached.notes === 'string') currentNotes = cached.notes;
+      }
+    }
+    if (currentNotes !== null) {
+      patch.notes = applyDueTimeToNotes(currentNotes, hm);
+    } else {
+      pendingDueTime = hm;
+    }
+  }
+
+  /** @type {Record<string, string>} */
+  const body = {};
+  /** @type {Record<string, any>} */
+  const itemPatch = {};
+
+  if (typeof patch.title === 'string') {
+    let trimmed = patch.title.trim();
+    if (!trimmed) throw new Error('Введите название');
+    if (trimmed.length > MAX_TITLE_LEN) trimmed = trimmed.slice(0, MAX_TITLE_LEN);
+    body.title = trimmed;
+    itemPatch.title = trimmed;
+  }
+  if (typeof patch.notes === 'string') {
+    let notes = patch.notes;
+    if (notes.length > MAX_NOTES_LEN) notes = notes.slice(0, MAX_NOTES_LEN);
+    body.notes = notes;
+    itemPatch.notes = notes;
+  }
+  if (!Object.keys(body).length && pendingDueTime === undefined) {
+    throw new Error('Нечего обновлять');
+  }
+
+  const flightKey = `update:${listKind}:${taskId}:${[
+    ...Object.keys(body).sort(),
+    pendingDueTime !== undefined ? 'dueTime' : '',
+  ]
+    .filter(Boolean)
+    .join(',')}`;
   if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
 
   const run = (async () => {
     const config = loadConfig();
 
     if (!hasGoogleCredentials()) {
-      const result = updateMockItem(listKind, taskId, trimmed);
+      const result = updateMockItem(listKind, taskId, {
+        ...(typeof patch.title === 'string' ? { title: patch.title } : {}),
+        ...(typeof patch.notes === 'string' ? { notes: patch.notes } : {}),
+      });
       if (result.item) {
         const item =
           listKind === 'habits'
             ? withHabits([result.item])[0]
             : decorateTasks([result.item])[0];
         result.item = item;
-        patchPayloadCache(listKind, taskId, { title: item.title, meta: item.meta });
+        const dueTime = resolveTaskTime(item);
+        patchPayloadCache(listKind, taskId, {
+          title: item.title,
+          notes: item.notes || '',
+          meta: item.meta,
+          dueTime,
+        });
       } else {
         invalidatePayloadCache();
       }
@@ -916,17 +1104,44 @@ async function updateItem(listKind, taskId, title) {
     const listId = await resolveListId(tasksApi, listName);
     if (!listId) throw new Error(`Список «${listName}» не найден`);
 
+    // Cache miss: fetch current notes before applying dueTime so we don't wipe them.
+    if (pendingDueTime !== undefined && body.notes === undefined) {
+      const existing = await tasksApi.tasks.get({
+        tasklist: listId,
+        task: taskId,
+      });
+      const currentNotes = (existing && existing.data && existing.data.notes) || '';
+      const notes = applyDueTimeToNotes(currentNotes, pendingDueTime);
+      body.notes = notes.length > MAX_NOTES_LEN ? notes.slice(0, MAX_NOTES_LEN) : notes;
+      itemPatch.notes = body.notes;
+    }
+
+    if (!Object.keys(body).length) throw new Error('Нечего обновлять');
+
     await tasksApi.tasks.patch({
       tasklist: listId,
       task: taskId,
-      requestBody: { title: trimmed },
+      requestBody: body,
     });
 
-    const itemPatch = { title: trimmed };
+    // Refresh meta/dueTime when notes change (time may live in notes).
+    if (Object.prototype.hasOwnProperty.call(itemPatch, 'notes')) {
+      const cached = lookupCachedItem(listKind, taskId);
+      const merged = {
+        ...(cached || {}),
+        ...itemPatch,
+        status: cached && cached.completed ? 'completed' : 'needsAction',
+      };
+      itemPatch.dueTime = resolveTaskTime(merged);
+      itemPatch.meta =
+        formatMeta(merged) ||
+        (merged.completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
+    }
+
     patchOfflineCache(listKind, taskId, itemPatch);
     patchPayloadCache(listKind, taskId, itemPatch);
 
-    return { ok: true, mode: 'google', item: { id: taskId, title: trimmed } };
+    return { ok: true, mode: 'google', item: { id: taskId, ...itemPatch } };
   })().finally(() => {
     mutationInFlight.delete(flightKey);
   });
@@ -983,6 +1198,40 @@ async function deleteItem(listKind, taskId) {
 }
 
 /**
+ * Previous sibling for tasks.move — never the parent row, and only an item
+ * that shares the same parent (roots share parent=null).
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string} taskId
+ * @param {string[]} orderedIds
+ * @param {string | null} [hintPreviousId]
+ * @returns {string | null}
+ */
+function resolveMovePreviousSibling(listKind, taskId, orderedIds, hintPreviousId) {
+  const moved = lookupCachedItem(listKind, taskId);
+  const parent = (moved && moved.parent) || null;
+  const ids = Array.isArray(orderedIds) ? orderedIds : [];
+  const idx = ids.indexOf(taskId);
+
+  const isSibling = (id) => {
+    if (!id || id === taskId) return false;
+    if (parent && id === parent) return false;
+    const item = lookupCachedItem(listKind, id);
+    if (!item) return false;
+    return (item.parent || null) === parent;
+  };
+
+  if (hintPreviousId && isSibling(hintPreviousId)) return hintPreviousId;
+
+  if (idx <= 0) return null;
+  for (let i = idx - 1; i >= 0; i -= 1) {
+    const id = ids[i];
+    if (parent && id === parent) return null;
+    if (isSibling(id)) return id;
+  }
+  return null;
+}
+
+/**
  * Move a task/habit within its list (Google tasks.move) or reorder mock store.
  * @param {'tasks' | 'habits'} listKind
  * @param {string} taskId
@@ -1002,11 +1251,11 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
   if (!ids.length || !ids.includes(taskId)) {
     throw new Error('Некорректный порядок');
   }
-  const prev =
+  const prevHint =
     previousId == null || previousId === ''
       ? null
       : String(previousId);
-  if (prev && prev === taskId) {
+  if (prevHint && prevHint === taskId) {
     throw new Error('Некорректная позиция');
   }
 
@@ -1037,19 +1286,22 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
     const listId = await resolveListId(tasksApi, listName);
     if (!listId) throw new Error(`Список «${listName}» не найден`);
 
+    const cached = lookupCachedItem(listKind, taskId);
+    const prev = resolveMovePreviousSibling(listKind, taskId, ids, prevHint);
+
     const moveParams = {
       tasklist: listId,
       task: taskId,
     };
     if (prev) moveParams.previous = prev;
-    const cached = lookupCachedItem(listKind, taskId);
+    // Keep existing nesting; omit parent for roots so Google does not reparent.
     if (cached && cached.parent) moveParams.parent = cached.parent;
 
     const res = await tasksApi.tasks.move(moveParams);
     const movedPatch = {
       id: taskId,
       position: (res && res.data && res.data.position) || '',
-      parent: (res && res.data && res.data.parent) || null,
+      parent: (res && res.data && res.data.parent) || (cached && cached.parent) || null,
     };
 
     reorderOfflineCache(listKind, ids);
@@ -1084,5 +1336,7 @@ module.exports = {
   clearOfflineCache,
   resolveTaskTime,
   resolveTaskDueAt,
+  normalizeDueTimeInput,
+  applyDueTimeToNotes,
   resetCompletedHabitsForNewDay,
 };

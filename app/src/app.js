@@ -25,11 +25,14 @@ const btnOpenConsole = document.getElementById('btnOpenConsole');
 const btnGoogleKeys = document.getElementById('btnGoogleKeys');
 const optAutostart = document.getElementById('optAutostart');
 const optSnap = document.getElementById('optSnap');
+const optSimpleAnim = document.getElementById('optSimpleAnim');
 const optAutoPalette = document.getElementById('optAutoPalette');
 const optBgOpacity = document.getElementById('optBgOpacity');
 const bgOpacityValue = document.getElementById('bgOpacityValue');
 const optReminders = document.getElementById('optReminders');
 const optDailyHabitsReset = document.getElementById('optDailyHabitsReset');
+const btnHideCompleted = document.getElementById('btnHideCompleted');
+const btnHideCompletedHabits = document.getElementById('btnHideCompletedHabits');
 const btnCheckReminders = document.getElementById('btnCheckReminders');
 const btnCheckUpdates = document.getElementById('btnCheckUpdates');
 const remindersHint = document.getElementById('remindersHint');
@@ -39,6 +42,31 @@ const hkToggle = document.getElementById('hkToggle');
 const hkSwitch = document.getElementById('hkSwitch');
 const inputAddTasks = document.getElementById('input-add-tasks');
 const inputAddHabits = document.getElementById('input-add-habits');
+const notesOverlay = document.getElementById('notesOverlay');
+const notesPanelTask = document.getElementById('notesPanelTask');
+const notesTextarea = document.getElementById('notesTextarea');
+const btnNotesSave = document.getElementById('btnNotesSave');
+const btnNotesCancel = document.getElementById('btnNotesCancel');
+const btnNotesClose = document.getElementById('btnNotesClose');
+const timeOverlay = document.getElementById('timeOverlay');
+const timePanelTask = document.getElementById('timePanelTask');
+const timeInput = document.getElementById('timeInput');
+const btnTimeSave = document.getElementById('btnTimeSave');
+const btnTimeCancel = document.getElementById('btnTimeCancel');
+const btnTimeClose = document.getElementById('btnTimeClose');
+const btnTimeClear = document.getElementById('btnTimeClear');
+
+const NOTES_IND_SVG =
+  '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h9l3 3v13H6z"/><path d="M14 4v4h4"/><path d="M8 12h8M8 16h6"/></svg>';
+
+/** @type {{ listKind: 'tasks' | 'habits', itemId: string, original: string } | null} */
+let notesTarget = null;
+/** @type {boolean} */
+let notesSaving = false;
+/** @type {{ listKind: 'tasks' | 'habits', itemId: string, original: string | null } | null} */
+let timeTarget = null;
+/** @type {boolean} */
+let timeSaving = false;
 
 /** Config accent from last server payload (before wallpaper override). */
 let configAccent = '#C4122E';
@@ -107,6 +135,8 @@ let settings = {
   bgOpacity: 0.72,
   remindersEnabled: true,
   dailyHabitsReset: true,
+  hideCompleted: false,
+  simpleAnimations: false,
   onboardingSkipped: false,
 };
 
@@ -144,6 +174,23 @@ function applySize(size) {
   document.documentElement.setAttribute('data-size', size === 'compact' ? 'compact' : 'normal');
 }
 
+function applySimpleAnimations(on) {
+  document.documentElement.setAttribute('data-simple-anim', on ? 'true' : 'false');
+}
+
+function prefersReducedMotion() {
+  try {
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch {
+    return false;
+  }
+}
+
+/** Instant view switch / no slide timers when quiet motion is active. */
+function motionQuiet() {
+  return Boolean(settings.simpleAnimations) || prefersReducedMotion();
+}
+
 /**
  * Clamp and apply glass fill alpha (0.2–0.95). Keeps strong fill ~0.1 above.
  * @param {unknown} value
@@ -179,6 +226,7 @@ function syncSettingsUi() {
   applyTheme(settings.theme);
   applySize(settings.size);
   applyBgOpacity(settings.bgOpacity);
+  applySimpleAnimations(Boolean(settings.simpleAnimations));
 
   document.querySelectorAll('.seg-btn[data-setting="theme"]').forEach((el) => {
     el.setAttribute('aria-pressed', String(el.dataset.value === settings.theme));
@@ -189,11 +237,13 @@ function syncSettingsUi() {
 
   optAutostart.checked = Boolean(settings.autostart);
   optSnap.checked = Boolean(settings.snapToEdge);
+  if (optSimpleAnim) optSimpleAnim.checked = Boolean(settings.simpleAnimations);
   if (optAutoPalette) optAutoPalette.checked = Boolean(settings.autoPalette);
   if (optReminders) optReminders.checked = settings.remindersEnabled !== false;
   if (optDailyHabitsReset) {
     optDailyHabitsReset.checked = settings.dailyHabitsReset !== false;
   }
+  syncHideCompletedUi();
   syncRemindersHint(settings);
 
   const hotkeys = settings.hotkeys || {};
@@ -206,6 +256,21 @@ function syncSettingsUi() {
 function setSettingsOpen(open) {
   settingsPanel.hidden = !open;
   btnSettings.setAttribute('aria-expanded', String(open));
+}
+
+function syncHideCompletedUi() {
+  const on = Boolean(settings.hideCompleted);
+  const label = on ? 'Показать выполненные' : 'Скрыть выполненные';
+  for (const btn of [btnHideCompleted, btnHideCompletedHabits]) {
+    if (!btn) continue;
+    btn.setAttribute('aria-pressed', String(on));
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    const showIcon = btn.querySelector('.hide-done-icon-show');
+    const hideIcon = btn.querySelector('.hide-done-icon-hide');
+    if (showIcon) showIcon.hidden = on;
+    if (hideIcon) hideIcon.hidden = !on;
+  }
 }
 
 /**
@@ -227,7 +292,7 @@ function syncRemindersHint(settings, opts = {}) {
     remindersHint.hidden = false;
     remindersHint.textContent = osDisabled
       ? 'Уведомления Windows выключены глобально. Параметры → Система → Уведомления — включите переключатель «Уведомления».'
-      : 'Если тосты не появляются: Параметры Windows → Система → Уведомления — разрешите «Glass Tasks Widget». Отключите Фокусировку внимания (Focus Assist).';
+      : 'Если баннеры Windows не появляются: Параметры → Система → Уведомления — разрешите «Glass Tasks Widget». Отключите Фокусировку внимания (Focus Assist).';
     remindersHint.classList.add('is-error');
     remindersHint.classList.remove('is-ok');
     return;
@@ -332,6 +397,17 @@ function patchSettings(patch) {
   if (typeof patch.bgOpacity === 'number') applyBgOpacity(patch.bgOpacity);
   if (typeof patch.autostart === 'boolean') optAutostart.checked = patch.autostart;
   if (typeof patch.snapToEdge === 'boolean') optSnap.checked = patch.snapToEdge;
+  if (typeof patch.simpleAnimations === 'boolean') {
+    applySimpleAnimations(patch.simpleAnimations);
+    if (optSimpleAnim) optSimpleAnim.checked = patch.simpleAnimations;
+    if (patch.simpleAnimations) {
+      panels.classList.remove('is-sliding');
+      if (slideClearTimer) {
+        clearTimeout(slideClearTimer);
+        slideClearTimer = null;
+      }
+    }
+  }
   if (typeof patch.autoPalette === 'boolean' && optAutoPalette) {
     optAutoPalette.checked = patch.autoPalette;
   }
@@ -340,6 +416,11 @@ function patchSettings(patch) {
   }
   if (typeof patch.dailyHabitsReset === 'boolean' && optDailyHabitsReset) {
     optDailyHabitsReset.checked = patch.dailyHabitsReset;
+  }
+  if (typeof patch.hideCompleted === 'boolean') {
+    syncHideCompletedUi();
+    renderTasks();
+    renderHabits();
   }
 
   document.querySelectorAll('.seg-btn[data-setting="theme"]').forEach((el) => {
@@ -406,9 +487,15 @@ function setView(next, force) {
   const prev = view;
   view = next;
 
-  if (!force && prev !== view) {
+  if (slideClearTimer) {
+    clearTimeout(slideClearTimer);
+    slideClearTimer = null;
+  }
+  panels.classList.remove('is-sliding');
+
+  const animate = !force && prev !== view && !motionQuiet();
+  if (animate) {
     panels.classList.add('is-sliding');
-    if (slideClearTimer) clearTimeout(slideClearTimer);
     const onEnd = (e) => {
       if (e.target !== panels || e.propertyName !== 'transform') return;
       panels.classList.remove('is-sliding');
@@ -423,7 +510,7 @@ function setView(next, force) {
       panels.classList.remove('is-sliding');
       panels.removeEventListener('transitionend', onEnd);
       slideClearTimer = null;
-    }, 700);
+    }, 400);
   }
 
   panels.dataset.view = view;
@@ -472,22 +559,82 @@ function taskDueClass(task) {
   return '';
 }
 
+function taskHasNotes(task) {
+  if (!task) return false;
+  const text = String(task.notes || '').trim();
+  if (!text) return false;
+  // Managed «время HH:MM» line alone is not real notes content.
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .some((l) => l && !/^(?:время|Время|time)\s*[:\-]?\s*\d{1,2}[:.]\d{2}$/i.test(l));
+}
+
+function taskHasTime(task) {
+  return Boolean(task && typeof task.dueTime === 'string' && /^\d{2}:\d{2}$/.test(task.dueTime));
+}
+
+function syncRowTimeChip(li, task) {
+  if (!li) return;
+  const metaLine = li.querySelector('.row-meta-line');
+  let chip = li.querySelector('.row-time');
+  if (!taskHasTime(task)) {
+    if (chip) chip.remove();
+    return;
+  }
+  if (!chip) {
+    chip = document.createElement('span');
+    chip.className = 'row-time';
+    chip.setAttribute('aria-label', 'Время');
+    if (metaLine) metaLine.appendChild(chip);
+    else {
+      const meta = li.querySelector('.row-meta');
+      if (meta && meta.parentElement) meta.parentElement.appendChild(chip);
+    }
+  }
+  chip.textContent = task.dueTime;
+  chip.title = `Время: ${task.dueTime}`;
+}
+
+/** Indent only when parent is present in the same open/done bucket. */
+function taskShowsAsSubtask(task) {
+  if (!task || !task.parent) return false;
+  const parent = state.tasks.find((t) => t && t.id === task.parent);
+  if (!parent) return false;
+  if (Boolean(parent.completed) !== Boolean(task.completed)) return false;
+  if (settings.hideCompleted && parent.completed) return false;
+  return true;
+}
+
+function taskRowClassName(task) {
+  return `row${task.completed ? ' done' : ''}${taskDueClass(task)}${taskShowsAsSubtask(task) ? ' row--sub' : ''}`;
+}
+
 function buildTaskRow(task) {
   const li = document.createElement('li');
-  li.className = `row${task.completed ? ' done' : ''}${taskDueClass(task)}`;
+  li.className = taskRowClassName(task);
   li.dataset.id = task.id;
+  if (task.parent) li.dataset.parent = task.parent;
   li.innerHTML = `
     <button type="button" class="drag-handle" aria-label="Перетащить" tabindex="-1" title="Перетащить">
       <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r="1.2"/><circle cx="11" cy="4" r="1.2"/><circle cx="5" cy="8" r="1.2"/><circle cx="11" cy="8" r="1.2"/><circle cx="5" cy="12" r="1.2"/><circle cx="11" cy="12" r="1.2"/></svg>
     </button>
     <span class="check${task.completed ? ' done' : ''}" aria-hidden="true"></span>
     <div class="row-body">
-      <div class="row-title"></div>
-      <div class="row-meta"></div>
+      <div class="row-title-line">
+        <div class="row-title"></div>
+        <span class="row-notes-ind" title="Есть заметки" aria-label="Есть заметки" hidden>${NOTES_IND_SVG}</span>
+      </div>
+      <div class="row-meta-line">
+        <div class="row-meta"></div>
+      </div>
     </div>
   `;
   li.querySelector('.row-title').textContent = task.title;
   li.querySelector('.row-meta').textContent = task.meta || '';
+  const notesInd = li.querySelector('.row-notes-ind');
+  if (notesInd) notesInd.hidden = !taskHasNotes(task);
+  syncRowTimeChip(li, task);
   return li;
 }
 
@@ -514,7 +661,9 @@ function buildHabitRow(habit) {
     <span class="habit-icon" aria-hidden="true">${habitIconHtml(habit.title)}</span>
     <div class="row-body">
       <div class="row-title"></div>
-      <div class="row-meta"></div>
+      <div class="row-meta-line">
+        <div class="row-meta"></div>
+      </div>
     </div>
     <div class="streak" aria-label="Стрик ${streak} дней">
       <div class="week-strip" aria-hidden="true">${pills}</div>
@@ -523,28 +672,50 @@ function buildHabitRow(habit) {
   `;
   li.querySelector('.row-title').textContent = habit.title;
   li.querySelector('.row-meta').textContent = habit.meta || 'Daily';
+  syncRowTimeChip(li, habit);
   return li;
 }
 
+/** @param {any[]} items */
+function filterVisibleItems(items) {
+  if (!settings.hideCompleted) return items;
+  return items.filter((it) => !it.completed);
+}
+
+function ensureListEmpty(listEl, kind, allItems, visibleItems) {
+  if (visibleItems.length) return;
+  const empty =
+    kind === 'habits'
+      ? allItems.length
+        ? '<li class="empty">Все привычки на сегодня выполнены.</li>'
+        : '<li class="empty">Нет привычек. Добавьте ниже или создайте список «Habits».</li>'
+      : allItems.length
+        ? '<li class="empty">Все задачи выполнены.</li>'
+        : '<li class="empty">Нет задач. Добавьте ниже или создайте список Google Tasks.</li>';
+  listEl.innerHTML = empty;
+}
+
 function renderTasks() {
-  const frag = document.createDocumentFragment();
-  if (!state.tasks.length) {
-    listTasks.innerHTML = '<li class="empty">Нет задач. Добавьте ниже или создайте список Google Tasks.</li>';
+  const visible = filterVisibleItems(state.tasks);
+  if (!visible.length) {
+    ensureListEmpty(listTasks, 'tasks', state.tasks, visible);
     return;
   }
-  for (const task of state.tasks) {
+  const frag = document.createDocumentFragment();
+  for (const task of visible) {
     frag.appendChild(buildTaskRow(task));
   }
   listTasks.replaceChildren(frag);
 }
 
 function renderHabits() {
-  const frag = document.createDocumentFragment();
-  if (!state.habits.length) {
-    listHabits.innerHTML = '<li class="empty">Нет привычек. Добавьте ниже или создайте список «Habits».</li>';
+  const visible = filterVisibleItems(state.habits);
+  if (!visible.length) {
+    ensureListEmpty(listHabits, 'habits', state.habits, visible);
     return;
   }
-  for (const habit of state.habits) {
+  const frag = document.createDocumentFragment();
+  for (const habit of visible) {
     frag.appendChild(buildHabitRow(habit));
   }
   listHabits.replaceChildren(frag);
@@ -566,6 +737,14 @@ function syncListOrder(listEl, items) {
 }
 
 function patchTaskRow(task) {
+  const visible = filterVisibleItems(state.tasks);
+  if (settings.hideCompleted && task.completed) {
+    const li = rowById(listTasks, task.id);
+    if (li) li.remove();
+    syncListOrder(listTasks, visible);
+    ensureListEmpty(listTasks, 'tasks', state.tasks, visible);
+    return;
+  }
   const empty = listTasks.querySelector('.empty');
   if (empty) empty.remove();
   let li = rowById(listTasks, task.id);
@@ -573,21 +752,57 @@ function patchTaskRow(task) {
     li = buildTaskRow(task);
     listTasks.appendChild(li);
   } else {
-    li.className = `row${task.completed ? ' done' : ''}${taskDueClass(task)}`;
+    li.className = taskRowClassName(task);
+    if (task.parent) li.dataset.parent = task.parent;
+    else delete li.dataset.parent;
     const check = li.querySelector('.check');
     if (check) check.className = `check${task.completed ? ' done' : ''}`;
     const title = li.querySelector('.row-title');
     if (title) title.textContent = task.title;
-    const meta = li.querySelector('.row-meta');
+    let metaLine = li.querySelector('.row-meta-line');
+    let meta = li.querySelector('.row-meta');
+    if (!metaLine && meta) {
+      metaLine = document.createElement('div');
+      metaLine.className = 'row-meta-line';
+      meta.replaceWith(metaLine);
+      metaLine.appendChild(meta);
+    }
+    if (!meta && metaLine) {
+      meta = document.createElement('div');
+      meta.className = 'row-meta';
+      metaLine.prepend(meta);
+    }
     if (meta) meta.textContent = task.meta || '';
+    syncRowTimeChip(li, task);
+    let notesInd = li.querySelector('.row-notes-ind');
+    if (!notesInd) {
+      const titleLine = li.querySelector('.row-title-line') || li.querySelector('.row-body');
+      if (titleLine) {
+        notesInd = document.createElement('span');
+        notesInd.className = 'row-notes-ind';
+        notesInd.title = 'Есть заметки';
+        notesInd.setAttribute('aria-label', 'Есть заметки');
+        notesInd.innerHTML = NOTES_IND_SVG;
+        const titleEl = li.querySelector('.row-title');
+        if (titleEl && titleEl.parentElement === titleLine) titleLine.appendChild(notesInd);
+        else titleLine.prepend(notesInd);
+      }
+    }
+    if (notesInd) notesInd.hidden = !taskHasNotes(task);
   }
-  syncListOrder(listTasks, state.tasks);
-  if (!state.tasks.length) {
-    listTasks.innerHTML = '<li class="empty">Нет задач. Добавьте ниже или создайте список Google Tasks.</li>';
-  }
+  syncListOrder(listTasks, visible);
+  ensureListEmpty(listTasks, 'tasks', state.tasks, visible);
 }
 
 function patchHabitRow(habit) {
+  const visible = filterVisibleItems(state.habits);
+  if (settings.hideCompleted && habit.completed) {
+    const li = rowById(listHabits, habit.id);
+    if (li) li.remove();
+    syncListOrder(listHabits, visible);
+    ensureListEmpty(listHabits, 'habits', state.habits, visible);
+    return;
+  }
   const empty = listHabits.querySelector('.empty');
   if (empty) empty.remove();
   let li = rowById(listHabits, habit.id);
@@ -601,8 +816,21 @@ function patchHabitRow(habit) {
     if (icon) icon.innerHTML = habitIconHtml(habit.title);
     const title = li.querySelector('.row-title');
     if (title) title.textContent = habit.title;
-    const meta = li.querySelector('.row-meta');
+    let metaLine = li.querySelector('.row-meta-line');
+    let meta = li.querySelector('.row-meta');
+    if (!metaLine && meta) {
+      metaLine = document.createElement('div');
+      metaLine.className = 'row-meta-line';
+      meta.replaceWith(metaLine);
+      metaLine.appendChild(meta);
+    }
+    if (!meta && metaLine) {
+      meta = document.createElement('div');
+      meta.className = 'row-meta';
+      metaLine.prepend(meta);
+    }
     if (meta) meta.textContent = habit.meta || 'Daily';
+    syncRowTimeChip(li, habit);
     const streakEl = li.querySelector('.streak');
     if (streakEl) {
       const streak = habit.streak || 0;
@@ -622,16 +850,45 @@ function patchHabitRow(habit) {
       });
     }
   }
-  syncListOrder(listHabits, state.habits);
-  if (!state.habits.length) {
-    listHabits.innerHTML = '<li class="empty">Нет привычек. Добавьте ниже или создайте список «Habits».</li>';
+  syncListOrder(listHabits, visible);
+  ensureListEmpty(listHabits, 'habits', state.habits, visible);
+}
+
+function nestTasksLocal(tasks) {
+  const byId = new Map();
+  for (const t of tasks) {
+    if (t && t.id) byId.set(t.id, t);
   }
+  /** @type {Map<string, typeof tasks>} */
+  const children = new Map();
+  /** @type {typeof tasks} */
+  const roots = [];
+  for (const t of tasks) {
+    if (!t || !t.id) continue;
+    if (t.parent && byId.has(t.parent)) {
+      if (!children.has(t.parent)) children.set(t.parent, []);
+      children.get(t.parent).push(t);
+    } else {
+      roots.push(t);
+    }
+  }
+  /** @type {typeof tasks} */
+  const out = [];
+  const walk = (list) => {
+    for (const t of list) {
+      out.push(t);
+      const kids = children.get(t.id);
+      if (kids && kids.length) walk(kids);
+    }
+  };
+  walk(roots);
+  return out;
 }
 
 function resortTasksLocal() {
-  // Preserve manual / Google position order; only partition open vs done.
-  const open = state.tasks.filter((t) => !t.completed);
-  const done = state.tasks.filter((t) => t.completed).slice(0, 5);
+  // Preserve sibling order; nest children under parents; partition open vs done.
+  const open = nestTasksLocal(state.tasks.filter((t) => !t.completed));
+  const done = nestTasksLocal(state.tasks.filter((t) => t.completed)).slice(0, 5);
   state.tasks = [...open, ...done];
 }
 
@@ -784,9 +1041,16 @@ function insertCreatedItem(listKind, item) {
     resortHabitsLocal();
     patchHabitRow(item);
   } else {
-    state.tasks = [item, ...state.tasks.filter((t) => t.id !== item.id)];
+    state.tasks = state.tasks.filter((t) => t.id !== item.id);
+    if (item.parent) {
+      const idx = state.tasks.findIndex((t) => t.id === item.parent);
+      if (idx >= 0) state.tasks.splice(idx + 1, 0, item);
+      else state.tasks.unshift(item);
+    } else {
+      state.tasks.unshift(item);
+    }
     resortTasksLocal();
-    patchTaskRow(item);
+    renderTasks();
   }
 }
 
@@ -901,9 +1165,26 @@ function bindListReorder(listKind, listEl) {
     applyLocalReorder(listKind, nextIds);
     const finalIds = (listKind === 'habits' ? state.habits : state.tasks).map((it) => it.id);
     const newIndex = finalIds.indexOf(movedId);
-    const previousId = newIndex > 0 ? finalIds[newIndex - 1] : null;
     if (newIndex < 0 || finalIds.join('\0') === ids.join('\0')) return;
+    const previousId = previousSiblingId(listKind, finalIds, movedId);
     persistReorder(listKind, movedId, previousId, finalIds);
+  }
+
+  function previousSiblingId(kind, orderedIds, taskId) {
+    const items = kind === 'habits' ? state.habits : state.tasks;
+    const byId = new Map(items.map((it) => [it.id, it]));
+    const moved = byId.get(taskId);
+    if (!moved) return null;
+    const parent = moved.parent || null;
+    const idx = orderedIds.indexOf(taskId);
+    for (let i = idx - 1; i >= 0; i -= 1) {
+      const id = orderedIds[i];
+      if (parent && id === parent) return null;
+      const prev = byId.get(id);
+      if (!prev) continue;
+      if ((prev.parent || null) === parent) return id;
+    }
+    return null;
   }
 
   function applyLocalReorder(kind, orderedIds) {
@@ -920,10 +1201,10 @@ function bindListReorder(listKind, listEl) {
     state[key] = next;
     if (kind === 'habits') {
       resortHabitsLocal();
-      syncListOrder(listHabits, state.habits);
+      syncListOrder(listHabits, filterVisibleItems(state.habits));
     } else {
       resortTasksLocal();
-      syncListOrder(listTasks, state.tasks);
+      syncListOrder(listTasks, filterVisibleItems(state.tasks));
     }
   }
 
@@ -1096,22 +1377,34 @@ async function removeItem(listKind, item) {
   if (!guardMutate('удалить задачу')) return;
   if (pendingIds.has(item.id)) return;
   const label = listKind === 'habits' ? 'привычку' : 'задачу';
-  if (!window.confirm(`Удалить ${label} «${item.title}»?`)) return;
+  const childCount =
+    listKind === 'tasks'
+      ? state.tasks.filter((t) => t && t.parent === item.id).length
+      : 0;
+  const confirmMsg =
+    childCount > 0
+      ? `Удалить задачу «${item.title}» и ${childCount} подзадач${childCount === 1 ? 'у' : childCount < 5 ? 'и' : ''}?`
+      : `Удалить ${label} «${item.title}»?`;
+  if (!window.confirm(confirmMsg)) return;
 
   pendingIds.add(item.id);
   const listKey = listKind === 'habits' ? 'habits' : 'tasks';
   const prevList = state[listKey].slice();
-  state[listKey] = prevList.filter((i) => i.id !== item.id);
+  const removedIds = new Set([item.id]);
+  if (listKind === 'tasks') {
+    for (const t of prevList) {
+      if (t && t.parent === item.id) removedIds.add(t.id);
+    }
+  }
+  state[listKey] = prevList.filter((i) => i && !removedIds.has(i.id));
 
   const listEl = listKind === 'habits' ? listHabits : listTasks;
-  const row = rowById(listEl, item.id);
-  if (row) row.remove();
-  if (!state[listKey].length) {
-    listEl.innerHTML =
-      listKind === 'habits'
-        ? '<li class="empty">Нет привычек. Добавьте ниже или создайте список «Habits».</li>'
-        : '<li class="empty">Нет задач. Добавьте ниже или создайте список Google Tasks.</li>';
+  for (const id of removedIds) {
+    const row = rowById(listEl, id);
+    if (row) row.remove();
   }
+  const visible = filterVisibleItems(state[listKey]);
+  ensureListEmpty(listEl, listKind, state[listKey], visible);
 
   try {
     await window.widgetApi.deleteItem(listKind, item.id);
@@ -1178,6 +1471,227 @@ function beginInlineEdit(listKind, item, row) {
 let ctxMenuTarget = null;
 let ctxMenuEl = null;
 
+function closeNotesPanel({ revert } = {}) {
+  if (!notesOverlay || notesOverlay.hidden) return;
+  if (revert && notesTarget) {
+    const items = notesTarget.listKind === 'habits' ? state.habits : state.tasks;
+    const item = items.find((i) => i.id === notesTarget.itemId);
+    if (item) item.notes = notesTarget.original;
+  }
+  notesTarget = null;
+  notesOverlay.hidden = true;
+  if (notesTextarea) notesTextarea.value = '';
+}
+
+async function saveNotesPanel({ closeAfter } = {}) {
+  if (!notesTarget || !window.widgetApi || notesSaving) return false;
+  if (!guardMutate('сохранить заметки')) return false;
+  const { listKind, itemId, original } = notesTarget;
+  const items = listKind === 'habits' ? state.habits : state.tasks;
+  const item = items.find((i) => i.id === itemId);
+  if (!item) {
+    closeNotesPanel();
+    return false;
+  }
+  const notes = String(notesTextarea?.value || '');
+  if (notes === original) {
+    if (closeAfter) closeNotesPanel();
+    return true;
+  }
+  notesSaving = true;
+  if (btnNotesSave) btnNotesSave.disabled = true;
+  try {
+    const result = await window.widgetApi.updateItem(listKind, itemId, { notes });
+    item.notes = notes;
+    if (result && result.item) {
+      if (typeof result.item.meta === 'string') item.meta = result.item.meta;
+      if (typeof result.item.dueTime === 'string' || result.item.dueTime === null) {
+        item.dueTime = result.item.dueTime;
+      }
+    }
+    notesTarget.original = notes;
+    if (listKind === 'habits') patchHabitRow(item);
+    else patchTaskRow(item);
+    if (closeAfter) closeNotesPanel();
+    return true;
+  } catch (err) {
+    setBanner(`Не удалось сохранить заметки: ${err.message || err}`);
+    return false;
+  } finally {
+    notesSaving = false;
+    if (btnNotesSave) btnNotesSave.disabled = false;
+  }
+}
+
+function openNotesPanel(listKind, item) {
+  if (!notesOverlay || !notesTextarea || !item) return;
+  if (!guardMutate('изменить заметки')) return;
+  hideCtxMenu();
+  closeTimePanel();
+  notesTarget = {
+    listKind,
+    itemId: item.id,
+    original: String(item.notes || ''),
+  };
+  if (notesPanelTask) notesPanelTask.textContent = item.title || '';
+  notesTextarea.value = notesTarget.original;
+  notesOverlay.hidden = false;
+  notesTextarea.focus();
+  notesTextarea.setSelectionRange(notesTextarea.value.length, notesTextarea.value.length);
+}
+
+function closeTimePanel() {
+  if (!timeOverlay || timeOverlay.hidden) return;
+  timeTarget = null;
+  timeOverlay.hidden = true;
+  if (timeInput) timeInput.value = '';
+}
+
+async function saveTimePanel({ closeAfter, clear } = {}) {
+  if (!timeTarget || !window.widgetApi || timeSaving) return false;
+  if (!guardMutate('сохранить время')) return false;
+  const { listKind, itemId, original } = timeTarget;
+  const items = listKind === 'habits' ? state.habits : state.tasks;
+  const item = items.find((i) => i.id === itemId);
+  if (!item) {
+    closeTimePanel();
+    return false;
+  }
+
+  /** @type {string | null} */
+  let next = null;
+  if (!clear) {
+    const raw = String(timeInput?.value || '').trim();
+    if (!raw) {
+      setBanner('Укажите время или нажмите «Сбросить»');
+      return false;
+    }
+    const m = raw.match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) {
+      setBanner('Время в формате ЧЧ:ММ');
+      return false;
+    }
+    next = `${String(Number(m[1])).padStart(2, '0')}:${m[2]}`;
+  }
+
+  if (next === original || (next === null && original === null)) {
+    if (closeAfter) closeTimePanel();
+    return true;
+  }
+
+  timeSaving = true;
+  if (btnTimeSave) btnTimeSave.disabled = true;
+  if (btnTimeClear) btnTimeClear.disabled = true;
+  try {
+    const result = await window.widgetApi.updateItem(listKind, itemId, { dueTime: next });
+    if (result && result.item) {
+      if (typeof result.item.notes === 'string') item.notes = result.item.notes;
+      if (typeof result.item.meta === 'string') item.meta = result.item.meta;
+      if (typeof result.item.dueTime === 'string' || result.item.dueTime === null) {
+        item.dueTime = result.item.dueTime;
+      } else {
+        item.dueTime = next;
+      }
+    } else {
+      item.dueTime = next;
+    }
+    timeTarget.original = item.dueTime || null;
+    if (listKind === 'habits') patchHabitRow(item);
+    else patchTaskRow(item);
+    if (closeAfter) closeTimePanel();
+    return true;
+  } catch (err) {
+    setBanner(`Не удалось сохранить время: ${err.message || err}`);
+    return false;
+  } finally {
+    timeSaving = false;
+    if (btnTimeSave) btnTimeSave.disabled = false;
+    if (btnTimeClear) btnTimeClear.disabled = false;
+  }
+}
+
+function openTimePanel(listKind, item) {
+  if (!timeOverlay || !timeInput || !item) return;
+  if (!guardMutate('изменить время')) return;
+  hideCtxMenu();
+  closeNotesPanel();
+  const original =
+    typeof item.dueTime === 'string' && /^\d{2}:\d{2}$/.test(item.dueTime) ? item.dueTime : null;
+  timeTarget = {
+    listKind,
+    itemId: item.id,
+    original,
+  };
+  if (timePanelTask) timePanelTask.textContent = item.title || '';
+  timeInput.value = original || '';
+  timeOverlay.hidden = false;
+  timeInput.focus();
+}
+
+async function beginAddSubtask(parentItem, parentRow) {
+  if (!parentItem || !parentRow) return;
+  if (!guardMutate('добавить подзадачу')) return;
+  hideCtxMenu();
+
+  const existing = listTasks.querySelector('.row-sub-edit');
+  if (existing) existing.remove();
+
+  const wrap = document.createElement('li');
+  wrap.className = 'row-sub-edit';
+  wrap.setAttribute('aria-label', 'Новая подзадача');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'row-sub-edit-input';
+  input.maxLength = 200;
+  input.placeholder = 'Новая подзадача…';
+  input.setAttribute('aria-label', 'Название подзадачи');
+  wrap.appendChild(input);
+  parentRow.insertAdjacentElement('afterend', wrap);
+  input.focus();
+
+  let finished = false;
+  const finish = async (save) => {
+    if (finished) return;
+    finished = true;
+    const title = String(input.value || '').trim();
+    wrap.remove();
+    if (!save || !title) return;
+    if (addBusy) return;
+    addBusy = true;
+    try {
+      const result = await window.widgetApi.createItem('tasks', title, {
+        parentId: parentItem.id,
+      });
+      if (result && result.item) {
+        insertCreatedItem('tasks', result.item);
+      } else {
+        await loadData(true);
+      }
+    } catch (err) {
+      setBanner(`Не удалось добавить подзадачу: ${err.message || err}`);
+    } finally {
+      addBusy = false;
+    }
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(true);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => {
+    // Allow click on empty cancel without fighting focus changes
+    setTimeout(() => finish(Boolean(String(input.value || '').trim())), 120);
+  });
+  input.addEventListener('click', (e) => e.stopPropagation());
+}
+
 function ensureCtxMenu() {
   if (ctxMenuEl) return ctxMenuEl;
   ctxMenuEl = document.createElement('div');
@@ -1189,6 +1703,18 @@ function ensureCtxMenu() {
     '<button type="button" class="ctx-menu-item" role="menuitem" data-action="edit">' +
       '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.2 4.8l5 5M4 20l1.4-5.2L15 5.2l3.8 3.8L9.2 18.6 4 20z"/></svg>' +
       '<span>Изменить</span>' +
+    '</button>' +
+    '<button type="button" class="ctx-menu-item" role="menuitem" data-action="notes">' +
+      '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h9l3 3v13H6z"/><path d="M14 4v4h4"/><path d="M8 12h8M8 16h6"/></svg>' +
+      '<span>Заметки</span>' +
+    '</button>' +
+    '<button type="button" class="ctx-menu-item" role="menuitem" data-action="time">' +
+      '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v5l3 2"/></svg>' +
+      '<span>Время</span>' +
+    '</button>' +
+    '<button type="button" class="ctx-menu-item" role="menuitem" data-action="subtask">' +
+      '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h8M4 18h16"/><path d="M14 10l4 2-4 2"/></svg>' +
+      '<span>Подзадача</span>' +
     '</button>' +
     '<button type="button" class="ctx-menu-item danger" role="menuitem" data-action="delete">' +
       '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M10 11v6M14 11v6M6 7l1 12h10l1-12"/></svg>' +
@@ -1206,10 +1732,14 @@ function ensureCtxMenu() {
     const item = items.find((i) => i.id === itemId);
     const listEl = listKind === 'habits' ? listHabits : listTasks;
     const row = item ? rowById(listEl, item.id) : null;
+    const action = btn.dataset.action;
     hideCtxMenu();
     if (!item) return;
-    if (btn.dataset.action === 'edit') beginInlineEdit(listKind, item, row);
-    else if (btn.dataset.action === 'delete') removeItem(listKind, item);
+    if (action === 'edit') beginInlineEdit(listKind, item, row);
+    else if (action === 'notes') openNotesPanel(listKind, item);
+    else if (action === 'time') openTimePanel(listKind, item);
+    else if (action === 'subtask' && listKind === 'tasks') beginAddSubtask(item, row);
+    else if (action === 'delete') removeItem(listKind, item);
   });
 
   return ctxMenuEl;
@@ -1224,6 +1754,9 @@ function hideCtxMenu() {
 function showCtxMenu(listKind, item, e) {
   const menu = ensureCtxMenu();
   ctxMenuTarget = { listKind, itemId: item.id };
+  const subBtn = menu.querySelector('[data-action="subtask"]');
+  // Google Tasks supports one nesting level — only top-level tasks get «Подзадача».
+  if (subBtn) subBtn.hidden = listKind !== 'tasks' || Boolean(item.parent);
   menu.hidden = false;
 
   // Measure off-screen then clamp into viewport
@@ -1446,13 +1979,123 @@ document.addEventListener('pointerdown', (e) => {
   if (ctxMenuEl && !ctxMenuEl.hidden && !ctxMenuEl.contains(e.target)) hideCtxMenu();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') hideCtxMenu();
+  if (e.key !== 'Escape') return;
+  if (timeOverlay && !timeOverlay.hidden) {
+    e.preventDefault();
+    closeTimePanel();
+    return;
+  }
+  if (notesOverlay && !notesOverlay.hidden) {
+    e.preventDefault();
+    closeNotesPanel({ revert: true });
+    return;
+  }
+  hideCtxMenu();
 });
 window.addEventListener('blur', hideCtxMenu);
 window.addEventListener('resize', hideCtxMenu);
 panels?.addEventListener('scroll', hideCtxMenu, true);
 panelTasks?.addEventListener('scroll', hideCtxMenu);
 panelHabits?.addEventListener('scroll', hideCtxMenu);
+
+/** Avoid textarea blur auto-save when Cancel / overlay dismiss is intended. */
+let notesIgnoreBlur = false;
+function armNotesIgnoreBlur() {
+  notesIgnoreBlur = true;
+  setTimeout(() => {
+    notesIgnoreBlur = false;
+  }, 200);
+}
+
+if (btnNotesSave) {
+  btnNotesSave.addEventListener('mousedown', armNotesIgnoreBlur);
+  btnNotesSave.addEventListener('click', (e) => {
+    e.preventDefault();
+    saveNotesPanel({ closeAfter: true });
+  });
+}
+if (btnNotesCancel) {
+  btnNotesCancel.addEventListener('mousedown', armNotesIgnoreBlur);
+  btnNotesCancel.addEventListener('click', (e) => {
+    e.preventDefault();
+    closeNotesPanel({ revert: true });
+  });
+}
+if (btnNotesClose) {
+  btnNotesClose.addEventListener('mousedown', armNotesIgnoreBlur);
+  btnNotesClose.addEventListener('click', (e) => {
+    e.preventDefault();
+    closeNotesPanel({ revert: true });
+  });
+}
+if (notesOverlay) {
+  notesOverlay.addEventListener('mousedown', (e) => {
+    if (e.target === notesOverlay) armNotesIgnoreBlur();
+  });
+  notesOverlay.addEventListener('click', (e) => {
+    if (e.target === notesOverlay) closeNotesPanel({ revert: true });
+  });
+}
+if (notesTextarea) {
+  notesTextarea.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (notesIgnoreBlur || !notesOverlay || notesOverlay.hidden || notesSaving) return;
+      saveNotesPanel({ closeAfter: false });
+    }, 120);
+  });
+  notesTextarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeNotesPanel({ revert: true });
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      saveNotesPanel({ closeAfter: true });
+    }
+  });
+}
+
+if (btnTimeSave) {
+  btnTimeSave.addEventListener('click', (e) => {
+    e.preventDefault();
+    saveTimePanel({ closeAfter: true });
+  });
+}
+if (btnTimeClear) {
+  btnTimeClear.addEventListener('click', (e) => {
+    e.preventDefault();
+    saveTimePanel({ closeAfter: true, clear: true });
+  });
+}
+if (btnTimeCancel) {
+  btnTimeCancel.addEventListener('click', (e) => {
+    e.preventDefault();
+    closeTimePanel();
+  });
+}
+if (btnTimeClose) {
+  btnTimeClose.addEventListener('click', (e) => {
+    e.preventDefault();
+    closeTimePanel();
+  });
+}
+if (timeOverlay) {
+  timeOverlay.addEventListener('click', (e) => {
+    if (e.target === timeOverlay) closeTimePanel();
+  });
+}
+if (timeInput) {
+  timeInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeTimePanel();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      saveTimePanel({ closeAfter: true });
+    }
+  });
+}
 
 document.querySelectorAll('.tab, .dot').forEach((el) => {
   el.addEventListener('click', () => setView(el.dataset.view));
@@ -1469,6 +2112,11 @@ document.querySelectorAll('.seg-btn').forEach((el) => {
 
 optAutostart.addEventListener('change', () => patchSettings({ autostart: optAutostart.checked }));
 optSnap.addEventListener('change', () => patchSettings({ snapToEdge: optSnap.checked }));
+if (optSimpleAnim) {
+  optSimpleAnim.addEventListener('change', () =>
+    patchSettings({ simpleAnimations: optSimpleAnim.checked })
+  );
+}
 if (optReminders) {
   optReminders.addEventListener('change', () =>
     patchSettings({ remindersEnabled: optReminders.checked })
@@ -1479,6 +2127,20 @@ if (optDailyHabitsReset) {
     patchSettings({ dailyHabitsReset: optDailyHabitsReset.checked })
   );
 }
+
+function onHideCompletedToggle(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  patchSettings({ hideCompleted: !settings.hideCompleted });
+}
+
+if (btnHideCompleted) {
+  btnHideCompleted.addEventListener('click', onHideCompletedToggle);
+}
+if (btnHideCompletedHabits) {
+  btnHideCompletedHabits.addEventListener('click', onHideCompletedToggle);
+}
+
 if (btnCheckReminders) {
   btnCheckReminders.addEventListener('click', async (e) => {
     e.preventDefault();
@@ -1489,7 +2151,9 @@ if (btnCheckReminders) {
       const result = await window.widgetApi.checkReminders();
       if (result?.shown) {
         syncRemindersHint(null, {
-          text: `Отправлено: ${result.count || 0}. Проверьте область уведомлений Windows.`,
+          text:
+            result.message ||
+            `Отправлено: ${result.count || 0}. Смотрите баннер Windows / Центр уведомлений.`,
           tone: 'ok',
         });
       } else if (
@@ -1500,7 +2164,7 @@ if (btnCheckReminders) {
         syncRemindersHint(null, {
           text:
             result.message ||
-            'Тосты недоступны. Разрешите уведомления для «Glass Tasks Widget» и отключите Фокусировку внимания.',
+            'Тосты Windows недоступны. Параметры → Система → Уведомления — разрешите «Glass Tasks Widget» и отключите Фокусировку внимания.',
           tone: 'error',
         });
       } else {
@@ -1664,6 +2328,33 @@ if (window.widgetApi?.onHabitsReset) {
   window.widgetApi.onHabitsReset(() => {
     loadData(true).catch(() => {});
   });
+}
+
+/** @type {ReturnType<typeof setTimeout> | null} */
+let inAppToastTimer = null;
+function showInAppReminderToast(payload) {
+  const el = document.getElementById('inAppToast');
+  const titleEl = document.getElementById('inAppToastTitle');
+  const bodyEl = document.getElementById('inAppToastBody');
+  if (!el || !titleEl || !bodyEl) return;
+  titleEl.textContent = payload?.title || 'Напоминание';
+  bodyEl.textContent = payload?.body || '';
+  el.hidden = false;
+  if (inAppToastTimer) clearTimeout(inAppToastTimer);
+  inAppToastTimer = setTimeout(() => {
+    el.hidden = true;
+    inAppToastTimer = null;
+  }, 8000);
+  el.onclick = () => {
+    el.hidden = true;
+    if (inAppToastTimer) {
+      clearTimeout(inAppToastTimer);
+      inAppToastTimer = null;
+    }
+  };
+}
+if (window.widgetApi?.onInAppReminder) {
+  window.widgetApi.onInAppReminder((payload) => showInAppReminderToast(payload));
 }
 
 setView('tasks', true);

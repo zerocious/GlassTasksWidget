@@ -24,7 +24,17 @@ const DEFAULT_TASKS = [
   {
     id: 'mock-t1',
     title: 'Review project proposal',
+    notes: 'время 09:30\nCheck budget section before Friday',
+    parent: null,
+    due: dueIsoDaysFromNow(0),
+    status: 'needsAction',
+    completed: false,
+  },
+  {
+    id: 'mock-t1a',
+    title: 'Summarize stakeholder feedback',
     notes: '',
+    parent: 'mock-t1',
     due: dueIsoDaysFromNow(0),
     status: 'needsAction',
     completed: false,
@@ -33,6 +43,7 @@ const DEFAULT_TASKS = [
     id: 'mock-t2',
     title: 'Design landing page',
     notes: '',
+    parent: null,
     due: dueIsoDaysFromNow(2),
     status: 'needsAction',
     completed: false,
@@ -41,6 +52,7 @@ const DEFAULT_TASKS = [
     id: 'mock-t3',
     title: 'Reply to emails',
     notes: '',
+    parent: null,
     due: dueIsoDaysFromNow(-1),
     status: 'completed',
     completed: true,
@@ -49,6 +61,7 @@ const DEFAULT_TASKS = [
     id: 'mock-t4',
     title: 'Workout',
     notes: '',
+    parent: null,
     due: dueIsoDaysFromNow(-2),
     status: 'needsAction',
     completed: false,
@@ -57,6 +70,7 @@ const DEFAULT_TASKS = [
     id: 'mock-t5',
     title: 'Grocery shopping',
     notes: '',
+    parent: null,
     due: null,
     status: 'needsAction',
     completed: false,
@@ -64,7 +78,7 @@ const DEFAULT_TASKS = [
 ];
 
 const DEFAULT_HABITS = [
-  { id: 'mock-h1', title: 'Meditate', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
+  { id: 'mock-h1', title: 'Meditate', meta: 'Daily', status: 'needsAction', completed: false, notes: 'время 07:00', due: null },
   { id: 'mock-h2', title: 'Exercise', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
   { id: 'mock-h3', title: 'Read', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
   { id: 'mock-h4', title: 'Drink Water', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
@@ -122,12 +136,33 @@ function formatMockMeta(task) {
   return task.meta || (task.completed ? 'Done' : 'Task');
 }
 
+/**
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string} taskId
+ * @returns {object | null}
+ */
+function getMockItem(listKind, taskId) {
+  if (listKind !== 'tasks' && listKind !== 'habits') return null;
+  if (typeof taskId !== 'string' || !taskId.trim()) return null;
+  const store = loadMockStore();
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  const item = (store[key] || []).find((i) => i && i.id === taskId);
+  if (!item) return null;
+  return {
+    ...item,
+    notes: item.notes || '',
+    parent: item.parent || null,
+  };
+}
+
 function getMockPayload(config) {
   seedDemoStreaks();
   const store = loadMockStore();
 
   const tasks = store.tasks.map((t) => ({
     ...t,
+    notes: t.notes || '',
+    parent: t.parent || null,
     meta: formatMockMeta(t),
   }));
 
@@ -155,11 +190,18 @@ function getMockPayload(config) {
   };
 }
 
-function addMockItem(listKind, title) {
+function addMockItem(listKind, title, opts = {}) {
   const store = loadMockStore();
   const id = `mock-${listKind[0]}-${Date.now().toString(36)}`;
   const trimmed = String(title || '').trim();
   if (!trimmed) throw new Error('Введите название');
+  const parentId =
+    listKind === 'tasks' &&
+    opts &&
+    typeof opts.parentId === 'string' &&
+    opts.parentId.trim()
+      ? opts.parentId.trim()
+      : null;
 
   if (listKind === 'habits') {
     const item = {
@@ -170,6 +212,7 @@ function addMockItem(listKind, title) {
       completed: false,
       notes: '',
       due: null,
+      parent: null,
     };
     store.habits.unshift(item);
     saveMockStore(store);
@@ -183,8 +226,15 @@ function addMockItem(listKind, title) {
     due: null,
     status: 'needsAction',
     completed: false,
+    parent: parentId,
   };
-  store.tasks.unshift(item);
+  if (parentId) {
+    const idx = store.tasks.findIndex((t) => t && t.id === parentId);
+    if (idx >= 0) store.tasks.splice(idx + 1, 0, item);
+    else store.tasks.unshift(item);
+  } else {
+    store.tasks.unshift(item);
+  }
   saveMockStore(store);
   return { ok: true, mode: 'mock', item };
 }
@@ -210,23 +260,57 @@ function setMockCompleted(listKind, taskId, completed) {
   return { ok: true, mode: 'mock' };
 }
 
-function updateMockItem(listKind, taskId, title) {
-  const trimmed = String(title || '').trim();
-  if (!trimmed) throw new Error('Введите название');
+/**
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string} taskId
+ * @param {string | { title?: string, notes?: string }} patchOrTitle
+ */
+function updateMockItem(listKind, taskId, patchOrTitle) {
+  /** @type {{ title?: string, notes?: string }} */
+  let patch = {};
+  if (typeof patchOrTitle === 'string') {
+    patch.title = patchOrTitle;
+  } else if (patchOrTitle && typeof patchOrTitle === 'object') {
+    patch = patchOrTitle;
+  }
+
   const store = loadMockStore();
   const key = listKind === 'habits' ? 'habits' : 'tasks';
   const item = store[key].find((i) => i && i.id === taskId);
   if (!item) throw new Error('Элемент не найден');
-  item.title = trimmed;
+
+  let changed = false;
+  if (typeof patch.title === 'string') {
+    const trimmed = patch.title.trim();
+    if (!trimmed) throw new Error('Введите название');
+    item.title = trimmed;
+    changed = true;
+  }
+  if (typeof patch.notes === 'string') {
+    item.notes = patch.notes;
+    changed = true;
+  }
+  if (!changed) throw new Error('Нечего обновлять');
+
+  if (item.parent === undefined) item.parent = null;
+  if (item.notes === undefined) item.notes = '';
+
   saveMockStore(store);
-  return { ok: true, mode: 'mock', item: { ...item } };
+  return {
+    ok: true,
+    mode: 'mock',
+    item: { ...item, notes: item.notes || '', parent: item.parent || null },
+  };
 }
 
 function deleteMockItem(listKind, taskId) {
   const store = loadMockStore();
   const key = listKind === 'habits' ? 'habits' : 'tasks';
   const before = store[key].length;
-  store[key] = store[key].filter((i) => i && i.id !== taskId);
+  // Google Tasks deletes children with the parent — keep mock in sync.
+  store[key] = store[key].filter(
+    (i) => i && i.id !== taskId && !(listKind === 'tasks' && i.parent === taskId)
+  );
   if (store[key].length === before) throw new Error('Элемент не найден');
   saveMockStore(store);
   if (listKind === 'habits') removeHabit(taskId);
@@ -292,6 +376,7 @@ function resetMockHabitsCompleted() {
 
 module.exports = {
   getMockPayload,
+  getMockItem,
   addMockItem,
   setMockCompleted,
   resetMockHabitsCompleted,

@@ -41,7 +41,12 @@ const {
   DEFAULT_SWITCH_HOTKEY,
 } = require('../lib/settings-store');
 const { sampleWallpaperPalette } = require('../lib/wallpaper-palette');
-const { loadReminderState, markNotified, wasNotifiedToday } = require('../lib/reminder-store');
+const {
+  loadReminderState,
+  markNotified,
+  wasNotifiedToday,
+  clearNotifiedToday,
+} = require('../lib/reminder-store');
 
 function credentialsPayload() {
   const status = getGoogleCredentialsStatus();
@@ -479,8 +484,9 @@ function createWindow() {
 }
 
 /**
- * Ensure Start Menu (and Desktop if present) shortcuts carry AppUserModelID
- * so Windows can deliver Electron toasts for both packaged and `npm start`.
+ * Ensure Start Menu + Desktop shortcuts carry AppUserModelID matching
+ * app.setAppUserModelId — required for Windows Action Center toasts.
+ * Always rewrite both so pack scripts / stale .lnk files cannot strip AUMID.
  */
 function ensureWindowsNotificationShortcut() {
   if (process.platform !== 'win32') return;
@@ -511,12 +517,11 @@ function ensureWindowsNotificationShortcut() {
     };
 
     const startMenuLnk = path.join(startMenuDir, 'Glass Tasks Widget.lnk');
-    const op = fs.existsSync(startMenuLnk) ? 'update' : 'create';
-    shell.writeShortcutLink(startMenuLnk, op, details);
-
     const desktopLnk = path.join(app.getPath('desktop'), 'Glass Tasks Widget.lnk');
-    if (fs.existsSync(desktopLnk)) {
-      shell.writeShortcutLink(desktopLnk, 'update', details);
+    for (const lnk of [startMenuLnk, desktopLnk]) {
+      const op = fs.existsSync(lnk) ? 'update' : 'create';
+      const ok = shell.writeShortcutLink(lnk, op, details);
+      if (!ok) console.warn('[reminders] shortcut write failed', lnk);
     }
   } catch (err) {
     console.warn('[reminders] shortcut', err && err.message ? err.message : err);
@@ -739,70 +744,235 @@ function refreshExactReminders(data) {
     );
 }
 
+function reminderToastIconPath() {
+  const fileIcon = path.join(__dirname, '..', 'build', 'icon.png');
+  if (fs.existsSync(fileIcon)) return fileIcon;
+  return undefined;
+}
+
+function reminderToastIcon() {
+  const fileIcon = reminderToastIconPath();
+  if (fileIcon) {
+    try {
+      const img = nativeImage.createFromPath(fileIcon);
+      if (!img.isEmpty()) return img.resize({ width: 64, height: 64 });
+    } catch {
+      /* fall through */
+    }
+  }
+  try {
+    const fromExe = nativeImage.createFromPath(process.execPath);
+    if (!fromExe.isEmpty()) return fromExe.resize({ width: 64, height: 64 });
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
 /**
- * Show a Windows toast; mark IDs notified only after a successful show
- * so a failed toast can be retried later the same day.
+ * Native WinRT toast via PowerShell — fallback when Electron Notification fails.
+ * Uses the same AppUserModelID so the toast lands under "Glass Tasks Widget"
+ * in Action Center (requires Start Menu .lnk with matching AUMID).
  * @param {string} title
  * @param {string} body
- * @param {string[]} ids
+ * @returns {boolean}
+ */
+function showNativeWinRtToast(title, body) {
+  if (process.platform !== 'win32') return false;
+  try {
+    const esc = (s) =>
+      String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, "''");
+    const safeTitle = esc(title).slice(0, 120);
+    const safeBody = esc(body).slice(0, 240);
+    const iconPath = reminderToastIconPath();
+    const iconXml = iconPath
+      ? `<image placement="appLogoOverride" src="${esc(pathToFileURL(iconPath).href)}" />`
+      : '';
+    const ps = `
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml('<toast><visual><binding template="ToastGeneric">${iconXml}<text>${safeTitle}</text><text>${safeBody}</text></binding></visual><audio src="ms-winsoundevent:Notification.Default"/></toast>')
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+$toast.Tag = 'glass-tasks-reminder'
+$toast.Group = 'glass-tasks'
+$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${APP_USER_MODEL_ID}')
+$n.Show($toast)
+`;
+    const encoded = Buffer.from(ps, 'utf16le').toString('base64');
+    execSync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, {
+      windowsHide: true,
+      timeout: 8000,
+    });
+    return true;
+  } catch (err) {
+    console.warn('[reminders] winrt', err && err.message ? err.message : err);
+    return false;
+  }
+}
+
+/**
+ * Visible in-widget toast (fallback / secondary cue).
+ * @param {string} title
+ * @param {string} body
+ * @param {{ focus?: boolean }} [opts]
+ */
+function pushInAppReminder(title, body, opts = {}) {
+  try {
+    if (opts.focus !== false) showWidget();
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('widget:in-app-reminder', {
+      title: String(title || 'Напоминание'),
+      body: String(body || ''),
+    });
+  } catch (err) {
+    console.warn('[reminders] in-app', err && err.message ? err.message : err);
+  }
+}
+
+/**
+ * Tray balloon last-resort backup (not Action Center).
+ * @param {string} title
+ * @param {string} body
+ */
+function showTrayBalloon(title, body) {
+  if (!tray || tray.isDestroyed()) return false;
+  try {
+    const icon = reminderToastIcon();
+    tray.displayBalloon({
+      title: String(title || 'Glass Tasks').slice(0, 63),
+      content: String(body || '').slice(0, 255),
+      icon,
+      iconType: icon ? 'custom' : 'info',
+    });
+    return true;
+  } catch (err) {
+    console.warn('[reminders] balloon', err && err.message ? err.message : err);
+    return false;
+  }
+}
+
+/**
+ * Try Electron Notification (lands in Windows Action Center when AUMID + shortcut match).
+ * @param {string} title
+ * @param {string} body
  * @returns {Promise<{ shown: boolean, error?: string }>}
  */
-function showReminderToast(title, body, ids) {
+function tryElectronNotification(title, body) {
   return new Promise((resolve) => {
+    if (!Notification.isSupported()) {
+      resolve({ shown: false, error: 'unsupported' });
+      return;
+    }
+
     let settled = false;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let fallback = null;
     const finish = (result) => {
       if (settled) return;
       settled = true;
-      resolve(result);
-    };
-
-    /** @type {ReturnType<typeof setTimeout> | null} */
-    let fallback = null;
-    const settle = (result) => {
       if (fallback) {
         clearTimeout(fallback);
         fallback = null;
       }
-      finish(result);
+      resolve(result);
     };
 
     try {
-      const n = new Notification({
+      /** @type {Electron.NotificationConstructorOptions} */
+      const nOpts = {
         title,
         body,
         silent: false,
-      });
+        timeoutType: 'default',
+      };
+      // Prefer file path — Windows uses shortcut icon when AUMID is registered;
+      // NativeImage icon can make some builds show the raw AUMID string.
+      const iconPath = reminderToastIconPath();
+      if (iconPath) nOpts.icon = iconPath;
+
+      const n = new Notification(nOpts);
       n.on('click', () => {
         if (isQuitting) return;
         showWidget();
         syncTrayMenu();
       });
-      n.on('show', () => {
-        if (ids.length) markNotified(ids);
-        settle({ shown: true });
-      });
+      n.on('show', () => finish({ shown: true }));
       n.on('failed', (_e, error) => {
         const msg = error ? String(error) : 'failed';
-        console.warn('[reminders] toast failed', msg);
-        settle({ shown: false, error: msg });
+        console.warn('[reminders] electron toast failed', msg);
+        finish({ shown: false, error: msg });
       });
-      // If the OS never emits show/failed (rare), avoid hanging the check forever.
-      // Optimistic mark: toast was likely delivered without events; force-check still works.
-      fallback = setTimeout(() => {
-        fallback = null;
-        if (!settled) {
-          if (ids.length) markNotified(ids);
-          settle({ shown: true });
-        }
-      }, 4000);
+      // Windows sometimes omits 'show'; treat no failure as success.
+      fallback = setTimeout(() => finish({ shown: true }), 1200);
       if (typeof fallback.unref === 'function') fallback.unref();
       n.show();
     } catch (err) {
       const msg = err && err.message ? err.message : String(err);
-      console.warn('[reminders] show', msg);
-      settle({ shown: false, error: msg });
+      console.warn('[reminders] electron toast', msg);
+      finish({ shown: false, error: msg });
     }
   });
+}
+
+/**
+ * Primary: Electron Notification → Windows Action Center.
+ * Fallback: WinRT PowerShell toast with same AppId.
+ * Secondary: quiet in-app card (always for force check; otherwise only if OS toast failed).
+ * Last resort: tray balloon if nothing OS-level worked.
+ * @param {string} title
+ * @param {string} body
+ * @param {string[]} ids
+ * @param {{ force?: boolean }} [opts]
+ * @returns {Promise<{ shown: boolean, error?: string, channel?: string, balloon?: boolean, winrt?: boolean, electron?: boolean }>}
+ */
+async function showReminderToast(title, body, ids, opts = {}) {
+  ensureWindowsNotificationShortcut();
+
+  const electron = await tryElectronNotification(title, body);
+  let winrt = false;
+  let balloon = false;
+  let channel = 'none';
+  let shown = Boolean(electron.shown);
+
+  if (shown) {
+    channel = 'electron';
+  } else {
+    winrt = showNativeWinRtToast(title, body);
+    if (winrt) {
+      shown = true;
+      channel = 'winrt';
+    }
+  }
+
+  // In-app: secondary cue — don't steal focus when OS toast already showed.
+  if (!shown || opts.force) {
+    pushInAppReminder(title, body, { focus: !shown });
+  }
+
+  if (!shown) {
+    balloon = showTrayBalloon(title, body);
+    if (balloon) {
+      shown = true;
+      channel = 'balloon';
+    }
+  }
+
+  if (shown && ids.length) markNotified(ids);
+
+  return {
+    shown,
+    channel,
+    electron: Boolean(electron.shown),
+    winrt,
+    balloon,
+    error: electron.error,
+  };
 }
 
 /**
@@ -865,6 +1035,9 @@ async function runReminderCheck(opts = {}) {
       };
     }
 
+    // Manual «Проверить» must always be allowed to re-fire toasts the same day.
+    if (opts.force) clearNotifiedToday();
+
     const candidates = collectReminderCandidates(data);
     scheduleExactReminders(data);
     const state = loadReminderState();
@@ -879,8 +1052,8 @@ async function runReminderCheck(opts = {}) {
         count: 0,
         reason: candidates.length ? 'already' : 'empty',
         message: candidates.length
-          ? 'На сегодня уже отправляли. Нажмите «Проверить» ещё раз — покажем снова.'
-          : 'Нет задач на сегодня/просроченных и открытых привычек.',
+          ? 'На сегодня уже отправляли. Нажмите «Проверить» — покажем снова (тост Windows + Action Center).'
+          : 'Нет открытых задач на сегодня/просроченных и незакрытых привычек.',
         notificationsSupported,
       };
     }
@@ -889,7 +1062,8 @@ async function runReminderCheck(opts = {}) {
     const result = await showReminderToast(
       title,
       body,
-      fresh.map((c) => c.id)
+      fresh.map((c) => c.id),
+      { force: Boolean(opts.force) }
     );
 
     if (!result.shown) {
@@ -899,15 +1073,28 @@ async function runReminderCheck(opts = {}) {
         count: fresh.length,
         reason: 'failed',
         message:
-          'Тост не удалось показать. Разрешите уведомления для «Glass Tasks Widget» и отключите Фокусировку внимания (Focus Assist).',
+          'Системный тост не удалось показать. Параметры → Система → Уведомления: включите баннеры и «Glass Tasks Widget». Отключите Фокусировку внимания.',
         notificationsSupported,
       };
     }
 
+    const via =
+      result.channel === 'electron'
+        ? 'Windows (Electron)'
+        : result.channel === 'winrt'
+          ? 'Windows (WinRT)'
+          : result.channel === 'balloon'
+            ? 'подсказка у трея'
+            : 'уведомление';
     return {
       ok: true,
       shown: true,
       count: fresh.length,
+      channel: result.channel,
+      balloon: Boolean(result.balloon),
+      winrt: Boolean(result.winrt),
+      electron: Boolean(result.electron),
+      message: `Отправлено: ${fresh.length} через ${via}. Смотрите баннер Windows / Центр уведомлений.`,
       notificationsSupported,
     };
   } catch (err) {
@@ -1142,6 +1329,12 @@ function applySettingsPatch(patch) {
   if (typeof patch.dailyHabitsReset === 'boolean') {
     allowed.dailyHabitsReset = patch.dailyHabitsReset;
   }
+  if (typeof patch.hideCompleted === 'boolean') {
+    allowed.hideCompleted = patch.hideCompleted;
+  }
+  if (typeof patch.simpleAnimations === 'boolean') {
+    allowed.simpleAnimations = patch.simpleAnimations;
+  }
   if (typeof patch.toggleHotkey === 'string') allowed.toggleHotkey = patch.toggleHotkey;
   if (typeof patch.switchViewHotkey === 'string') allowed.switchViewHotkey = patch.switchViewHotkey;
   if (typeof patch.onboardingSkipped === 'boolean') allowed.onboardingSkipped = patch.onboardingSkipped;
@@ -1328,16 +1521,25 @@ function registerIpc() {
 
   ipcMain.handle('widget:create-item', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const { listKind, title } = payload || {};
-    const result = await createItem(listKind, title);
+    const { listKind, title, parentId } = payload || {};
+    const result = await createItem(listKind, title, parentId ? { parentId } : {});
     refreshExactReminders();
     return result;
   });
 
   ipcMain.handle('widget:update-item', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const { listKind, taskId, title } = payload || {};
-    const result = await updateItem(listKind, taskId, title);
+    const { listKind, taskId, patch, title, notes } = payload || {};
+    const update =
+      patch !== undefined
+        ? patch
+        : typeof notes === 'string' || typeof title === 'string'
+          ? {
+              ...(typeof title === 'string' ? { title } : {}),
+              ...(typeof notes === 'string' ? { notes } : {}),
+            }
+          : title;
+    const result = await updateItem(listKind, taskId, update);
     refreshExactReminders();
     return result;
   });

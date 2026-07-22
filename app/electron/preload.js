@@ -9,10 +9,14 @@ contextBridge.exposeInMainWorld('widgetApi', {
   logout: () => ipcRenderer.invoke('widget:logout'),
   setCompleted: (listKind, taskId, completed) =>
     ipcRenderer.invoke('widget:set-completed', { listKind, taskId, completed }),
-  createItem: (listKind, title) =>
-    ipcRenderer.invoke('widget:create-item', { listKind, title }),
-  updateItem: (listKind, taskId, title) =>
-    ipcRenderer.invoke('widget:update-item', { listKind, taskId, title }),
+  createItem: (listKind, title, opts) =>
+    ipcRenderer.invoke('widget:create-item', {
+      listKind,
+      title,
+      parentId: opts && opts.parentId ? opts.parentId : undefined,
+    }),
+  updateItem: (listKind, taskId, patch) =>
+    ipcRenderer.invoke('widget:update-item', { listKind, taskId, patch }),
   deleteItem: (listKind, taskId) =>
     ipcRenderer.invoke('widget:delete-item', { listKind, taskId }),
   moveItem: (listKind, taskId, previousId, orderedIds) =>
@@ -44,6 +48,11 @@ contextBridge.exposeInMainWorld('widgetApi', {
     const listener = () => handler();
     ipcRenderer.on('widget:habits-reset', listener);
     return () => ipcRenderer.removeListener('widget:habits-reset', listener);
+  },
+  onInAppReminder: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on('widget:in-app-reminder', listener);
+    return () => ipcRenderer.removeListener('widget:in-app-reminder', listener);
   },
   minimize: () => ipcRenderer.send('widget:minimize'),
   close: () => ipcRenderer.send('widget:close'),

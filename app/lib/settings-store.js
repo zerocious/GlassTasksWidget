@@ -17,6 +17,8 @@ const { readJson, writeJson, dataPath } = require('./config');
  *   remindersEnabled: boolean,
  *   dailyHabitsReset: boolean,
  *   lastHabitsResetDate: string | null,
+ *   hideCompleted: boolean,
+ *   simpleAnimations: boolean,
  *   pos: WindowPos | null,
  *   toggleHotkey: string,
  *   switchViewHotkey: string,
@@ -43,6 +45,8 @@ const DEFAULTS = /** @type {AppSettings} */ ({
   remindersEnabled: true,
   dailyHabitsReset: true,
   lastHabitsResetDate: null,
+  hideCompleted: false,
+  simpleAnimations: false,
   pos: null,
   toggleHotkey: DEFAULT_TOGGLE_HOTKEY,
   switchViewHotkey: DEFAULT_SWITCH_HOTKEY,
@@ -122,6 +126,8 @@ function normalizeSettings(raw) {
       /^\d{4}-\d{2}-\d{2}$/.test(raw.lastHabitsResetDate)
         ? raw.lastHabitsResetDate
         : null,
+    hideCompleted: Boolean(raw.hideCompleted),
+    simpleAnimations: Boolean(raw.simpleAnimations),
     pos,
     toggleHotkey: normalizeHotkey(raw.toggleHotkey, DEFAULT_TOGGLE_HOTKEY),
     switchViewHotkey: normalizeHotkey(raw.switchViewHotkey, DEFAULT_SWITCH_HOTKEY),
@@ -158,6 +164,8 @@ function saveSettings(patch) {
     next.remindersEnabled === current.remindersEnabled &&
     next.dailyHabitsReset === current.dailyHabitsReset &&
     next.lastHabitsResetDate === current.lastHabitsResetDate &&
+    next.hideCompleted === current.hideCompleted &&
+    next.simpleAnimations === current.simpleAnimations &&
     next.toggleHotkey === current.toggleHotkey &&
     next.switchViewHotkey === current.switchViewHotkey &&
     next.onboardingSkipped === current.onboardingSkipped &&

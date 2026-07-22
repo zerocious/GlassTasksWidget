@@ -10,18 +10,27 @@ const {
   Tray,
   Menu,
   nativeImage,
+  Notification,
+  dialog,
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { loadConfig } = require('../lib/config');
+const { execSync } = require('child_process');
+const { pathToFileURL } = require('url');
+const { loadConfig, getGoogleCredentialsStatus, saveGoogleCredentials } = require('../lib/config');
 const {
   getWidgetData,
   loginGoogle,
   setTaskCompleted,
   createItem,
+  updateItem,
+  deleteItem,
+  moveItem,
   invalidateListCache,
   invalidatePayloadCache,
   clearOfflineCache,
+  resolveTaskDueAt,
+  resetCompletedHabitsForNewDay,
 } = require('../lib/google-tasks');
 const { clearTokens } = require('../lib/google-auth');
 const {
@@ -31,6 +40,19 @@ const {
   DEFAULT_TOGGLE_HOTKEY,
   DEFAULT_SWITCH_HOTKEY,
 } = require('../lib/settings-store');
+const { sampleWallpaperPalette } = require('../lib/wallpaper-palette');
+const { loadReminderState, markNotified, wasNotifiedToday } = require('../lib/reminder-store');
+
+function credentialsPayload() {
+  const status = getGoogleCredentialsStatus();
+  const settings = loadSettings();
+  return {
+    configured: status.configured,
+    needsOnboarding: !status.configured && !settings.onboardingSkipped,
+    clientId: status.clientId,
+    redirectPort: status.redirectPort,
+  };
+}
 
 /** @type {BrowserWindow | null} */
 let mainWindow = null;
@@ -44,6 +66,50 @@ let moveSettleTimer = null;
 let applyingBounds = false;
 /** @type {boolean | null} */
 let trayMenuVisible = null;
+
+/** @type {ReturnType<typeof setInterval> | null} */
+let reminderInterval = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let reminderStartupTimer = null;
+let reminderCheckInFlight = false;
+/** @type {Map<string, ReturnType<typeof setTimeout>>} */
+const exactReminderTimers = new Map();
+/** @type {ReturnType<typeof setTimeout> | null} */
+let habitsRolloverTimer = null;
+/** @type {boolean} */
+let updateCheckInFlight = false;
+
+const APP_USER_MODEL_ID = 'com.glasstasks.widget';
+const REMINDER_INTERVAL_MS = 45 * 60 * 1000;
+/** First check soon after launch so toasts are easy to verify; then every 45 min. */
+const REMINDER_STARTUP_DELAY_MS = 8 * 1000;
+/** Only schedule one-shot timers for due times within this horizon. */
+const EXACT_REMINDER_HORIZON_MS = 24 * 60 * 60 * 1000;
+
+// Windows toasts require a matching AppUserModelID before ready (and a Start Menu .lnk).
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
+
+/**
+ * HKCU PushNotifications\ToastEnabled — master switch in
+ * Settings → System → Notifications. 0 blocks all Electron toasts.
+ * @returns {boolean}
+ */
+function windowsToastsGloballyEnabled() {
+  if (process.platform !== 'win32') return true;
+  try {
+    const out = execSync(
+      'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications" /v ToastEnabled',
+      { encoding: 'utf8', windowsHide: true }
+    );
+    const m = out.match(/ToastEnabled\s+REG_DWORD\s+0x([0-9a-fA-F]+)/i);
+    if (!m) return true;
+    return parseInt(m[1], 16) !== 0;
+  } catch {
+    return true;
+  }
+}
 
 // Minimal 16×16 accent PNG (glass-tasks red square with check hint)
 const TRAY_PNG_BASE64 =
@@ -243,6 +309,8 @@ function settingsForRenderer() {
   const s = loadSettings();
   return {
     ...s,
+    notificationsSupported: Notification.isSupported(),
+    windowsToastsEnabled: windowsToastsGloballyEnabled(),
     hotkeys: {
       toggleHotkey: hotkeyState.toggle || s.toggleHotkey,
       switchViewHotkey: hotkeyState.switchView || s.switchViewHotkey,
@@ -361,7 +429,17 @@ function createWindow() {
   }
 
   mainWindow = new BrowserWindow(opts);
-  mainWindow.loadFile(path.join(__dirname, '..', 'src', 'index.html'));
+  const indexHtml = path.join(__dirname, '..', 'src', 'index.html');
+  mainWindow.loadFile(indexHtml);
+
+  // Harden: local widget only — block popups / unexpected navigations
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  const allowedPageUrl = pathToFileURL(indexHtml).href;
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url !== allowedPageUrl && !url.startsWith(`${allowedPageUrl}#`)) {
+      event.preventDefault();
+    }
+  });
 
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -400,19 +478,691 @@ function createWindow() {
   }
 }
 
+/**
+ * Ensure Start Menu (and Desktop if present) shortcuts carry AppUserModelID
+ * so Windows can deliver Electron toasts for both packaged and `npm start`.
+ */
+function ensureWindowsNotificationShortcut() {
+  if (process.platform !== 'win32') return;
+  try {
+    const startMenuDir = path.join(
+      app.getPath('appData'),
+      'Microsoft',
+      'Windows',
+      'Start Menu',
+      'Programs'
+    );
+    fs.mkdirSync(startMenuDir, { recursive: true });
+
+    const appRoot = path.resolve(__dirname, '..');
+    const target = process.execPath;
+    const cwd = app.isPackaged ? path.dirname(process.execPath) : appRoot;
+    const args = app.isPackaged ? '' : `"${appRoot}"`;
+
+    /** @type {Electron.ShortcutDetails} */
+    const details = {
+      target,
+      cwd,
+      args,
+      appUserModelId: APP_USER_MODEL_ID,
+      description: 'Glass Tasks Widget',
+      icon: process.execPath,
+      iconIndex: 0,
+    };
+
+    const startMenuLnk = path.join(startMenuDir, 'Glass Tasks Widget.lnk');
+    const op = fs.existsSync(startMenuLnk) ? 'update' : 'create';
+    shell.writeShortcutLink(startMenuLnk, op, details);
+
+    const desktopLnk = path.join(app.getPath('desktop'), 'Glass Tasks Widget.lnk');
+    if (fs.existsSync(desktopLnk)) {
+      shell.writeShortcutLink(desktopLnk, 'update', details);
+    }
+  } catch (err) {
+    console.warn('[reminders] shortcut', err && err.message ? err.message : err);
+  }
+}
+
+/**
+ * Collect actionable open items for the periodic sweep toast.
+ * Timed tasks still in the future are skipped (exact timers handle them).
+ * Timed tasks whose time already passed (today / overdue / notes+today) stay as safety net.
+ * @param {any} data
+ * @returns {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]}
+ */
+function collectReminderCandidates(data) {
+  /** @type {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]} */
+  const out = [];
+  const now = Date.now();
+  const today = (() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  })();
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  for (const t of tasks) {
+    if (!t || t.completed || !t.id) continue;
+    const dueAt = resolveTaskDueAt(t);
+    if (dueAt) {
+      if (dueAt.getTime() > now) continue; // exact timer pending
+      // Past timed: only if due calendar day is today or earlier (notes-only → today).
+      const y = dueAt.getFullYear();
+      const m = String(dueAt.getMonth() + 1).padStart(2, '0');
+      const day = String(dueAt.getDate()).padStart(2, '0');
+      const dueDay = `${y}-${m}-${day}`;
+      if (dueDay > today) continue;
+      out.push({
+        id: `task:${t.id}`,
+        kind: 'task',
+        title: String(t.title || 'Задача').trim() || 'Задача',
+        dueKind: 'overdue',
+        dueTime: t.dueTime || null,
+      });
+      continue;
+    }
+    if (t.dueKind !== 'today' && t.dueKind !== 'overdue') continue;
+    out.push({
+      id: `task:${t.id}`,
+      kind: 'task',
+      title: String(t.title || 'Задача').trim() || 'Задача',
+      dueKind: t.dueKind,
+      dueTime: t.dueTime || null,
+    });
+  }
+  const habits = Array.isArray(data?.habits) ? data.habits : [];
+  for (const h of habits) {
+    if (!h || h.completed || !h.id) continue;
+    out.push({
+      id: `habit:${h.id}`,
+      kind: 'habit',
+      title: String(h.title || 'Привычка').trim() || 'Привычка',
+    });
+  }
+  return out;
+}
+
+/**
+ * Build Russian title/body for a reminder toast.
+ * @param {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]} items
+ */
+function formatReminderToast(items) {
+  const overdue = items.filter((i) => i.dueKind === 'overdue');
+  const today = items.filter((i) => i.dueKind === 'today');
+  const habits = items.filter((i) => i.kind === 'habit');
+  const parts = [];
+  if (overdue.length) parts.push(`просрочено: ${overdue.length}`);
+  if (today.length) parts.push(`на сегодня: ${today.length}`);
+  if (habits.length) parts.push(`привычки: ${habits.length}`);
+
+  const title =
+    overdue.length && !today.length && !habits.length
+      ? 'Просроченные задачи'
+      : habits.length && !overdue.length && !today.length
+        ? 'Привычки на сегодня'
+        : 'Напоминание Glass Tasks';
+
+  const names = items
+    .slice(0, 3)
+    .map((i) => {
+      const time = i.dueTime ? ` (${i.dueTime})` : '';
+      return `${i.title}${time}`;
+    })
+    .join(', ');
+  const more = items.length > 3 ? ` и ещё ${items.length - 3}` : '';
+  const body = parts.length
+    ? `${parts.join(' · ')}. ${names}${more}`
+    : `${names}${more}`;
+
+  return { title, body };
+}
+
+function clearExactReminderTimers() {
+  for (const timer of exactReminderTimers.values()) {
+    clearTimeout(timer);
+  }
+  exactReminderTimers.clear();
+}
+
+function stopRemindersScheduler() {
+  if (reminderStartupTimer) {
+    clearTimeout(reminderStartupTimer);
+    reminderStartupTimer = null;
+  }
+  if (reminderInterval) {
+    clearInterval(reminderInterval);
+    reminderInterval = null;
+  }
+  clearExactReminderTimers();
+}
+
+/**
+ * Fire a one-shot exact-time toast for a single task.
+ * Re-checks the task is still open so completed/deleted items stay silent.
+ * @param {{ id: string, title: string, dueTime?: string | null }} task
+ */
+async function fireExactTaskReminder(task) {
+  const reminderId = `task:${task.id}`;
+  if (isQuitting || !loadSettings().remindersEnabled) return;
+  if (wasNotifiedToday(reminderId)) return;
+  if (!Notification.isSupported()) return;
+
+  try {
+    const data = await getWidgetData();
+    if (isQuitting || !loadSettings().remindersEnabled) return;
+    const live = (Array.isArray(data?.tasks) ? data.tasks : []).find(
+      (t) => t && t.id === task.id
+    );
+    if (!live || live.completed) return;
+  } catch (err) {
+    console.warn('[reminders] exact recheck', err && err.message ? err.message : err);
+    // Fall through and notify — better a late toast than a missed one if fetch fails.
+  }
+
+  const time = task.dueTime || '';
+  const title = 'Пора';
+  const body = time
+    ? `Пора: ${task.title} (${time})`
+    : `Пора: ${task.title}`;
+  await showReminderToast(title, body, [reminderId]);
+}
+
+/**
+ * Schedule one-shot timers for open tasks with a resolvable due datetime
+ * within the next 24 hours. Cancels previous schedule.
+ * @param {any} data
+ */
+function scheduleExactReminders(data) {
+  clearExactReminderTimers();
+  if (isQuitting || !loadSettings().remindersEnabled) return;
+  if (!Notification.isSupported()) return;
+
+  const now = Date.now();
+  const horizon = now + EXACT_REMINDER_HORIZON_MS;
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  const state = loadReminderState();
+  const notified = new Set(state.notifiedIds);
+
+  /** @type {{ id: string, title: string, dueTime: string | null, dueAt: Date }[]} */
+  const upcoming = [];
+  for (const t of tasks) {
+    if (!t || t.completed || !t.id) continue;
+    const dueAt = resolveTaskDueAt(t);
+    if (!dueAt) continue;
+    const ts = dueAt.getTime();
+    if (ts <= now || ts > horizon) continue;
+    const reminderId = `task:${t.id}`;
+    if (notified.has(reminderId)) continue;
+    upcoming.push({
+      id: t.id,
+      title: String(t.title || 'Задача').trim() || 'Задача',
+      dueTime:
+        t.dueTime ||
+        `${String(dueAt.getHours()).padStart(2, '0')}:${String(dueAt.getMinutes()).padStart(2, '0')}`,
+      dueAt,
+    });
+  }
+
+  upcoming.sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
+
+  for (const item of upcoming) {
+    const delay = Math.max(0, item.dueAt.getTime() - Date.now());
+    const timer = setTimeout(() => {
+      exactReminderTimers.delete(item.id);
+      fireExactTaskReminder(item).catch((err) =>
+        console.warn('[reminders] exact', err && err.message ? err.message : err)
+      );
+    }, delay);
+    if (typeof timer.unref === 'function') timer.unref();
+    exactReminderTimers.set(item.id, timer);
+  }
+}
+
+/**
+ * Refresh exact timers from current widget data (best-effort, non-blocking).
+ * @param {any} [data]
+ */
+function refreshExactReminders(data) {
+  if (!loadSettings().remindersEnabled || isQuitting) {
+    clearExactReminderTimers();
+    return;
+  }
+  if (data) {
+    scheduleExactReminders(data);
+    return;
+  }
+  getWidgetData()
+    .then((d) => scheduleExactReminders(d))
+    .catch((err) =>
+      console.warn('[reminders] reschedule', err && err.message ? err.message : err)
+    );
+}
+
+/**
+ * Show a Windows toast; mark IDs notified only after a successful show
+ * so a failed toast can be retried later the same day.
+ * @param {string} title
+ * @param {string} body
+ * @param {string[]} ids
+ * @returns {Promise<{ shown: boolean, error?: string }>}
+ */
+function showReminderToast(title, body, ids) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let fallback = null;
+    const settle = (result) => {
+      if (fallback) {
+        clearTimeout(fallback);
+        fallback = null;
+      }
+      finish(result);
+    };
+
+    try {
+      const n = new Notification({
+        title,
+        body,
+        silent: false,
+      });
+      n.on('click', () => {
+        if (isQuitting) return;
+        showWidget();
+        syncTrayMenu();
+      });
+      n.on('show', () => {
+        if (ids.length) markNotified(ids);
+        settle({ shown: true });
+      });
+      n.on('failed', (_e, error) => {
+        const msg = error ? String(error) : 'failed';
+        console.warn('[reminders] toast failed', msg);
+        settle({ shown: false, error: msg });
+      });
+      // If the OS never emits show/failed (rare), avoid hanging the check forever.
+      // Optimistic mark: toast was likely delivered without events; force-check still works.
+      fallback = setTimeout(() => {
+        fallback = null;
+        if (!settled) {
+          if (ids.length) markNotified(ids);
+          settle({ shown: true });
+        }
+      }, 4000);
+      if (typeof fallback.unref === 'function') fallback.unref();
+      n.show();
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      console.warn('[reminders] show', msg);
+      settle({ shown: false, error: msg });
+    }
+  });
+}
+
+/**
+ * @param {{ force?: boolean }} [opts]
+ * @returns {Promise<{
+ *   ok: boolean,
+ *   shown: boolean,
+ *   count: number,
+ *   reason?: string,
+ *   message?: string,
+ *   notificationsSupported: boolean,
+ * }>}
+ */
+async function runReminderCheck(opts = {}) {
+  const notificationsSupported = Notification.isSupported();
+  const empty = {
+    ok: false,
+    shown: false,
+    count: 0,
+    notificationsSupported,
+  };
+
+  if (reminderCheckInFlight || isQuitting) {
+    return { ...empty, reason: 'busy', message: 'Проверка уже выполняется.' };
+  }
+  const settings = loadSettings();
+  if (!settings.remindersEnabled) {
+    return {
+      ...empty,
+      reason: 'disabled',
+      message: 'Напоминания выключены в настройках.',
+    };
+  }
+  if (!notificationsSupported) {
+    return {
+      ...empty,
+      reason: 'unsupported',
+      message:
+        'Система не поддерживает уведомления. Проверьте Параметры Windows → Система → Уведомления.',
+    };
+  }
+  if (!windowsToastsGloballyEnabled()) {
+    return {
+      ...empty,
+      reason: 'os-disabled',
+      message:
+        'Уведомления Windows выключены глобально (ToastEnabled=0). Включите: Параметры → Система → Уведомления.',
+    };
+  }
+
+  reminderCheckInFlight = true;
+  try {
+    const data = await getWidgetData();
+    // Re-check after await: user may have quit or disabled reminders mid-fetch.
+    if (isQuitting || !loadSettings().remindersEnabled) {
+      return {
+        ...empty,
+        reason: 'disabled',
+        message: 'Напоминания выключены.',
+      };
+    }
+
+    const candidates = collectReminderCandidates(data);
+    scheduleExactReminders(data);
+    const state = loadReminderState();
+    const notified = new Set(state.notifiedIds);
+    const fresh = opts.force
+      ? candidates
+      : candidates.filter((c) => !notified.has(c.id));
+    if (!fresh.length) {
+      return {
+        ok: true,
+        shown: false,
+        count: 0,
+        reason: candidates.length ? 'already' : 'empty',
+        message: candidates.length
+          ? 'На сегодня уже отправляли. Нажмите «Проверить» ещё раз — покажем снова.'
+          : 'Нет задач на сегодня/просроченных и открытых привычек.',
+        notificationsSupported,
+      };
+    }
+
+    const { title, body } = formatReminderToast(fresh);
+    const result = await showReminderToast(
+      title,
+      body,
+      fresh.map((c) => c.id)
+    );
+
+    if (!result.shown) {
+      return {
+        ok: false,
+        shown: false,
+        count: fresh.length,
+        reason: 'failed',
+        message:
+          'Тост не удалось показать. Разрешите уведомления для «Glass Tasks Widget» и отключите Фокусировку внимания (Focus Assist).',
+        notificationsSupported,
+      };
+    }
+
+    return {
+      ok: true,
+      shown: true,
+      count: fresh.length,
+      notificationsSupported,
+    };
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    console.warn('[reminders]', msg);
+    return {
+      ...empty,
+      reason: 'error',
+      message: msg,
+    };
+  } finally {
+    reminderCheckInFlight = false;
+  }
+}
+
+/**
+ * @param {boolean} enabled
+ * @param {{ immediate?: boolean }} [opts]
+ */
+function syncRemindersScheduler(enabled, opts = {}) {
+  stopRemindersScheduler();
+  if (!enabled) return;
+
+  const delay = opts.immediate ? 2500 : REMINDER_STARTUP_DELAY_MS;
+  reminderStartupTimer = setTimeout(() => {
+    reminderStartupTimer = null;
+    runReminderCheck().catch((err) =>
+      console.warn('[reminders]', err && err.message ? err.message : err)
+    );
+  }, delay);
+  if (typeof reminderStartupTimer.unref === 'function') reminderStartupTimer.unref();
+
+  reminderInterval = setInterval(() => {
+    runReminderCheck().catch((err) =>
+      console.warn('[reminders]', err && err.message ? err.message : err)
+    );
+  }, REMINDER_INTERVAL_MS);
+  if (typeof reminderInterval.unref === 'function') reminderInterval.unref();
+}
+
+function msUntilNextLocalMidnight() {
+  const now = new Date();
+  const next = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() + 1,
+    0,
+    0,
+    8,
+    0
+  );
+  return Math.max(1000, next.getTime() - now.getTime());
+}
+
+function stopHabitsDayRollover() {
+  if (habitsRolloverTimer) {
+    clearTimeout(habitsRolloverTimer);
+    habitsRolloverTimer = null;
+  }
+}
+
+/**
+ * At local midnight (+ a few seconds): reset Google/mock habit completed flags.
+ */
+function scheduleHabitsDayRollover() {
+  stopHabitsDayRollover();
+  habitsRolloverTimer = setTimeout(() => {
+    habitsRolloverTimer = null;
+    resetCompletedHabitsForNewDay()
+      .then((result) => {
+        if (result && result.reset) {
+          invalidatePayloadCache();
+          refreshExactReminders();
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('widget:habits-reset');
+          }
+        }
+      })
+      .catch((err) =>
+        console.warn('[habits-reset]', err && err.message ? err.message : err)
+      )
+      .finally(() => scheduleHabitsDayRollover());
+  }, msUntilNextLocalMidnight());
+  if (typeof habitsRolloverTimer.unref === 'function') habitsRolloverTimer.unref();
+}
+
+/**
+ * Auto-update via GitHub Releases (packaged builds only).
+ * Unsigned NSIS (`signAndEditExecutable: false`) cannot verify publisher —
+ * we skip code-signature check so updates still install; SmartScreen may warn.
+ */
+function setupAutoUpdater() {
+  if (!app.isPackaged) return;
+
+  let autoUpdater;
+  try {
+    ({ autoUpdater } = require('electron-updater'));
+  } catch (err) {
+    console.warn('[updater] electron-updater missing', err && err.message ? err.message : err);
+    return;
+  }
+
+  // Project ships unsigned installers — signature verify would always fail.
+  autoUpdater.verifyUpdateCodeSignature = false;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('error', (err) => {
+    console.warn('[updater]', err && err.message ? err.message : err);
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    const ver = (info && info.version) || '';
+    dialog
+      .showMessageBox({
+        type: 'info',
+        title: 'Обновление готово',
+        message: ver
+          ? `Версия ${ver} скачана. Перезапустить сейчас?`
+          : 'Обновление скачано. Перезапустить сейчас?',
+        detail:
+          'Можно продолжить работу — установка выполнится при следующем выходе из приложения.',
+        buttons: ['Перезапустить', 'Позже'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      })
+      .then((result) => {
+        if (result.response === 0) {
+          isQuitting = true;
+          autoUpdater.quitAndInstall(false, true);
+        }
+      })
+      .catch((err) =>
+        console.warn('[updater] dialog', err && err.message ? err.message : err)
+      );
+  });
+
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((err) =>
+      console.warn('[updater] check', err && err.message ? err.message : err)
+    );
+  }, 12_000);
+}
+
+/**
+ * Manual update check from Settings.
+ * @returns {Promise<{
+ *   ok: boolean,
+ *   reason: string,
+ *   message: string,
+ *   version?: string,
+ * }>}
+ */
+async function checkForAppUpdates() {
+  if (!app.isPackaged) {
+    return {
+      ok: true,
+      reason: 'dev',
+      message: 'В режиме разработки обновления не проверяются (только сборка).',
+    };
+  }
+  if (updateCheckInFlight) {
+    return {
+      ok: false,
+      reason: 'busy',
+      message: 'Проверка обновлений уже выполняется.',
+    };
+  }
+
+  let autoUpdater;
+  try {
+    ({ autoUpdater } = require('electron-updater'));
+  } catch {
+    return {
+      ok: false,
+      reason: 'missing',
+      message: 'Модуль обновлений недоступен в этой сборке.',
+    };
+  }
+
+  updateCheckInFlight = true;
+  try {
+    autoUpdater.verifyUpdateCodeSignature = false;
+    const result = await autoUpdater.checkForUpdates();
+    const info = result && result.updateInfo;
+    const remote = info && info.version;
+    const current = app.getVersion();
+    if (remote && remote !== current) {
+      return {
+        ok: true,
+        reason: 'available',
+        message: `Доступна версия ${remote}. Скачивание началось — предложим перезапуск.`,
+        version: remote,
+      };
+    }
+    return {
+      ok: true,
+      reason: 'uptodate',
+      message: `У вас актуальная версия (${current}).`,
+      version: current,
+    };
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    console.warn('[updater] manual', msg);
+    return {
+      ok: false,
+      reason: 'error',
+      message:
+        'Не удалось проверить обновления. Нужен релиз на GitHub (latest.yml) и доступ в интернет.',
+    };
+  } finally {
+    updateCheckInFlight = false;
+  }
+}
+
 function applySettingsPatch(patch) {
   const allowed = {};
   if (patch.theme === 'light' || patch.theme === 'dark') allowed.theme = patch.theme;
   if (patch.size === 'normal' || patch.size === 'compact') allowed.size = patch.size;
   if (typeof patch.autostart === 'boolean') allowed.autostart = patch.autostart;
   if (typeof patch.snapToEdge === 'boolean') allowed.snapToEdge = patch.snapToEdge;
+  if (typeof patch.autoPalette === 'boolean') allowed.autoPalette = patch.autoPalette;
+  if (patch.accentColor === null) allowed.accentColor = null;
+  else if (typeof patch.accentColor === 'string') allowed.accentColor = patch.accentColor;
+  if (typeof patch.bgOpacity === 'number' && Number.isFinite(patch.bgOpacity)) {
+    allowed.bgOpacity = patch.bgOpacity;
+  }
+  if (typeof patch.remindersEnabled === 'boolean') {
+    allowed.remindersEnabled = patch.remindersEnabled;
+  }
+  if (typeof patch.dailyHabitsReset === 'boolean') {
+    allowed.dailyHabitsReset = patch.dailyHabitsReset;
+  }
+  if (typeof patch.hideCompleted === 'boolean') {
+    allowed.hideCompleted = patch.hideCompleted;
+  }
+  if (typeof patch.simpleAnimations === 'boolean') {
+    allowed.simpleAnimations = patch.simpleAnimations;
+  }
   if (typeof patch.toggleHotkey === 'string') allowed.toggleHotkey = patch.toggleHotkey;
   if (typeof patch.switchViewHotkey === 'string') allowed.switchViewHotkey = patch.switchViewHotkey;
+  if (typeof patch.onboardingSkipped === 'boolean') allowed.onboardingSkipped = patch.onboardingSkipped;
   if (patch.pos && typeof patch.pos.x === 'number' && typeof patch.pos.y === 'number') {
     allowed.pos = { x: patch.pos.x, y: patch.pos.y };
   }
 
   const prev = loadSettings();
+  // Only clear the day stamp when the user turns the toggle back ON.
+  if (
+    allowed.dailyHabitsReset === true &&
+    prev.dailyHabitsReset === false
+  ) {
+    allowed.lastHabitsResetDate = null;
+  }
   const next = saveSettings(allowed);
 
   if (typeof allowed.autostart === 'boolean' && allowed.autostart !== prev.autostart) {
@@ -430,24 +1180,138 @@ function applySettingsPatch(patch) {
   ) {
     registerHotkeys(next);
   }
+  if (
+    typeof allowed.remindersEnabled === 'boolean' &&
+    allowed.remindersEnabled !== prev.remindersEnabled
+  ) {
+    syncRemindersScheduler(next.remindersEnabled, { immediate: next.remindersEnabled });
+  }
+  if (
+    typeof allowed.dailyHabitsReset === 'boolean' &&
+    allowed.dailyHabitsReset !== prev.dailyHabitsReset &&
+    next.dailyHabitsReset
+  ) {
+    resetCompletedHabitsForNewDay()
+      .then((result) => {
+        if (result && result.reset) refreshExactReminders();
+      })
+      .catch((err) =>
+        console.warn('[habits-reset]', err && err.message ? err.message : err)
+      );
+  }
 
   return settingsForRenderer();
+}
+
+/**
+ * Sample wallpaper and optionally persist accent when autoPalette is on.
+ * @returns {{ accent: string, path?: string }}
+ */
+function sampleAndPersistPalette() {
+  const result = sampleWallpaperPalette();
+  const settings = loadSettings();
+  if (settings.autoPalette) {
+    saveSettings({ accentColor: result.accent });
+  }
+  return { accent: result.accent, path: result.path };
+}
+
+/**
+ * Apply auto-palette accent onto widget data payload when enabled.
+ * Uses persisted accent when present — avoids resampling wallpaper on every IPC.
+ * @param {any} data
+ * @returns {any}
+ */
+function applyAutoPaletteToData(data) {
+  const settings = loadSettings();
+  const config = loadConfig();
+  const defaultAccent = config.accentColor || '#C4122E';
+  if (!data || typeof data !== 'object') return data;
+  const base = { ...data, defaultAccent };
+  if (!settings.autoPalette) return base;
+  if (settings.accentColor) {
+    return { ...base, accentColor: settings.accentColor };
+  }
+  try {
+    const { accent } = sampleAndPersistPalette();
+    return { ...base, accentColor: accent };
+  } catch (err) {
+    console.warn('[palette]', err.message || err);
+    return base;
+  }
 }
 
 function registerIpc() {
   ipcMain.handle('widget:bootstrap', async (event) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const data = await getWidgetData();
-    return { settings: settingsForRenderer(), data };
+    const data = applyAutoPaletteToData(await getWidgetData());
+    refreshExactReminders(data);
+    return {
+      settings: settingsForRenderer(),
+      data,
+      credentials: credentialsPayload(),
+    };
   });
 
   ipcMain.handle('widget:get-data', async (event, opts) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    return getWidgetData(opts && typeof opts === 'object' ? opts : undefined);
+    const data = await getWidgetData(opts && typeof opts === 'object' ? opts : undefined);
+    refreshExactReminders(data);
+    return applyAutoPaletteToData(data);
+  });
+
+  ipcMain.handle('widget:credentials-status', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    return credentialsPayload();
+  });
+
+  ipcMain.handle('widget:save-credentials', async (event, payload) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    if (!payload || typeof payload !== 'object') throw new Error('Invalid credentials');
+    const existing = getGoogleCredentialsStatus();
+    const clientId = String(payload.clientId || '').trim();
+    let clientSecret = String(payload.clientSecret || '').trim();
+    if (!clientSecret && existing.configured && process.env.GOOGLE_CLIENT_SECRET) {
+      clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    }
+    saveGoogleCredentials({
+      clientId,
+      clientSecret,
+      redirectPort: payload.redirectPort,
+    });
+    saveSettings({ onboardingSkipped: false });
+    invalidateListCache();
+    invalidatePayloadCache();
+    const data = applyAutoPaletteToData(await getWidgetData({ force: true }));
+    return {
+      credentials: credentialsPayload(),
+      settings: settingsForRenderer(),
+      data,
+    };
+  });
+
+  ipcMain.handle('widget:skip-credentials', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    saveSettings({ onboardingSkipped: true });
+    const data = applyAutoPaletteToData(await getWidgetData({ force: true }));
+    return {
+      credentials: credentialsPayload(),
+      settings: settingsForRenderer(),
+      data,
+    };
+  });
+
+  ipcMain.handle('widget:sample-wallpaper-palette', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    return sampleAndPersistPalette();
   });
 
   ipcMain.handle('widget:login', async (event) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
+    const creds = getGoogleCredentialsStatus();
+    if (!creds.configured) {
+      throw new Error('Сначала сохраните Google Client ID и Secret');
+    }
     return loginGoogle();
   });
 
@@ -457,19 +1321,45 @@ function registerIpc() {
     invalidateListCache();
     invalidatePayloadCache();
     clearOfflineCache();
-    return getWidgetData({ force: true });
+    return applyAutoPaletteToData(await getWidgetData({ force: true }));
   });
 
   ipcMain.handle('widget:set-completed', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
     const { listKind, taskId, completed } = payload || {};
-    return setTaskCompleted(listKind, taskId, Boolean(completed));
+    const result = await setTaskCompleted(listKind, taskId, Boolean(completed));
+    refreshExactReminders();
+    return result;
   });
 
   ipcMain.handle('widget:create-item', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
     const { listKind, title } = payload || {};
-    return createItem(listKind, title);
+    const result = await createItem(listKind, title);
+    refreshExactReminders();
+    return result;
+  });
+
+  ipcMain.handle('widget:update-item', async (event, payload) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    const { listKind, taskId, title } = payload || {};
+    const result = await updateItem(listKind, taskId, title);
+    refreshExactReminders();
+    return result;
+  });
+
+  ipcMain.handle('widget:delete-item', async (event, payload) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    const { listKind, taskId } = payload || {};
+    const result = await deleteItem(listKind, taskId);
+    refreshExactReminders();
+    return result;
+  });
+
+  ipcMain.handle('widget:move-item', async (event, payload) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    const { listKind, taskId, previousId, orderedIds } = payload || {};
+    return moveItem(listKind, taskId, previousId || null, orderedIds || []);
   });
 
   ipcMain.handle('widget:get-settings', async (event) => {
@@ -481,6 +1371,17 @@ function registerIpc() {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
     if (!patch || typeof patch !== 'object') throw new Error('Invalid settings');
     return applySettingsPatch(patch);
+  });
+
+  ipcMain.handle('widget:check-reminders', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    ensureWindowsNotificationShortcut();
+    return runReminderCheck({ force: true });
+  });
+
+  ipcMain.handle('widget:check-updates', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    return checkForAppUpdates();
   });
 
   ipcMain.on('widget:minimize', (event) => {
@@ -511,12 +1412,16 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
+    ensureWindowsNotificationShortcut();
     const settings = loadSettings();
     applyAutostart(settings.autostart);
     registerIpc();
     createWindow();
     createTray();
     registerHotkeys(settings);
+    syncRemindersScheduler(settings.remindersEnabled !== false);
+    scheduleHabitsDayRollover();
+    setupAutoUpdater();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -526,10 +1431,14 @@ if (!gotTheLock) {
 
   app.on('before-quit', () => {
     isQuitting = true;
+    stopRemindersScheduler();
+    stopHabitsDayRollover();
   });
 
   app.on('will-quit', () => {
     unregisterHotkeys();
+    stopRemindersScheduler();
+    stopHabitsDayRollover();
     if (tray) {
       tray.destroy();
       tray = null;

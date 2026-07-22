@@ -77,7 +77,10 @@ function patchOfflineCache(listKind, taskId, patch, append = null) {
   if (append) {
     list = [append, ...list.filter((item) => item && item.id !== append.id)];
   } else if (patch === null) {
-    list = list.filter((item) => item && item.id !== taskId);
+    // Cascade: Google deletes subtasks with their parent.
+    list = list.filter(
+      (item) => item && item.id !== taskId && item.parent !== taskId
+    );
   } else {
     list = list.map((item) =>
       item && item.id === taskId ? { ...item, ...patch } : item
