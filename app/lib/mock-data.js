@@ -8,9 +8,16 @@ const {
   removeHabit,
 } = require('./streak-store');
 const { readJson, writeJson, dataPath } = require('./config');
+const { reorderByIds } = require('./reorder-by-ids');
 
 function mockFile() {
   return dataPath('mock-items.json');
+}
+
+let mockIdSeq = 0;
+function nextMockId(listKind) {
+  mockIdSeq += 1;
+  return `mock-${listKind[0]}-${Date.now().toString(36)}-${mockIdSeq.toString(36)}`;
 }
 
 function dueIsoDaysFromNow(delta) {
@@ -192,7 +199,7 @@ function getMockPayload(config) {
 
 function addMockItem(listKind, title, opts = {}) {
   const store = loadMockStore();
-  const id = `mock-${listKind[0]}-${Date.now().toString(36)}`;
+  const id = nextMockId(listKind);
   const trimmed = String(title || '').trim();
   if (!trimmed) throw new Error('Введите название');
   const parentId =
@@ -217,6 +224,12 @@ function addMockItem(listKind, title, opts = {}) {
     store.habits.unshift(item);
     saveMockStore(store);
     return { ok: true, mode: 'mock', item };
+  }
+
+  if (parentId) {
+    const parent = store.tasks.find((t) => t && t.id === parentId);
+    if (!parent) throw new Error('Родительская задача не найдена');
+    if (parent.parent) throw new Error('Нельзя вложить в подзадачу');
   }
 
   const item = {
@@ -332,22 +345,7 @@ function reorderMockItems(listKind, orderedIds) {
   }
   const store = loadMockStore();
   const key = listKind === 'habits' ? 'habits' : 'tasks';
-  const byId = new Map();
-  for (const item of store[key] || []) {
-    if (item && item.id) byId.set(item.id, item);
-  }
-  const next = [];
-  const seen = new Set();
-  for (const id of orderedIds) {
-    if (typeof id !== 'string' || !id || seen.has(id)) continue;
-    const item = byId.get(id);
-    if (!item) continue;
-    next.push(item);
-    seen.add(id);
-  }
-  for (const item of store[key] || []) {
-    if (item && item.id && !seen.has(item.id)) next.push(item);
-  }
+  const next = reorderByIds(store[key] || [], orderedIds);
   if (!next.length) throw new Error('Элемент не найден');
   store[key] = next;
   saveMockStore(store);

@@ -1,6 +1,7 @@
 'use strict';
 
 const { readJson, writeJson, dataPath } = require('./config');
+const { reorderByIds } = require('./reorder-by-ids');
 
 /** @type {object | null | undefined} undefined = not loaded yet */
 let memoryCache = undefined;
@@ -99,22 +100,7 @@ function reorderOfflineCache(listKind, orderedIds) {
   if (!cached || !Array.isArray(orderedIds) || !orderedIds.length) return;
   const key = listKind === 'habits' ? 'habits' : 'tasks';
   const list = Array.isArray(cached[key]) ? cached[key] : [];
-  const byId = new Map();
-  for (const item of list) {
-    if (item && item.id) byId.set(item.id, item);
-  }
-  const next = [];
-  const seen = new Set();
-  for (const id of orderedIds) {
-    if (typeof id !== 'string' || !id || seen.has(id)) continue;
-    const item = byId.get(id);
-    if (!item) continue;
-    next.push(item);
-    seen.add(id);
-  }
-  for (const item of list) {
-    if (item && item.id && !seen.has(item.id)) next.push(item);
-  }
+  const next = reorderByIds(list, orderedIds);
   saveOfflineCache({ ...cached, mode: 'google', [key]: next });
 }
 
