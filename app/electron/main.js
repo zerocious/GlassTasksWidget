@@ -15,7 +15,7 @@ const {
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const { loadConfig, getGoogleCredentialsStatus, saveGoogleCredentials } = require('../lib/config');
 const {
@@ -32,6 +32,7 @@ const {
   resolveTaskDueAt,
   resetCompletedHabitsForNewDay,
 } = require('../lib/google-tasks');
+const { windowsToastsGloballyEnabled } = require('../lib/windows-toasts');
 const { clearTokens } = require('../lib/google-auth');
 const {
   loadSettings,
@@ -45,7 +46,6 @@ const {
   loadReminderState,
   markNotified,
   wasNotifiedToday,
-  clearNotifiedToday,
 } = require('../lib/reminder-store');
 
 function credentialsPayload() {
@@ -94,26 +94,6 @@ const EXACT_REMINDER_HORIZON_MS = 24 * 60 * 60 * 1000;
 // Windows toasts require a matching AppUserModelID before ready (and a Start Menu .lnk).
 if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID);
-}
-
-/**
- * HKCU PushNotifications\ToastEnabled — master switch in
- * Settings → System → Notifications. 0 blocks all Electron toasts.
- * @returns {boolean}
- */
-function windowsToastsGloballyEnabled() {
-  if (process.platform !== 'win32') return true;
-  try {
-    const out = execSync(
-      'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications" /v ToastEnabled',
-      { encoding: 'utf8', windowsHide: true }
-    );
-    const m = out.match(/ToastEnabled\s+REG_DWORD\s+0x([0-9a-fA-F]+)/i);
-    if (!m) return true;
-    return parseInt(m[1], 16) !== 0;
-  } catch {
-    return true;
-  }
 }
 
 // Minimal 16×16 accent PNG (glass-tasks red square with check hint)
@@ -484,9 +464,10 @@ function createWindow() {
 }
 
 /**
- * Ensure Start Menu + Desktop shortcuts carry AppUserModelID matching
+ * Ensure Start Menu shortcut carries AppUserModelID matching
  * app.setAppUserModelId — required for Windows Action Center toasts.
- * Always rewrite both so pack scripts / stale .lnk files cannot strip AUMID.
+ * Desktop shortcut is only updated when already present (never recreated
+ * after the user deletes it; avoids overwriting installed shortcuts in dev).
  */
 function ensureWindowsNotificationShortcut() {
   if (process.platform !== 'win32') return;
@@ -517,11 +498,14 @@ function ensureWindowsNotificationShortcut() {
     };
 
     const startMenuLnk = path.join(startMenuDir, 'Glass Tasks Widget.lnk');
+    const startOp = fs.existsSync(startMenuLnk) ? 'update' : 'create';
+    const startOk = shell.writeShortcutLink(startMenuLnk, startOp, details);
+    if (!startOk) console.warn('[reminders] shortcut write failed', startMenuLnk);
+
     const desktopLnk = path.join(app.getPath('desktop'), 'Glass Tasks Widget.lnk');
-    for (const lnk of [startMenuLnk, desktopLnk]) {
-      const op = fs.existsSync(lnk) ? 'update' : 'create';
-      const ok = shell.writeShortcutLink(lnk, op, details);
-      if (!ok) console.warn('[reminders] shortcut write failed', lnk);
+    if (fs.existsSync(desktopLnk)) {
+      const deskOk = shell.writeShortcutLink(desktopLnk, 'update', details);
+      if (!deskOk) console.warn('[reminders] shortcut write failed', desktopLnk);
     }
   } catch (err) {
     console.warn('[reminders] shortcut', err && err.message ? err.message : err);
@@ -782,6 +766,8 @@ function showNativeWinRtToast(title, body) {
   try {
     const esc = (s) =>
       String(s || '')
+        // XML 1.0 disallows most C0 controls; strip before entity-encoding.
+        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -805,10 +791,14 @@ $n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('$
 $n.Show($toast)
 `;
     const encoded = Buffer.from(ps, 'utf16le').toString('base64');
-    execSync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, {
-      windowsHide: true,
-      timeout: 8000,
-    });
+    execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+      {
+        windowsHide: true,
+        timeout: 8000,
+      }
+    );
     return true;
   } catch (err) {
     console.warn('[reminders] winrt', err && err.message ? err.message : err);
@@ -908,8 +898,9 @@ function tryElectronNotification(title, body) {
         console.warn('[reminders] electron toast failed', msg);
         finish({ shown: false, error: msg });
       });
-      // Windows sometimes omits 'show'; treat no failure as success.
-      fallback = setTimeout(() => finish({ shown: true }), 1200);
+      // Windows sometimes omits 'show'. Treat timeout as not-shown so WinRT /
+      // in-app / balloon fallbacks still run instead of silently marking delivered.
+      fallback = setTimeout(() => finish({ shown: false, error: 'no-show-event' }), 1200);
       if (typeof fallback.unref === 'function') fallback.unref();
       n.show();
     } catch (err) {
@@ -1035,9 +1026,8 @@ async function runReminderCheck(opts = {}) {
       };
     }
 
-    // Manual «Проверить» must always be allowed to re-fire toasts the same day.
-    if (opts.force) clearNotifiedToday();
-
+    // Manual «Проверить» re-fires by ignoring today's notified set without
+    // clearing it first — so a failed toast keeps prior delivery state.
     const candidates = collectReminderCandidates(data);
     scheduleExactReminders(data);
     const state = loadReminderState();
@@ -1521,15 +1511,21 @@ function registerIpc() {
 
   ipcMain.handle('widget:create-item', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const { listKind, title, parentId } = payload || {};
-    const result = await createItem(listKind, title, parentId ? { parentId } : {});
+    if (!payload || typeof payload !== 'object') throw new Error('Invalid payload');
+    const { listKind, title, parentId } = payload;
+    const result = await createItem(
+      listKind,
+      title,
+      typeof parentId === 'string' && parentId.trim() ? { parentId: parentId.trim() } : {}
+    );
     refreshExactReminders();
     return result;
   });
 
   ipcMain.handle('widget:update-item', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const { listKind, taskId, patch, title, notes } = payload || {};
+    if (!payload || typeof payload !== 'object') throw new Error('Invalid payload');
+    const { listKind, taskId, patch, title, notes } = payload;
     const update =
       patch !== undefined
         ? patch
@@ -1546,7 +1542,8 @@ function registerIpc() {
 
   ipcMain.handle('widget:delete-item', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const { listKind, taskId } = payload || {};
+    if (!payload || typeof payload !== 'object') throw new Error('Invalid payload');
+    const { listKind, taskId } = payload;
     const result = await deleteItem(listKind, taskId);
     refreshExactReminders();
     return result;
@@ -1554,7 +1551,8 @@ function registerIpc() {
 
   ipcMain.handle('widget:move-item', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const { listKind, taskId, previousId, orderedIds } = payload || {};
+    if (!payload || typeof payload !== 'object') throw new Error('Invalid payload');
+    const { listKind, taskId, previousId, orderedIds } = payload;
     return moveItem(listKind, taskId, previousId || null, orderedIds || []);
   });
 
