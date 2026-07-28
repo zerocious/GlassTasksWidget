@@ -33,6 +33,7 @@ const optReminders = document.getElementById('optReminders');
 const optDailyHabitsReset = document.getElementById('optDailyHabitsReset');
 const btnHideCompleted = document.getElementById('btnHideCompleted');
 const btnHideCompletedHabits = document.getElementById('btnHideCompletedHabits');
+const taskFilterChips = document.getElementById('taskFilterChips');
 const btnCheckReminders = document.getElementById('btnCheckReminders');
 const btnCheckUpdates = document.getElementById('btnCheckUpdates');
 const remindersHint = document.getElementById('remindersHint');
@@ -55,9 +56,42 @@ const btnTimeSave = document.getElementById('btnTimeSave');
 const btnTimeCancel = document.getElementById('btnTimeCancel');
 const btnTimeClose = document.getElementById('btnTimeClose');
 const btnTimeClear = document.getElementById('btnTimeClear');
+const repeatOverlay = document.getElementById('repeatOverlay');
+const repeatPanelTask = document.getElementById('repeatPanelTask');
+const repeatOptions = document.getElementById('repeatOptions');
+const streakOverlay = document.getElementById('streakOverlay');
+const streakPanelTask = document.getElementById('streakPanelTask');
+const streakMonthLabel = document.getElementById('streakMonthLabel');
+const streakMonthGrid = document.getElementById('streakMonthGrid');
+const streakMonthStat = document.getElementById('streakMonthStat');
+const streakMonthStreak = document.getElementById('streakMonthStreak');
+const btnStreakPrev = document.getElementById('btnStreakPrev');
+const btnStreakNext = document.getElementById('btnStreakNext');
+const btnStreakClose = document.getElementById('btnStreakClose');
 
 const NOTES_IND_SVG =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h9l3 3v13H6z"/><path d="M14 4v4h4"/><path d="M8 12h8M8 16h6"/></svg>';
+
+const REPEAT_BADGE = {
+  daily: 'ежедн.',
+  weekdays: 'будни',
+  weekly: 'еженед.',
+};
+
+const MONTH_NAMES_RU = [
+  'Январь',
+  'Февраль',
+  'Март',
+  'Апрель',
+  'Май',
+  'Июнь',
+  'Июль',
+  'Август',
+  'Сентябрь',
+  'Октябрь',
+  'Ноябрь',
+  'Декабрь',
+];
 
 /** @type {{ listKind: 'tasks' | 'habits', itemId: string, original: string } | null} */
 let notesTarget = null;
@@ -67,45 +101,96 @@ let notesSaving = false;
 let timeTarget = null;
 /** @type {boolean} */
 let timeSaving = false;
+/** @type {{ listKind: 'tasks' | 'habits', itemId: string, original: string | null } | null} */
+let repeatTarget = null;
+/** @type {boolean} */
+let repeatSaving = false;
+/** @type {{ habitId: string, year: number, month: number } | null} */
+let streakTarget = null;
+
+/** @type {'all' | 'today' | 'overdue' | 'undated'} */
+let taskDueFilter = 'all';
 
 /** Config accent from last server payload (before wallpaper override). */
 let configAccent = '#C4122E';
 /** @type {ReturnType<typeof setTimeout> | null} */
 let slideClearTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let streaksEnterTimer = null;
 
 const icons = {
   tasks: '<svg viewBox="0 0 24 24"><path d="M5 12l4 4L19 6"/></svg>',
   habits: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg>',
 };
 
-/** Inline SVGs for habit rows — stroke icons, 24 viewBox. */
+/** Inline SVGs for habit rows — consistent outline stroke icons, viewBox 0 0 24 24. */
 const HABIT_ICON_SVGS = {
   water:
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c-2.8 4.2-6 7.6-6 11a6 6 0 0 0 12 0c0-3.4-3.2-6.8-6-11z"/><path d="M9.5 14.5c.4 1.6 1.6 2.5 2.5 2.5"/></svg>',
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.7l5.2 5.2a7.4 7.4 0 1 1-10.4 0z"/></svg>',
   read:
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H12v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H12v16h5.5A2.5 2.5 0 0 1 20 21.5z"/></svg>',
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 4h6.5A3.5 3.5 0 0 1 12 7.5V20a2.5 2.5 0 0 0-2.5-2.5H2z"/><path d="M22 4h-6.5A3.5 3.5 0 0 0 12 7.5V20a2.5 2.5 0 0 1 2.5-2.5H22z"/></svg>',
   sport:
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 9.5v5M17.5 9.5v5M4 11v2M20 11v2M8.5 12h7M6.5 9.5h-1a1.5 1.5 0 0 0 0 3h1M17.5 9.5h1a1.5 1.5 0 0 1 0 3h-1"/></svg>',
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 7v10M17.5 7v10M4 10v4M20 10v4M8.5 12h7M6.5 7h-1a2 2 0 0 0 0 4h1M6.5 13h-1a2 2 0 0 0 0 4h1M17.5 7h1a2 2 0 0 1 0 4h-1M17.5 13h1a2 2 0 0 1 0 4h-1"/></svg>',
+  walk:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="13.5" cy="5" r="2"/><path d="M8 21l2.5-5 2.2 2.2L15 21M11 11l-1.5 4.2L6 17.5M11 11l3.2 1.5 3.3-3.2 2 1.2"/></svg>',
   meditate:
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="7" r="2.25"/><path d="M8.5 21c.5-3 2-5 3.5-5.5M15.5 21c-.5-3-2-5-3.5-5.5M7 14.5c1.5-1 3.2-1.5 5-1.5s3.5.5 5 1.5"/><path d="M9.5 11.5c.8.6 1.7.9 2.5.9s1.7-.3 2.5-.9"/></svg>',
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="6.5" r="2.2"/><path d="M8.2 21c.6-3.2 2.2-5.2 3.8-5.7M15.8 21c-.6-3.2-2.2-5.2-3.8-5.7"/><path d="M7 14.2c1.6-1.1 3.4-1.6 5-1.6s3.4.5 5 1.6"/><path d="M9.4 11.2c.9.7 1.8 1 2.6 1s1.7-.3 2.6-1"/></svg>',
   sleep:
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16.5 13.5A6.5 6.5 0 0 1 10 4.2 7.5 7.5 0 1 0 19.8 14a6.4 6.4 0 0 1-3.3-.5z"/></svg>',
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 14.2A8.2 8.2 0 1 1 9.8 3 6.4 6.4 0 0 0 21 14.2z"/></svg>',
+  food:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21c1.4 0 2.6 1 3.8 1 2.8 0 5.7-7.5 5.7-11.5A4.6 4.6 0 0 0 17 5.2c-2.1 0-3.7 1.4-4.6 2-1-.6-2.6-2-4.7-2a4.6 4.6 0 0 0-4.6 5.3C3.1 14.5 6 22 8.8 22c1.2 0 2.4-1 3.2-1z"/><path d="M10.2 3.2c.9.5 1.8 1.8 1.8 4.3"/></svg>',
+  stretch:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="2"/><path d="M5 10.5h14M12 7.5v5.5M8.5 21l3.5-8 3.5 8M9.5 13l-3.5 2.5M14.5 13l3.5 2.5"/></svg>',
+  journal:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h11a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M8 3v18M11 8h5M11 12h5M11 16h3"/></svg>',
+  study:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 10l10-5 10 5-10 5z"/><path d="M6 12v5.2c2.8 2.3 9.2 2.3 12 0V12"/><path d="M22 10v6"/></svg>',
+  code:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5"/></svg>',
+  music:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
+  vitamins:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 20.5a5.2 5.2 0 0 1-7.4-7.4l7.4-7.4a5.2 5.2 0 0 1 7.4 7.4z"/><path d="M8.5 8.5l7 7"/></svg>',
+  nosmoke:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8M8 14h6.5l1.8-2.2M16.5 11.8V9.5h1.8"/><path d="M18.8 9.5h1.2"/></svg>',
+  language:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>',
+  clean:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.2 3.6L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.4z"/><path d="M18.5 14.5l.7 2.1 2.1.7-2.1.7-.7 2.1-.7-2.1-2.1-.7 2.1-.7z"/><path d="M5.2 15.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
+  coffee:
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 9h11v5.5A4.5 4.5 0 0 1 11.5 19H9.5A4.5 4.5 0 0 1 5 14.5z"/><path d="M16 10h1.5a2.5 2.5 0 0 1 0 5H16M8 22h6M9 3v2M12 2v2M15 3v2"/></svg>',
   default:
-    '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c.4 3.2 2.2 5.5 5.5 6.2C14.2 10 12.4 12.3 12 15.5 11.6 12.3 9.8 10 6.5 9.2 9.8 8.5 11.6 6.2 12 3z"/><path d="M12 15.5V21"/></svg>',
+    '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 12.2l2.3 2.3 4.7-5"/></svg>',
 };
 
 /**
  * Pick a habit icon key from title keywords (EN + RU).
+ * More specific themes are matched before broad ones.
  * @param {string} title
  * @returns {keyof typeof HABIT_ICON_SVGS}
  */
 function habitIconKey(title) {
   const t = String(title || '').toLowerCase();
-  if (/water|hydrat|вод|пить|напит/.test(t)) return 'water';
+  if (/water|hydrat|вод|пить|напит|hydr/.test(t)) return 'water';
+  if (/smoke|smok|куре|сигарет|nicotin/.test(t)) return 'nosmoke';
+  if (/sugar|sweet|candy|diet|calorie|сахар|сладк|диет|калор|фастфуд|junk/.test(t)) return 'food';
+  if (/vitamin|pill|supplem|витамин|таблет|бад/.test(t)) return 'vitamins';
+  if (/coffee|tea|caffeine|кофе|чай/.test(t)) return 'coffee';
+  if (/code|coding|program|dev\b|программ|\bкод\b|кодить|хакер/.test(t)) return 'code';
+  if (/music|piano|guitar|музык|гитар|пианин|песн/.test(t)) return 'music';
+  if (/language|english|spanish|french|german|japanes|chinese|язык|англий|испан|немец|франц|япон|китай|иностран/.test(t))
+    return 'language';
+  if (/clean|tidy|laundry|уборк|чист|пыл|стирк|мыт[ьа]/.test(t)) return 'clean';
+  if (/journal|diary|gratitude|дневник|журнал|благодар|запис/.test(t)) return 'journal';
+  if (/study|homework|learn|учеба|учеб|урок|домашк|учить|обучен/.test(t)) return 'study';
+  if (/stretch|flexib|растяж|разминк|гибк/.test(t)) return 'stretch';
   if (/read|book|чита|книг/.test(t)) return 'read';
-  if (/sport|exercis|workout|gym|run|jog|спорт|тренир|упражн|бег|зарядк/.test(t)) return 'sport';
-  if (/meditat|yoga|mindful|медита|йог|дыхани/.test(t)) return 'meditate';
-  if (/sleep|rest|сон|спат|отдых/.test(t)) return 'sleep';
+  if (/sleep|rest|bedtime|сон|спат|отдых|высып/.test(t)) return 'sleep';
+  if (/meditat|yoga|mindful|calm|breath|медита|йог|дыхани|спокой|дзен/.test(t)) return 'meditate';
+  if (/walk|steps|прогул|шаг|пешк|ходьб/.test(t)) return 'walk';
+  if (/sport|exercis|workout|gym|run|jog|fitness|bike|цикл|спорт|тренир|упражн|бег|зарядк|фитнес|качал/.test(t))
+    return 'sport';
+  if (/food|eat|meal|nutrition|еда|питан|завтрак|обед|ужин/.test(t)) return 'food';
   return 'default';
 }
 
@@ -253,9 +338,153 @@ function syncSettingsUi() {
   hkSwitch.textContent = switchLabel;
 }
 
+/** @type {ReturnType<typeof setTimeout> | null} */
+let settingsCloseTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let notesCloseTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let timeCloseTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let repeatCloseTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let streakCloseTimer = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let ctxCloseTimer = null;
+/** Bump to cancel a pending afterPaint open (close raced open). */
+let settingsOpenGen = 0;
+let notesOpenGen = 0;
+let timeOpenGen = 0;
+let repeatOpenGen = 0;
+let streakOpenGen = 0;
+let ctxOpenGen = 0;
+
+function motionMs(cssVar, fallback) {
+  if (motionQuiet()) return 0;
+  try {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue(cssVar).trim();
+    if (!raw) return fallback;
+    if (raw.endsWith('ms')) return Math.max(0, parseFloat(raw) || fallback);
+    if (raw.endsWith('s')) return Math.max(0, (parseFloat(raw) || fallback / 1000) * 1000);
+  } catch {
+    /* ignore */
+  }
+  return fallback;
+}
+
+/** One rAF is enough after unhiding — double-rAF added a frame of mush. */
+function afterPaint(fn) {
+  requestAnimationFrame(fn);
+}
+
 function setSettingsOpen(open) {
-  settingsPanel.hidden = !open;
+  if (settingsCloseTimer) {
+    clearTimeout(settingsCloseTimer);
+    settingsCloseTimer = null;
+  }
   btnSettings.setAttribute('aria-expanded', String(open));
+  if (open) {
+    const gen = ++settingsOpenGen;
+    settingsPanel.hidden = false;
+    if (motionQuiet()) {
+      settingsPanel.classList.add('is-open');
+      return;
+    }
+    settingsPanel.classList.remove('is-open');
+    afterPaint(() => {
+      if (gen !== settingsOpenGen || settingsPanel.hidden) return;
+      settingsPanel.classList.add('is-open');
+    });
+    return;
+  }
+  settingsOpenGen += 1;
+  settingsPanel.classList.remove('is-open');
+  if (motionQuiet()) {
+    settingsPanel.hidden = true;
+    return;
+  }
+  settingsCloseTimer = setTimeout(() => {
+    settingsPanel.hidden = true;
+    settingsCloseTimer = null;
+  }, motionMs('--panel-ms', 210) + 40);
+}
+
+/**
+ * @param {HTMLElement | null} overlay
+ * @param {boolean} open
+ * @param {{ timerRef: 'notes' | 'time' | 'repeat' | 'streak', onClosed?: () => void, focusEl?: HTMLElement | null }} opts
+ */
+function setOverlayOpen(overlay, open, opts) {
+  if (!overlay) return;
+  const timerKey = opts.timerRef;
+  const clearClose = () => {
+    if (timerKey === 'notes' && notesCloseTimer) {
+      clearTimeout(notesCloseTimer);
+      notesCloseTimer = null;
+    }
+    if (timerKey === 'time' && timeCloseTimer) {
+      clearTimeout(timeCloseTimer);
+      timeCloseTimer = null;
+    }
+    if (timerKey === 'repeat' && repeatCloseTimer) {
+      clearTimeout(repeatCloseTimer);
+      repeatCloseTimer = null;
+    }
+    if (timerKey === 'streak' && streakCloseTimer) {
+      clearTimeout(streakCloseTimer);
+      streakCloseTimer = null;
+    }
+  };
+  clearClose();
+  const bumpOpenGen = () => {
+    if (timerKey === 'notes') return ++notesOpenGen;
+    if (timerKey === 'repeat') return ++repeatOpenGen;
+    if (timerKey === 'streak') return ++streakOpenGen;
+    return ++timeOpenGen;
+  };
+  const latestOpenGen = () => {
+    if (timerKey === 'notes') return notesOpenGen;
+    if (timerKey === 'repeat') return repeatOpenGen;
+    if (timerKey === 'streak') return streakOpenGen;
+    return timeOpenGen;
+  };
+  if (open) {
+    const gen = bumpOpenGen();
+    overlay.hidden = false;
+    if (motionQuiet()) {
+      overlay.classList.add('is-open');
+      opts.focusEl?.focus?.();
+      return;
+    }
+    overlay.classList.remove('is-open');
+    afterPaint(() => {
+      if (gen !== latestOpenGen() || overlay.hidden) return;
+      overlay.classList.add('is-open');
+      opts.focusEl?.focus?.();
+    });
+    return;
+  }
+  if (timerKey === 'notes') notesOpenGen += 1;
+  else if (timerKey === 'repeat') repeatOpenGen += 1;
+  else if (timerKey === 'streak') streakOpenGen += 1;
+  else timeOpenGen += 1;
+  overlay.classList.remove('is-open');
+  const finish = () => {
+    overlay.hidden = true;
+    opts.onClosed?.();
+    if (timerKey === 'notes') notesCloseTimer = null;
+    if (timerKey === 'time') timeCloseTimer = null;
+    if (timerKey === 'repeat') repeatCloseTimer = null;
+    if (timerKey === 'streak') streakCloseTimer = null;
+  };
+  if (motionQuiet()) {
+    finish();
+    return;
+  }
+  const delay = motionMs('--panel-ms', 210) + 40;
+  if (timerKey === 'notes') notesCloseTimer = setTimeout(finish, delay);
+  else if (timerKey === 'repeat') repeatCloseTimer = setTimeout(finish, delay);
+  else if (timerKey === 'streak') streakCloseTimer = setTimeout(finish, delay);
+  else timeCloseTimer = setTimeout(finish, delay);
 }
 
 function syncHideCompletedUi() {
@@ -401,10 +630,14 @@ function patchSettings(patch) {
     applySimpleAnimations(patch.simpleAnimations);
     if (optSimpleAnim) optSimpleAnim.checked = patch.simpleAnimations;
     if (patch.simpleAnimations) {
-      panels.classList.remove('is-sliding');
+      panels.classList.remove('is-sliding', 'streaks-enter');
       if (slideClearTimer) {
         clearTimeout(slideClearTimer);
         slideClearTimer = null;
+      }
+      if (streaksEnterTimer) {
+        clearTimeout(streaksEnterTimer);
+        streaksEnterTimer = null;
       }
     }
   }
@@ -491,11 +724,20 @@ function setView(next, force) {
     clearTimeout(slideClearTimer);
     slideClearTimer = null;
   }
+  if (streaksEnterTimer) {
+    clearTimeout(streaksEnterTimer);
+    streaksEnterTimer = null;
+  }
   panels.classList.remove('is-sliding');
+  panels.classList.remove('streaks-enter');
 
   const animate = !force && prev !== view && !motionQuiet();
   if (animate) {
     panels.classList.add('is-sliding');
+    if (view === 'habits') {
+      // Must be on before data-view flips so streak transitions pick up the delay.
+      panels.classList.add('streaks-enter');
+    }
     const onEnd = (e) => {
       if (e.target !== panels || e.propertyName !== 'transform') return;
       panels.classList.remove('is-sliding');
@@ -506,11 +748,19 @@ function setView(next, force) {
       }
     };
     panels.addEventListener('transitionend', onEnd);
+    const slideMs = motionMs('--slide-ms', 340);
     slideClearTimer = setTimeout(() => {
       panels.classList.remove('is-sliding');
       panels.removeEventListener('transitionend', onEnd);
       slideClearTimer = null;
-    }, 400);
+    }, slideMs + 60);
+    if (view === 'habits') {
+      // Keep enter delays until the staggered streak motion finishes.
+      streaksEnterTimer = setTimeout(() => {
+        panels.classList.remove('streaks-enter');
+        streaksEnterTimer = null;
+      }, slideMs + 280);
+    }
   }
 
   panels.dataset.view = view;
@@ -563,15 +813,28 @@ function taskHasNotes(task) {
   if (!task) return false;
   const text = String(task.notes || '').trim();
   if (!text) return false;
-  // Managed «время HH:MM» line alone is not real notes content.
+  // Managed «время» / «повтор» lines alone are not real notes content.
   return text
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .some((l) => l && !/^(?:время|Время|time)\s*[:\-]?\s*\d{1,2}[:.]\d{2}$/i.test(l));
+    .some(
+      (l) =>
+        l &&
+        !/^(?:время|Время|time)\s*[:\-]?\s*\d{1,2}[:.]\d{2}$/i.test(l) &&
+        !/^(?:повтор|Повтор|repeat)\s*[:\-]?\s*(ежедневно|будни|еженедельно|daily|weekdays|weekly)\s*$/i.test(
+          l
+        )
+    );
 }
 
 function taskHasTime(task) {
   return Boolean(task && typeof task.dueTime === 'string' && /^\d{2}:\d{2}$/.test(task.dueTime));
+}
+
+function taskRecurrence(task) {
+  const r = task && task.recurrence;
+  if (r === 'daily' || r === 'weekdays' || r === 'weekly') return r;
+  return null;
 }
 
 function syncRowTimeChip(li, task) {
@@ -594,6 +857,34 @@ function syncRowTimeChip(li, task) {
   }
   chip.textContent = task.dueTime;
   chip.title = `Время: ${task.dueTime}`;
+}
+
+function syncRowRepeatBadge(li, task) {
+  if (!li) return;
+  const metaLine = li.querySelector('.row-meta-line');
+  let badge = li.querySelector('.row-repeat');
+  const rule = taskRecurrence(task);
+  if (!rule) {
+    if (badge) badge.remove();
+    return;
+  }
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.className = 'row-repeat';
+    badge.setAttribute('aria-label', 'Повтор');
+    if (metaLine) metaLine.appendChild(badge);
+    else {
+      const meta = li.querySelector('.row-meta');
+      if (meta && meta.parentElement) meta.parentElement.appendChild(badge);
+    }
+  }
+  badge.textContent = REPEAT_BADGE[rule] || rule;
+  badge.title =
+    rule === 'daily'
+      ? 'Повтор: ежедневно'
+      : rule === 'weekdays'
+        ? 'Повтор: будни'
+        : 'Повтор: еженедельно';
 }
 
 /** Indent only when parent is present in the same open/done bucket. */
@@ -635,6 +926,7 @@ function buildTaskRow(task) {
   const notesInd = li.querySelector('.row-notes-ind');
   if (notesInd) notesInd.hidden = !taskHasNotes(task);
   syncRowTimeChip(li, task);
+  syncRowRepeatBadge(li, task);
   return li;
 }
 
@@ -665,7 +957,7 @@ function buildHabitRow(habit) {
         <div class="row-meta"></div>
       </div>
     </div>
-    <div class="streak" aria-label="Стрик ${streak} дней">
+    <div class="streak" aria-label="Стрик ${streak} дней" title="История стрика" role="button" tabindex="0" data-streak-open="1">
       <div class="week-strip" aria-hidden="true">${pills}</div>
       <span class="streak-badge">${streak} <span class="unit">дн.</span></span>
     </div>
@@ -682,6 +974,89 @@ function filterVisibleItems(items) {
   return items.filter((it) => !it.completed);
 }
 
+/**
+ * Nesting choice: if a child matches the date filter, keep its parent in the list
+ * for context (parent may not match). Non-matching siblings stay hidden.
+ * @param {any} task
+ * @param {'all' | 'today' | 'overdue' | 'undated'} filter
+ */
+function taskMatchesDueFilter(task, filter) {
+  if (!task || filter === 'all') return true;
+  if (filter === 'undated') return !task.due;
+  if (filter === 'today') return task.dueKind === 'today';
+  if (filter === 'overdue') return task.dueKind === 'overdue';
+  return true;
+}
+
+/**
+ * @param {any[]} items already hideCompleted-filtered
+ * @param {'all' | 'today' | 'overdue' | 'undated'} filter
+ */
+function filterTasksByDue(items, filter) {
+  if (!filter || filter === 'all') return items;
+  const byId = new Map();
+  for (const t of items) {
+    if (t && t.id) byId.set(t.id, t);
+  }
+  const keep = new Set();
+  for (const t of items) {
+    if (taskMatchesDueFilter(t, filter)) keep.add(t.id);
+  }
+  for (const id of [...keep]) {
+    let cur = byId.get(id);
+    while (cur && cur.parent && byId.has(cur.parent)) {
+      keep.add(cur.parent);
+      cur = byId.get(cur.parent);
+    }
+  }
+  return items.filter((t) => t && keep.has(t.id));
+}
+
+/** Tasks list after hideCompleted + due filter. */
+function visibleTasks() {
+  return filterTasksByDue(filterVisibleItems(state.tasks), taskDueFilter);
+}
+
+function countOpenDue(kind) {
+  let n = 0;
+  for (const t of state.tasks) {
+    if (!t || t.completed) continue;
+    if (kind === 'today' && t.dueKind === 'today') n += 1;
+    else if (kind === 'overdue' && t.dueKind === 'overdue') n += 1;
+  }
+  return n;
+}
+
+function syncTaskFilterUi() {
+  if (!taskFilterChips) return;
+  for (const btn of taskFilterChips.querySelectorAll('[data-filter]')) {
+    const f = btn.getAttribute('data-filter') || 'all';
+    const on = f === taskDueFilter;
+    btn.classList.toggle('is-active', on);
+    btn.setAttribute('aria-pressed', String(on));
+  }
+  const todayEl = taskFilterChips.querySelector('[data-count="today"]');
+  const overdueEl = taskFilterChips.querySelector('[data-count="overdue"]');
+  const todayN = countOpenDue('today');
+  const overdueN = countOpenDue('overdue');
+  if (todayEl) {
+    todayEl.textContent = todayN ? String(todayN) : '';
+    todayEl.hidden = !todayN;
+  }
+  if (overdueEl) {
+    overdueEl.textContent = overdueN ? String(overdueN) : '';
+    overdueEl.hidden = !overdueN;
+  }
+}
+
+function setTaskDueFilter(next) {
+  const allowed = next === 'today' || next === 'overdue' || next === 'undated' ? next : 'all';
+  if (allowed === taskDueFilter) return;
+  taskDueFilter = allowed;
+  syncTaskFilterUi();
+  renderTasks();
+}
+
 function ensureListEmpty(listEl, kind, allItems, visibleItems) {
   if (visibleItems.length) return;
   const empty =
@@ -689,14 +1064,17 @@ function ensureListEmpty(listEl, kind, allItems, visibleItems) {
       ? allItems.length
         ? '<li class="empty">Все привычки на сегодня выполнены.</li>'
         : '<li class="empty">Нет привычек. Добавьте ниже или создайте список «Habits».</li>'
-      : allItems.length
-        ? '<li class="empty">Все задачи выполнены.</li>'
-        : '<li class="empty">Нет задач. Добавьте ниже или создайте список Google Tasks.</li>';
+      : taskDueFilter !== 'all' && allItems.length
+        ? '<li class="empty">Нет задач в этом фильтре.</li>'
+        : allItems.length
+          ? '<li class="empty">Все задачи выполнены.</li>'
+          : '<li class="empty">Нет задач. Добавьте ниже или создайте список Google Tasks.</li>';
   listEl.innerHTML = empty;
 }
 
 function renderTasks() {
-  const visible = filterVisibleItems(state.tasks);
+  syncTaskFilterUi();
+  const visible = visibleTasks();
   if (!visible.length) {
     ensureListEmpty(listTasks, 'tasks', state.tasks, visible);
     return;
@@ -726,6 +1104,48 @@ function rowById(listEl, id) {
   return listEl.querySelector(`li.row[data-id="${safe}"]`);
 }
 
+function markRowEnter(li) {
+  if (!li || motionQuiet()) return;
+  li.classList.remove('row-enter');
+  // Force restart if re-added quickly
+  void li.offsetWidth;
+  li.classList.add('row-enter');
+  const clear = (e) => {
+    if (e && e.target !== li) return;
+    li.classList.remove('row-enter');
+    li.removeEventListener('animationend', clear);
+  };
+  li.addEventListener('animationend', clear);
+  setTimeout(() => li.classList.remove('row-enter'), 400);
+}
+
+function removeRowAnimated(li, done) {
+  if (!li) {
+    done?.();
+    return;
+  }
+  if (motionQuiet()) {
+    li.remove();
+    done?.();
+    return;
+  }
+  li.classList.add('row-leave');
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    li.removeEventListener('transitionend', onEnd);
+    if (li.parentNode) li.remove();
+    done?.();
+  };
+  const onEnd = (e) => {
+    if (e.target !== li || (e.propertyName !== 'opacity' && e.propertyName !== 'transform')) return;
+    finish();
+  };
+  li.addEventListener('transitionend', onEnd);
+  setTimeout(finish, 260);
+}
+
 function syncListOrder(listEl, items) {
   for (const item of items) {
     const row = rowById(listEl, item.id);
@@ -737,10 +1157,18 @@ function syncListOrder(listEl, items) {
 }
 
 function patchTaskRow(task) {
-  const visible = filterVisibleItems(state.tasks);
-  if (settings.hideCompleted && task.completed) {
+  syncTaskFilterUi();
+  const visible = visibleTasks();
+  const inView = visible.some((t) => t.id === task.id);
+  if (!inView) {
     const li = rowById(listTasks, task.id);
-    if (li) li.remove();
+    if (li) {
+      removeRowAnimated(li, () => {
+        syncListOrder(listTasks, visibleTasks());
+        ensureListEmpty(listTasks, 'tasks', state.tasks, visibleTasks());
+      });
+      return;
+    }
     syncListOrder(listTasks, visible);
     ensureListEmpty(listTasks, 'tasks', state.tasks, visible);
     return;
@@ -751,6 +1179,7 @@ function patchTaskRow(task) {
   if (!li) {
     li = buildTaskRow(task);
     listTasks.appendChild(li);
+    markRowEnter(li);
   } else {
     li.className = taskRowClassName(task);
     if (task.parent) li.dataset.parent = task.parent;
@@ -774,6 +1203,7 @@ function patchTaskRow(task) {
     }
     if (meta) meta.textContent = task.meta || '';
     syncRowTimeChip(li, task);
+    syncRowRepeatBadge(li, task);
     let notesInd = li.querySelector('.row-notes-ind');
     if (!notesInd) {
       const titleLine = li.querySelector('.row-title-line') || li.querySelector('.row-body');
@@ -798,7 +1228,13 @@ function patchHabitRow(habit) {
   const visible = filterVisibleItems(state.habits);
   if (settings.hideCompleted && habit.completed) {
     const li = rowById(listHabits, habit.id);
-    if (li) li.remove();
+    if (li) {
+      removeRowAnimated(li, () => {
+        syncListOrder(listHabits, filterVisibleItems(state.habits));
+        ensureListEmpty(listHabits, 'habits', state.habits, filterVisibleItems(state.habits));
+      });
+      return;
+    }
     syncListOrder(listHabits, visible);
     ensureListEmpty(listHabits, 'habits', state.habits, visible);
     return;
@@ -809,6 +1245,7 @@ function patchHabitRow(habit) {
   if (!li) {
     li = buildHabitRow(habit);
     listHabits.appendChild(li);
+    markRowEnter(li);
   } else {
     const done = Boolean(habit.completed);
     li.className = `row${done ? ' done' : ''}`;
@@ -835,6 +1272,10 @@ function patchHabitRow(habit) {
     if (streakEl) {
       const streak = habit.streak || 0;
       streakEl.setAttribute('aria-label', `Стрик ${streak} дней`);
+      streakEl.setAttribute('title', 'История стрика');
+      streakEl.setAttribute('role', 'button');
+      streakEl.setAttribute('tabindex', '0');
+      streakEl.setAttribute('data-streak-open', '1');
       const badge = streakEl.querySelector('.streak-badge');
       if (badge) {
         badge.textContent = '';
@@ -852,6 +1293,7 @@ function patchHabitRow(habit) {
   }
   syncListOrder(listHabits, visible);
   ensureListEmpty(listHabits, 'habits', state.habits, visible);
+  if (streakTarget && streakTarget.habitId === habit.id) renderStreakMonth();
 }
 
 function nestTasksLocal(tasks) {
@@ -956,6 +1398,9 @@ function applyHabitStats(item, stats) {
   item.completedToday = stats.completedToday;
   item.completed = Boolean(stats.completedToday);
   item.status = item.completed ? 'completed' : 'needsAction';
+  if (Array.isArray(stats.completedDates)) {
+    item.completedDates = stats.completedDates.slice();
+  }
 }
 
 async function toggleItem(listKind, item) {
@@ -974,18 +1419,38 @@ async function toggleItem(listKind, item) {
           ring: item.ring,
           completedToday: item.completedToday,
           status: item.status,
+          completedDates: item.completedDates && item.completedDates.slice(),
         }
-      : { status: item.status, meta: item.meta, dueKind: item.dueKind };
+      : {
+          status: item.status,
+          meta: item.meta,
+          dueKind: item.dueKind,
+          due: item.due,
+          completed: item.completed,
+          recurrence: item.recurrence,
+        };
 
   const next = !prevCompleted;
-  item.completed = next;
-  item.status = next ? 'completed' : 'needsAction';
-  if (listKind === 'tasks') {
+  const willReschedule = listKind === 'tasks' && next && Boolean(taskRecurrence(item));
+
+  if (willReschedule) {
+    // Optimistic: stay open; due rolls forward on server — keep UI open.
+    item.completed = false;
+    item.status = 'needsAction';
+    item.dueKind = null;
+    item.meta = 'Следующий…';
+    resortTasksLocal();
+    patchTaskRow(item);
+  } else if (listKind === 'tasks') {
+    item.completed = next;
+    item.status = next ? 'completed' : 'needsAction';
     item.meta = next ? 'Done' : item.meta === 'Done' ? 'Task' : item.meta;
     item.dueKind = next ? null : item.dueKind;
     resortTasksLocal();
     patchTaskRow(item);
   } else {
+    item.completed = next;
+    item.status = next ? 'completed' : 'needsAction';
     // Optimistic habit: flip today pill / ring lightly before server stats
     if (Array.isArray(item.week) && item.week.length) {
       item.week = item.week.slice();
@@ -1000,8 +1465,7 @@ async function toggleItem(listKind, item) {
 
   try {
     const result = await window.widgetApi.setCompleted(listKind, item.id, next);
-    // Server recomputes dueKind/meta/dueTime — critical after uncomplete
-    // so we don't stick on optimistic "Done" / null dueKind.
+    // Server recomputes dueKind/meta/dueTime — critical after uncomplete / reschedule.
     if (result && result.item && typeof result.item === 'object') {
       Object.assign(item, result.item);
     }
@@ -1022,9 +1486,7 @@ async function toggleItem(listKind, item) {
       resortHabitsLocal();
       patchHabitRow(item);
     } else {
-      item.status = prevSnapshot.status;
-      item.meta = prevSnapshot.meta;
-      item.dueKind = prevSnapshot.dueKind;
+      Object.assign(item, prevSnapshot);
       resortTasksLocal();
       patchTaskRow(item);
     }
@@ -1051,6 +1513,7 @@ function insertCreatedItem(listKind, item) {
     }
     resortTasksLocal();
     renderTasks();
+    markRowEnter(rowById(listTasks, item.id));
   }
 }
 
@@ -1190,13 +1653,29 @@ function bindListReorder(listKind, listEl) {
   function applyLocalReorder(kind, orderedIds) {
     const key = kind === 'habits' ? 'habits' : 'tasks';
     const byId = new Map(state[key].map((it) => [it.id, it]));
-    const next = [];
-    for (const id of orderedIds) {
-      const it = byId.get(id);
-      if (it) next.push(it);
+    const visibleSet = new Set(orderedIds);
+    // Splice the new visible order into existing slots so hideCompleted /
+    // due-filter don't shove hidden items to the end of the full list.
+    const slots = [];
+    for (let i = 0; i < state[key].length; i += 1) {
+      const it = state[key][i];
+      if (it && visibleSet.has(it.id)) slots.push(i);
     }
-    for (const it of state[key]) {
-      if (!orderedIds.includes(it.id)) next.push(it);
+    let next;
+    if (slots.length === orderedIds.length && orderedIds.every((id) => byId.has(id))) {
+      next = state[key].slice();
+      for (let i = 0; i < slots.length; i += 1) {
+        next[slots[i]] = byId.get(orderedIds[i]);
+      }
+    } else {
+      next = [];
+      for (const id of orderedIds) {
+        const it = byId.get(id);
+        if (it) next.push(it);
+      }
+      for (const it of state[key]) {
+        if (it && it.id && !visibleSet.has(it.id)) next.push(it);
+      }
     }
     state[key] = next;
     if (kind === 'habits') {
@@ -1204,7 +1683,7 @@ function bindListReorder(listKind, listEl) {
       syncListOrder(listHabits, filterVisibleItems(state.habits));
     } else {
       resortTasksLocal();
-      syncListOrder(listTasks, filterVisibleItems(state.tasks));
+      syncListOrder(listTasks, visibleTasks());
     }
   }
 
@@ -1471,16 +1950,26 @@ function beginInlineEdit(listKind, item, row) {
 let ctxMenuTarget = null;
 let ctxMenuEl = null;
 
-function closeNotesPanel({ revert } = {}) {
-  if (!notesOverlay || notesOverlay.hidden) return;
+function closeNotesPanel({ revert, instant } = {}) {
+  if (!notesOverlay || (notesOverlay.hidden && !notesOverlay.classList.contains('is-open'))) return;
   if (revert && notesTarget) {
     const items = notesTarget.listKind === 'habits' ? state.habits : state.tasks;
     const item = items.find((i) => i.id === notesTarget.itemId);
     if (item) item.notes = notesTarget.original;
   }
   notesTarget = null;
-  notesOverlay.hidden = true;
   if (notesTextarea) notesTextarea.value = '';
+  if (instant) {
+    if (notesCloseTimer) {
+      clearTimeout(notesCloseTimer);
+      notesCloseTimer = null;
+    }
+    notesOpenGen += 1;
+    notesOverlay.classList.remove('is-open');
+    notesOverlay.hidden = true;
+    return;
+  }
+  setOverlayOpen(notesOverlay, false, { timerRef: 'notes' });
 }
 
 async function saveNotesPanel({ closeAfter } = {}) {
@@ -1508,6 +1997,9 @@ async function saveNotesPanel({ closeAfter } = {}) {
       if (typeof result.item.dueTime === 'string' || result.item.dueTime === null) {
         item.dueTime = result.item.dueTime;
       }
+      if (Object.prototype.hasOwnProperty.call(result.item, 'recurrence')) {
+        item.recurrence = result.item.recurrence;
+      }
     }
     notesTarget.original = notes;
     if (listKind === 'habits') patchHabitRow(item);
@@ -1526,8 +2018,10 @@ async function saveNotesPanel({ closeAfter } = {}) {
 function openNotesPanel(listKind, item) {
   if (!notesOverlay || !notesTextarea || !item) return;
   if (!guardMutate('изменить заметки')) return;
-  hideCtxMenu();
-  closeTimePanel();
+  hideCtxMenu({ instant: true });
+  closeTimePanel({ instant: true });
+  closeRepeatPanel({ instant: true });
+  closeStreakPanel({ instant: true });
   notesTarget = {
     listKind,
     itemId: item.id,
@@ -1535,16 +2029,31 @@ function openNotesPanel(listKind, item) {
   };
   if (notesPanelTask) notesPanelTask.textContent = item.title || '';
   notesTextarea.value = notesTarget.original;
-  notesOverlay.hidden = false;
-  notesTextarea.focus();
-  notesTextarea.setSelectionRange(notesTextarea.value.length, notesTextarea.value.length);
+  setOverlayOpen(notesOverlay, true, {
+    timerRef: 'notes',
+    focusEl: notesTextarea,
+  });
+  afterPaint(() => {
+    if (!notesTarget || !notesTextarea || notesOverlay.hidden) return;
+    notesTextarea.setSelectionRange(notesTextarea.value.length, notesTextarea.value.length);
+  });
 }
 
-function closeTimePanel() {
-  if (!timeOverlay || timeOverlay.hidden) return;
+function closeTimePanel({ instant } = {}) {
+  if (!timeOverlay || (timeOverlay.hidden && !timeOverlay.classList.contains('is-open'))) return;
   timeTarget = null;
-  timeOverlay.hidden = true;
   if (timeInput) timeInput.value = '';
+  if (instant) {
+    if (timeCloseTimer) {
+      clearTimeout(timeCloseTimer);
+      timeCloseTimer = null;
+    }
+    timeOpenGen += 1;
+    timeOverlay.classList.remove('is-open');
+    timeOverlay.hidden = true;
+    return;
+  }
+  setOverlayOpen(timeOverlay, false, { timerRef: 'time' });
 }
 
 async function saveTimePanel({ closeAfter, clear } = {}) {
@@ -1613,8 +2122,10 @@ async function saveTimePanel({ closeAfter, clear } = {}) {
 function openTimePanel(listKind, item) {
   if (!timeOverlay || !timeInput || !item) return;
   if (!guardMutate('изменить время')) return;
-  hideCtxMenu();
-  closeNotesPanel();
+  hideCtxMenu({ instant: true });
+  closeNotesPanel({ instant: true });
+  closeRepeatPanel({ instant: true });
+  closeStreakPanel({ instant: true });
   const original =
     typeof item.dueTime === 'string' && /^\d{2}:\d{2}$/.test(item.dueTime) ? item.dueTime : null;
   timeTarget = {
@@ -1624,8 +2135,222 @@ function openTimePanel(listKind, item) {
   };
   if (timePanelTask) timePanelTask.textContent = item.title || '';
   timeInput.value = original || '';
-  timeOverlay.hidden = false;
-  timeInput.focus();
+  setOverlayOpen(timeOverlay, true, {
+    timerRef: 'time',
+    focusEl: timeInput,
+  });
+}
+
+function closeRepeatPanel({ instant } = {}) {
+  if (!repeatOverlay || (repeatOverlay.hidden && !repeatOverlay.classList.contains('is-open'))) {
+    return;
+  }
+  repeatTarget = null;
+  if (instant) {
+    if (repeatCloseTimer) {
+      clearTimeout(repeatCloseTimer);
+      repeatCloseTimer = null;
+    }
+    repeatOpenGen += 1;
+    repeatOverlay.classList.remove('is-open');
+    repeatOverlay.hidden = true;
+    return;
+  }
+  setOverlayOpen(repeatOverlay, false, { timerRef: 'repeat' });
+}
+
+function syncRepeatOptionsUi(selected) {
+  if (!repeatOptions) return;
+  for (const btn of repeatOptions.querySelectorAll('[data-repeat]')) {
+    const val = btn.getAttribute('data-repeat') || 'none';
+    const on = (selected || 'none') === val;
+    btn.setAttribute('aria-pressed', String(on));
+    btn.classList.toggle('is-active', on);
+  }
+}
+
+async function saveRepeatPanel(next) {
+  if (!repeatTarget || !window.widgetApi || repeatSaving) return false;
+  if (!guardMutate('сохранить повтор')) return false;
+  const { listKind, itemId, original } = repeatTarget;
+  const items = listKind === 'habits' ? state.habits : state.tasks;
+  const item = items.find((i) => i.id === itemId);
+  if (!item) {
+    closeRepeatPanel();
+    return false;
+  }
+  const value = next === 'none' || !next ? null : next;
+  if (value === original || (value === null && original === null)) {
+    closeRepeatPanel();
+    return true;
+  }
+  repeatSaving = true;
+  try {
+    const result = await window.widgetApi.updateItem(listKind, itemId, { recurrence: value });
+    if (result && result.item) {
+      if (typeof result.item.notes === 'string') item.notes = result.item.notes;
+      if (typeof result.item.meta === 'string') item.meta = result.item.meta;
+      if (Object.prototype.hasOwnProperty.call(result.item, 'recurrence')) {
+        item.recurrence = result.item.recurrence;
+      } else {
+        item.recurrence = value;
+      }
+    } else {
+      item.recurrence = value;
+    }
+    if (listKind === 'habits') patchHabitRow(item);
+    else patchTaskRow(item);
+    closeRepeatPanel();
+    return true;
+  } catch (err) {
+    setBanner(`Не удалось сохранить повтор: ${err.message || err}`);
+    return false;
+  } finally {
+    repeatSaving = false;
+  }
+}
+
+function openRepeatPanel(listKind, item) {
+  if (!repeatOverlay || !item) return;
+  if (!guardMutate('изменить повтор')) return;
+  hideCtxMenu({ instant: true });
+  closeNotesPanel({ instant: true });
+  closeTimePanel({ instant: true });
+  closeStreakPanel({ instant: true });
+  const original = taskRecurrence(item);
+  repeatTarget = {
+    listKind,
+    itemId: item.id,
+    original,
+  };
+  if (repeatPanelTask) repeatPanelTask.textContent = item.title || '';
+  syncRepeatOptionsUi(original || 'none');
+  setOverlayOpen(repeatOverlay, true, {
+    timerRef: 'repeat',
+    focusEl: repeatOptions?.querySelector('[data-repeat].is-active') || repeatOptions,
+  });
+}
+
+function localIsoFromParts(y, m, d) {
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function closeStreakPanel({ instant } = {}) {
+  if (!streakOverlay || (streakOverlay.hidden && !streakOverlay.classList.contains('is-open'))) {
+    return;
+  }
+  streakTarget = null;
+  if (instant) {
+    if (streakCloseTimer) {
+      clearTimeout(streakCloseTimer);
+      streakCloseTimer = null;
+    }
+    streakOpenGen += 1;
+    streakOverlay.classList.remove('is-open');
+    streakOverlay.hidden = true;
+    return;
+  }
+  setOverlayOpen(streakOverlay, false, { timerRef: 'streak' });
+}
+
+function renderStreakMonth() {
+  if (!streakTarget || !streakMonthGrid) return;
+  const habit = state.habits.find((h) => h.id === streakTarget.habitId);
+  const dates = new Set(
+    Array.isArray(habit && habit.completedDates) ? habit.completedDates : []
+  );
+  const { year, month } = streakTarget;
+  const today = new Date();
+  const todayKey = localIsoFromParts(
+    today.getFullYear(),
+    today.getMonth() + 1,
+    today.getDate()
+  );
+  if (streakMonthLabel) {
+    streakMonthLabel.textContent = `${MONTH_NAMES_RU[month]} ${year}`;
+  }
+  // Monday-first grid
+  const first = new Date(year, month, 1);
+  let startPad = (first.getDay() + 6) % 7;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const frag = document.createDocumentFragment();
+  let doneInMonth = 0;
+  for (let i = 0; i < startPad; i += 1) {
+    const empty = document.createElement('span');
+    empty.className = 'streak-day is-empty';
+    empty.setAttribute('aria-hidden', 'true');
+    frag.appendChild(empty);
+  }
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const key = localIsoFromParts(year, month + 1, day);
+    const cell = document.createElement('span');
+    const done = dates.has(key);
+    if (done) doneInMonth += 1;
+    const isToday = key === todayKey;
+    const isFuture = key > todayKey;
+    cell.className = `streak-day${done ? ' is-done' : ''}${isToday ? ' is-today' : ''}${
+      isFuture ? ' is-future' : ''
+    }`;
+    cell.textContent = String(day);
+    cell.title = done ? `${key} · выполнено` : key;
+    cell.setAttribute('role', 'gridcell');
+    cell.setAttribute('aria-label', done ? `${day}, выполнено` : String(day));
+    frag.appendChild(cell);
+  }
+  streakMonthGrid.replaceChildren(frag);
+  if (streakMonthStat) {
+    streakMonthStat.textContent = `${doneInMonth} дн. в месяце`;
+  }
+  if (streakMonthStreak) {
+    const streak = (habit && habit.streak) || 0;
+    streakMonthStreak.textContent = streak ? `Стрик ${streak} дн.` : '';
+  }
+  if (btnStreakNext) {
+    const now = new Date();
+    const atCurrent =
+      year > now.getFullYear() ||
+      (year === now.getFullYear() && month >= now.getMonth());
+    btnStreakNext.disabled = atCurrent;
+  }
+}
+
+function shiftStreakMonth(delta) {
+  if (!streakTarget) return;
+  let { year, month } = streakTarget;
+  month += delta;
+  if (month < 0) {
+    month = 11;
+    year -= 1;
+  } else if (month > 11) {
+    month = 0;
+    year += 1;
+  }
+  const now = new Date();
+  if (year > now.getFullYear() || (year === now.getFullYear() && month > now.getMonth())) {
+    return;
+  }
+  streakTarget = { ...streakTarget, year, month };
+  renderStreakMonth();
+}
+
+function openStreakPanel(habit) {
+  if (!streakOverlay || !habit) return;
+  hideCtxMenu({ instant: true });
+  closeNotesPanel({ instant: true });
+  closeTimePanel({ instant: true });
+  closeRepeatPanel({ instant: true });
+  const now = new Date();
+  streakTarget = {
+    habitId: habit.id,
+    year: now.getFullYear(),
+    month: now.getMonth(),
+  };
+  if (streakPanelTask) streakPanelTask.textContent = habit.title || '';
+  renderStreakMonth();
+  setOverlayOpen(streakOverlay, true, {
+    timerRef: 'streak',
+    focusEl: btnStreakClose,
+  });
 }
 
 async function beginAddSubtask(parentItem, parentRow) {
@@ -1712,6 +2437,10 @@ function ensureCtxMenu() {
       '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v5l3 2"/></svg>' +
       '<span>Время</span>' +
     '</button>' +
+    '<button type="button" class="ctx-menu-item" role="menuitem" data-action="repeat">' +
+      '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>' +
+      '<span>Повтор</span>' +
+    '</button>' +
     '<button type="button" class="ctx-menu-item" role="menuitem" data-action="subtask">' +
       '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h8M4 18h16"/><path d="M14 10l4 2-4 2"/></svg>' +
       '<span>Подзадача</span>' +
@@ -1733,11 +2462,12 @@ function ensureCtxMenu() {
     const listEl = listKind === 'habits' ? listHabits : listTasks;
     const row = item ? rowById(listEl, item.id) : null;
     const action = btn.dataset.action;
-    hideCtxMenu();
+    hideCtxMenu({ instant: true });
     if (!item) return;
     if (action === 'edit') beginInlineEdit(listKind, item, row);
     else if (action === 'notes') openNotesPanel(listKind, item);
     else if (action === 'time') openTimePanel(listKind, item);
+    else if (action === 'repeat' && listKind === 'tasks') openRepeatPanel(listKind, item);
     else if (action === 'subtask' && listKind === 'tasks') beginAddSubtask(item, row);
     else if (action === 'delete') removeItem(listKind, item);
   });
@@ -1745,18 +2475,46 @@ function ensureCtxMenu() {
   return ctxMenuEl;
 }
 
-function hideCtxMenu() {
-  if (!ctxMenuEl || ctxMenuEl.hidden) return;
-  ctxMenuEl.hidden = true;
+function hideCtxMenu({ instant } = {}) {
+  if (!ctxMenuEl) return;
+  if (ctxMenuEl.hidden && !ctxMenuEl.classList.contains('is-open')) {
+    ctxMenuTarget = null;
+    return;
+  }
+  if (ctxCloseTimer) {
+    clearTimeout(ctxCloseTimer);
+    ctxCloseTimer = null;
+  }
+  ctxOpenGen += 1;
   ctxMenuTarget = null;
+  ctxMenuEl.classList.remove('is-open');
+  const finish = () => {
+    ctxMenuEl.hidden = true;
+    ctxCloseTimer = null;
+  };
+  if (instant || motionQuiet()) {
+    finish();
+    return;
+  }
+  ctxCloseTimer = setTimeout(finish, motionMs('--ctx-ms', 120) + 30);
 }
 
 function showCtxMenu(listKind, item, e) {
   const menu = ensureCtxMenu();
+  if (ctxCloseTimer) {
+    clearTimeout(ctxCloseTimer);
+    ctxCloseTimer = null;
+  }
+  const gen = ++ctxOpenGen;
   ctxMenuTarget = { listKind, itemId: item.id };
   const subBtn = menu.querySelector('[data-action="subtask"]');
   // Google Tasks supports one nesting level — only top-level tasks get «Подзадача».
   if (subBtn) subBtn.hidden = listKind !== 'tasks' || Boolean(item.parent);
+  const repeatBtn = menu.querySelector('[data-action="repeat"]');
+  // Habits already reset daily via streak store — recurrence is for tasks.
+  if (repeatBtn) repeatBtn.hidden = listKind !== 'tasks';
+
+  menu.classList.remove('is-open');
   menu.hidden = false;
 
   // Measure off-screen then clamp into viewport
@@ -1766,8 +2524,25 @@ function showCtxMenu(listKind, item, e) {
   const pad = 8;
   const x = Math.min(e.clientX, window.innerWidth - width - pad);
   const y = Math.min(e.clientY, window.innerHeight - height - pad);
-  menu.style.left = `${Math.max(pad, x)}px`;
-  menu.style.top = `${Math.max(pad, y)}px`;
+  const left = Math.max(pad, x);
+  const top = Math.max(pad, y);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+
+  // Scale from click corner: prefer top-left; flip origin when clamped to bottom/right.
+  const originX = e.clientX > left + width * 0.55 ? '100%' : '0%';
+  const originY = e.clientY > top + height * 0.55 ? '100%' : '0%';
+  menu.style.transformOrigin = `${originX} ${originY}`;
+
+  if (motionQuiet()) {
+    menu.classList.add('is-open');
+    return;
+  }
+  // Double-rAF so the browser paints the closed state before opening.
+  afterPaint(() => {
+    if (gen !== ctxOpenGen || menu.hidden || !ctxMenuTarget) return;
+    menu.classList.add('is-open');
+  });
 }
 
 function handleRowContextMenu(listKind, e) {
@@ -1966,10 +2741,31 @@ listHabits.addEventListener('click', (e) => {
   hideCtxMenu();
   if (e.target.closest('.row-title-edit, .drag-handle')) return;
   if (dndActive || dndClickBlockTimer) return;
+  const streakHit = e.target.closest('[data-streak-open]');
+  if (streakHit) {
+    e.preventDefault();
+    e.stopPropagation();
+    const li = streakHit.closest('li.row[data-id]');
+    if (!li || !listHabits.contains(li)) return;
+    const item = state.habits.find((h) => h.id === li.dataset.id);
+    if (item) openStreakPanel(item);
+    return;
+  }
   const li = e.target.closest('li.row[data-id]');
   if (!li || !listHabits.contains(li) || li.classList.contains('is-editing')) return;
   const item = state.habits.find((h) => h.id === li.dataset.id);
   if (item) toggleItem('habits', item);
+});
+
+listHabits.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const streakHit = e.target.closest('[data-streak-open]');
+  if (!streakHit || !listHabits.contains(streakHit)) return;
+  e.preventDefault();
+  const li = streakHit.closest('li.row[data-id]');
+  if (!li) return;
+  const item = state.habits.find((h) => h.id === li.dataset.id);
+  if (item) openStreakPanel(item);
 });
 
 listTasks.addEventListener('contextmenu', (e) => handleRowContextMenu('tasks', e));
@@ -1980,6 +2776,16 @@ document.addEventListener('pointerdown', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  if (streakOverlay && !streakOverlay.hidden) {
+    e.preventDefault();
+    closeStreakPanel();
+    return;
+  }
+  if (repeatOverlay && !repeatOverlay.hidden) {
+    e.preventDefault();
+    closeRepeatPanel();
+    return;
+  }
   if (timeOverlay && !timeOverlay.hidden) {
     e.preventDefault();
     closeTimePanel();
@@ -1990,13 +2796,13 @@ document.addEventListener('keydown', (e) => {
     closeNotesPanel({ revert: true });
     return;
   }
-  hideCtxMenu();
+  hideCtxMenu({ instant: true });
 });
-window.addEventListener('blur', hideCtxMenu);
-window.addEventListener('resize', hideCtxMenu);
-panels?.addEventListener('scroll', hideCtxMenu, true);
-panelTasks?.addEventListener('scroll', hideCtxMenu);
-panelHabits?.addEventListener('scroll', hideCtxMenu);
+window.addEventListener('blur', () => hideCtxMenu({ instant: true }));
+window.addEventListener('resize', () => hideCtxMenu({ instant: true }));
+panels?.addEventListener('scroll', () => hideCtxMenu({ instant: true }), true);
+panelTasks?.addEventListener('scroll', () => hideCtxMenu({ instant: true }));
+panelHabits?.addEventListener('scroll', () => hideCtxMenu({ instant: true }));
 
 /** Avoid textarea blur auto-save when Cancel / overlay dismiss is intended. */
 let notesIgnoreBlur = false;
@@ -2039,7 +2845,16 @@ if (notesOverlay) {
 if (notesTextarea) {
   notesTextarea.addEventListener('blur', () => {
     setTimeout(() => {
-      if (notesIgnoreBlur || !notesOverlay || notesOverlay.hidden || notesSaving) return;
+      if (
+        notesIgnoreBlur ||
+        !notesTarget ||
+        !notesOverlay ||
+        notesOverlay.hidden ||
+        !notesOverlay.classList.contains('is-open') ||
+        notesSaving
+      ) {
+        return;
+      }
       saveNotesPanel({ closeAfter: false });
     }, 120);
   });
@@ -2096,6 +2911,51 @@ if (timeInput) {
     }
   });
 }
+if (repeatOptions) {
+  repeatOptions.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-repeat]');
+    if (!btn || repeatSaving) return;
+    e.preventDefault();
+    const val = btn.getAttribute('data-repeat') || 'none';
+    syncRepeatOptionsUi(val);
+    saveRepeatPanel(val === 'none' ? null : val);
+  });
+}
+if (repeatOverlay) {
+  repeatOverlay.addEventListener('click', (e) => {
+    if (e.target === repeatOverlay) closeRepeatPanel();
+  });
+}
+const btnRepeatClose = document.getElementById('btnRepeatClose');
+if (btnRepeatClose) {
+  btnRepeatClose.addEventListener('click', (e) => {
+    e.preventDefault();
+    closeRepeatPanel();
+  });
+}
+if (btnStreakClose) {
+  btnStreakClose.addEventListener('click', (e) => {
+    e.preventDefault();
+    closeStreakPanel();
+  });
+}
+if (btnStreakPrev) {
+  btnStreakPrev.addEventListener('click', (e) => {
+    e.preventDefault();
+    shiftStreakMonth(-1);
+  });
+}
+if (btnStreakNext) {
+  btnStreakNext.addEventListener('click', (e) => {
+    e.preventDefault();
+    shiftStreakMonth(1);
+  });
+}
+if (streakOverlay) {
+  streakOverlay.addEventListener('click', (e) => {
+    if (e.target === streakOverlay) closeStreakPanel();
+  });
+}
 
 document.querySelectorAll('.tab, .dot').forEach((el) => {
   el.addEventListener('click', () => setView(el.dataset.view));
@@ -2139,6 +2999,15 @@ if (btnHideCompleted) {
 }
 if (btnHideCompletedHabits) {
   btnHideCompletedHabits.addEventListener('click', onHideCompletedToggle);
+}
+if (taskFilterChips) {
+  taskFilterChips.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-filter]');
+    if (!btn || !taskFilterChips.contains(btn)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setTaskDueFilter(btn.getAttribute('data-filter') || 'all');
+  });
 }
 
 if (btnCheckReminders) {
@@ -2233,11 +3102,12 @@ btnSettings.addEventListener('click', (e) => {
   if (onboardingPanel && !onboardingPanel.hidden && credentialsFromSettings) {
     syncCredentialsForm({ open: false });
   }
-  setSettingsOpen(settingsPanel.hidden);
+  const open = btnSettings.getAttribute('aria-expanded') !== 'true';
+  setSettingsOpen(open);
 });
 
 document.addEventListener('click', (e) => {
-  if (settingsPanel.hidden) return;
+  if (btnSettings.getAttribute('aria-expanded') !== 'true') return;
   const t = e.target;
   if (settingsPanel.contains(t) || btnSettings.contains(t)) return;
   if (onboardingPanel && !onboardingPanel.hidden && onboardingPanel.contains(t)) return;

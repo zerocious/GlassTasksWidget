@@ -24,7 +24,7 @@ const DEFAULT_TASKS = [
   {
     id: 'mock-t1',
     title: 'Review project proposal',
-    notes: 'время 09:30\nCheck budget section before Friday',
+    notes: 'время 09:30\nповтор: ежедневно\nCheck budget section before Friday',
     parent: null,
     due: dueIsoDaysFromNow(0),
     status: 'needsAction',
@@ -83,6 +83,8 @@ const DEFAULT_HABITS = [
   { id: 'mock-h3', title: 'Read', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
   { id: 'mock-h4', title: 'Drink Water', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
   { id: 'mock-h5', title: 'No Sugar', meta: 'Weekdays', status: 'needsAction', completed: false, notes: '', due: null },
+  { id: 'mock-h6', title: 'Sleep 8h', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
+  { id: 'mock-h7', title: 'Stretch', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
 ];
 
 function loadMockStore() {
@@ -109,17 +111,19 @@ function seedDemoStreaks() {
   if (Object.keys(store.habits).length > 0) return;
 
   const seeds = {
-    'mock-h1': [0, 1, 2, 3, 4, 5, 6],
-    'mock-h2': [0, 2, 3, 4, 5, 6],
-    'mock-h3': [0, 1, 2, 3, 4, 5, 6],
-    'mock-h4': [0, 1, 2, 3, 4, 5],
-    'mock-h5': [0, 1, 2, 3, 4],
+    'mock-h1': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 20, 21, 22, 23],
+    'mock-h2': [0, 2, 3, 4, 5, 6, 9, 10, 11, 13, 16, 17, 18, 20],
+    'mock-h3': [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 14, 15, 16, 17, 19, 20, 21],
+    'mock-h4': [0, 1, 2, 3, 4, 5, 7, 8, 10, 12, 14, 15, 17, 19, 21],
+    'mock-h5': [0, 1, 2, 3, 4, 7, 8, 9, 10, 11, 14, 15, 16, 17, 18, 21, 22],
+    'mock-h6': [0, 1, 3, 4, 5, 6, 8, 10, 11, 13, 15, 17, 18, 20, 22],
+    'mock-h7': [1, 2, 4, 5, 6, 9, 11, 12, 14, 16, 18, 19, 21],
   };
 
   for (const [id, dayOffsets] of Object.entries(seeds)) {
     for (const offset of dayOffsets) {
       const d = new Date();
-      d.setDate(d.getDate() - (6 - offset));
+      d.setDate(d.getDate() - offset);
       markCompleted(id, todayIso(d));
     }
   }
@@ -239,7 +243,7 @@ function addMockItem(listKind, title, opts = {}) {
   return { ok: true, mode: 'mock', item };
 }
 
-function setMockCompleted(listKind, taskId, completed) {
+function setMockCompleted(listKind, taskId, completed, opts = {}) {
   const store = loadMockStore();
   if (listKind === 'habits') {
     const habit = store.habits.find((h) => h.id === taskId);
@@ -255,6 +259,9 @@ function setMockCompleted(listKind, taskId, completed) {
   if (task) {
     task.completed = completed;
     task.status = completed ? 'completed' : 'needsAction';
+    if (opts && Object.prototype.hasOwnProperty.call(opts, 'due')) {
+      task.due = opts.due;
+    }
     saveMockStore(store);
   }
   return { ok: true, mode: 'mock' };

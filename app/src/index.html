@@ -89,7 +89,7 @@
           <input type="checkbox" id="optSimpleAnim" />
           <span class="switch-ui" aria-hidden="true"></span>
         </label>
-        <p class="settings-hint">Мгновенное переключение Tasks ↔ Habits, без stagger стрика — легче для слабых ПК.</p>
+        <p class="settings-hint">Выкл. = плавные анимации (по умолчанию). Вкл. = мгновенное переключение Tasks ↔ Habits без stagger — легче для слабых ПК.</p>
 
         <label class="settings-row switch-row">
           <span class="settings-label">Напоминания</span>
@@ -181,7 +181,20 @@
         <div class="panels" id="panels" data-view="tasks">
           <section class="panel" id="panel-tasks" role="tabpanel" aria-labelledby="tab-tasks">
             <div class="section-head">
-              <div class="section-label">Today</div>
+              <div class="filter-chips" id="taskFilterChips" role="toolbar" aria-label="Фильтр задач">
+                <button type="button" class="filter-chip is-active" data-filter="all" aria-pressed="true">
+                  Все<span class="filter-count" data-count="all" hidden></span>
+                </button>
+                <button type="button" class="filter-chip" data-filter="today" aria-pressed="false">
+                  Сегодня<span class="filter-count" data-count="today"></span>
+                </button>
+                <button type="button" class="filter-chip" data-filter="overdue" aria-pressed="false">
+                  Просрочено<span class="filter-count" data-count="overdue"></span>
+                </button>
+                <button type="button" class="filter-chip" data-filter="undated" aria-pressed="false">
+                  Без даты
+                </button>
+              </div>
               <button
                 type="button"
                 class="hide-done-btn"
@@ -290,6 +303,46 @@
         <button type="button" class="notes-btn notes-btn-secondary" id="btnTimeClear">Сбросить</button>
         <button type="button" class="notes-btn notes-btn-secondary" id="btnTimeCancel">Отмена</button>
         <button type="button" class="notes-btn notes-btn-primary" id="btnTimeSave">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes-overlay" id="repeatOverlay" hidden>
+    <div class="notes-panel repeat-panel" role="dialog" aria-modal="true" aria-labelledby="repeatPanelTitle">
+      <div class="notes-panel-head">
+        <div class="notes-panel-title" id="repeatPanelTitle">Повтор</div>
+        <button type="button" class="notes-panel-close" id="btnRepeatClose" title="Закрыть" aria-label="Закрыть">×</button>
+      </div>
+      <div class="notes-panel-task" id="repeatPanelTask"></div>
+      <div class="repeat-options" id="repeatOptions" role="group" aria-label="Правило повтора">
+        <button type="button" class="repeat-opt" data-repeat="none" aria-pressed="true">Нет</button>
+        <button type="button" class="repeat-opt" data-repeat="daily" aria-pressed="false">Ежедневно</button>
+        <button type="button" class="repeat-opt" data-repeat="weekdays" aria-pressed="false">Будни</button>
+        <button type="button" class="repeat-opt" data-repeat="weekly" aria-pressed="false">Еженедельно</button>
+      </div>
+      <p class="repeat-hint">При выполнении срок сдвигается на следующий раз. Время напоминания сохраняется.</p>
+    </div>
+  </div>
+
+  <div class="notes-overlay" id="streakOverlay" hidden>
+    <div class="notes-panel streak-panel" role="dialog" aria-modal="true" aria-labelledby="streakPanelTitle">
+      <div class="notes-panel-head">
+        <div class="notes-panel-title" id="streakPanelTitle">История</div>
+        <button type="button" class="notes-panel-close" id="btnStreakClose" title="Закрыть" aria-label="Закрыть">×</button>
+      </div>
+      <div class="notes-panel-task" id="streakPanelTask"></div>
+      <div class="streak-month-nav">
+        <button type="button" class="streak-nav-btn" id="btnStreakPrev" aria-label="Предыдущий месяц">‹</button>
+        <div class="streak-month-label" id="streakMonthLabel"></div>
+        <button type="button" class="streak-nav-btn" id="btnStreakNext" aria-label="Следующий месяц">›</button>
+      </div>
+      <div class="streak-weekdays" aria-hidden="true">
+        <span>пн</span><span>вт</span><span>ср</span><span>чт</span><span>пт</span><span>сб</span><span>вс</span>
+      </div>
+      <div class="streak-month-grid" id="streakMonthGrid" role="grid" aria-label="Календарь выполнений"></div>
+      <div class="streak-month-footer">
+        <span class="streak-month-stat" id="streakMonthStat"></span>
+        <span class="streak-month-streak" id="streakMonthStreak"></span>
       </div>
     </div>
   </div>

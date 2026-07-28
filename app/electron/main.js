@@ -417,7 +417,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      backgroundThrottling: true,
+      backgroundThrottling: false,
       spellcheck: false,
     },
   };

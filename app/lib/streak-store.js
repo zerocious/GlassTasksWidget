@@ -128,6 +128,8 @@ function getHabitStats(habitId, store = loadStore()) {
     week: pills,
     ring: ringPercent(pills),
     completedToday: habit.dates.includes(today),
+    // Full history for month calendar (capped in markCompleted).
+    completedDates: habit.dates.slice(),
   };
 }
 

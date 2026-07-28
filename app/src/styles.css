@@ -50,11 +50,15 @@
   --shadow: none;
   --radius: 18px;
   --font: "Geist Mono", ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
-  --ease: ease-out;
-  --ease-slide: ease-out;
-  --slide-ms: 0.28s;
-  --glass-blur: 28px;
-  --glass-sat: 1.35;
+  /* Motion: soft ease-outs, kept short enough to stay crisp on low-end GPUs */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-slide: cubic-bezier(0.32, 0.72, 0, 1);
+  --slide-ms: 0.34s;
+  --panel-ms: 0.21s;
+  --ctx-ms: 0.12s;
+  --glass-blur: 22px;
+  --glass-sat: 1.3;
   --panel-bg: rgba(0, 0, 0, 0.28);
   --control-bg: rgba(0, 0, 0, 0.25);
   --row-hover: rgba(255, 255, 255, 0.05);
@@ -222,7 +226,7 @@ body {
   padding: 6px 12px;
   border-radius: 999px;
   cursor: pointer;
-  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+  transition: background 0.22s var(--ease), color 0.22s var(--ease), box-shadow 0.22s var(--ease);
 }
 
 .tab[aria-selected="true"] {
@@ -293,6 +297,7 @@ body {
   transition: transform var(--slide-ms) var(--ease-slide);
   backface-visibility: hidden;
   will-change: auto;
+  contain: layout style paint;
 }
 
 .panels.is-sliding {
@@ -312,7 +317,8 @@ body {
   gap: 10px;
   overflow-y: auto;
   min-height: 0;
-  transform: translateZ(0);
+  /* Avoid permanent layer promotion under backdrop-filter — only the track composites during slide */
+  contain: layout paint;
 }
 
 .panel::-webkit-scrollbar { width: 4px; }
@@ -333,6 +339,64 @@ body {
   font-size: 13px;
   font-weight: 600;
   color: var(--accent);
+}
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.filter-chip {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 7px;
+  cursor: pointer;
+  line-height: 1.3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.filter-chip:hover {
+  background: var(--row-hover);
+  color: var(--text);
+}
+
+.filter-chip.is-active,
+.filter-chip[aria-pressed="true"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.filter-chip[data-filter="overdue"].is-active,
+.filter-chip[data-filter="overdue"][aria-pressed="true"] {
+  background: color-mix(in srgb, #ff6b6b 16%, transparent);
+  border-color: color-mix(in srgb, #ff6b6b 30%, transparent);
+}
+
+.filter-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 10px;
+  opacity: 0.85;
+  min-width: 0.9em;
+}
+
+.filter-count:empty,
+.filter-count[hidden] {
+  display: none;
 }
 
 .hide-done-btn {
@@ -388,9 +452,31 @@ body {
   gap: 10px;
   padding: 10px 8px;
   border-radius: 12px;
-  transition: background 0.2s var(--ease);
+  transition: background 0.22s var(--ease);
   cursor: pointer;
   position: relative;
+}
+
+@keyframes rowIn {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.row.row-enter {
+  animation: rowIn 0.22s var(--ease-out) both;
+}
+
+.row.row-leave {
+  opacity: 0;
+  transform: translate3d(0, -4px, 0);
+  transition: opacity 0.16s var(--ease-out), transform 0.16s var(--ease-out);
+  pointer-events: none;
 }
 
 .drag-handle {
@@ -581,11 +667,13 @@ body.is-dnd .row {
   flex-shrink: 0;
   display: grid;
   place-items: center;
+  transition: background 0.22s var(--ease), border-color 0.22s var(--ease), box-shadow 0.22s var(--ease);
 }
 
 .check.done {
   background: var(--accent);
   border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
 .check.done::after {
@@ -602,11 +690,13 @@ body.is-dnd .row {
 .row-title {
   font-size: 14px;
   line-height: 1.25;
+  transition: color 0.25s var(--ease);
 }
 
 .row.done .row-title {
   color: var(--text-dim);
   text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text-dim) 70%, transparent);
 }
 
 .row-meta {
@@ -661,18 +751,36 @@ body.is-dnd .row {
   opacity: 0.65;
 }
 
+.row-repeat {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-dim);
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  line-height: 1.4;
+}
+
+.row.done .row-repeat {
+  opacity: 0.65;
+}
+
 .habit-icon {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
   display: grid;
   place-items: center;
   color: var(--text-dim);
+  opacity: 0.92;
 }
 
 .habit-icon svg {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.75;
@@ -690,6 +798,19 @@ body.is-dnd .row {
   align-items: flex-end;
   gap: 5px;
   flex-shrink: 0;
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 2px 2px 2px 4px;
+  -webkit-app-region: no-drag;
+}
+
+.streak:hover {
+  background: var(--row-hover);
+}
+
+.streak:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  outline-offset: 1px;
 }
 
 .week-strip {
@@ -706,17 +827,20 @@ body.is-dnd .row {
   border: 1px solid var(--glass-border);
   transform: scaleY(0.55);
   opacity: 0.45;
-  /* opacity/transform only — avoid background/box-shadow thrash */
-  transition: opacity 0.18s var(--ease), transform 0.18s var(--ease);
-  will-change: auto;
+  /* opacity/transform only — never animate blur/shadow */
+  transition: opacity 0.2s var(--ease), transform 0.22s var(--ease-slide);
 }
 
 .day-pill[data-done="true"] {
   background: var(--accent);
   border-color: rgba(255, 255, 255, 0.22);
-  box-shadow: 0 0 8px var(--accent-glow);
   transform: scaleY(1);
   opacity: 1;
+}
+
+/* Glow only when habits view is settled — avoids shadow paints mid-slide */
+.panels[data-view="habits"]:not(.is-sliding) .day-pill[data-done="true"] {
+  box-shadow: 0 0 8px var(--accent-glow);
 }
 
 .streak-badge {
@@ -734,7 +858,7 @@ body.is-dnd .row {
   line-height: 1.2;
   opacity: 0;
   transform: translate3d(0, 4px, 0);
-  transition: opacity 0.2s var(--ease), transform 0.2s var(--ease);
+  transition: opacity 0.2s var(--ease-slide), transform 0.2s var(--ease-slide);
 }
 
 .streak-badge .unit {
@@ -743,11 +867,7 @@ body.is-dnd .row {
   color: rgba(255, 220, 225, 0.85);
 }
 
-/* Streak entrance after the slide settles — short stagger, transform/opacity only */
-.panels[data-view="habits"] .day-pill {
-  transition-delay: calc(0.1s + var(--i, 0) * 10ms);
-}
-
+/* Default habits state — no delay so day toggles stay snappy */
 .panels[data-view="habits"] .day-pill[data-done="true"] {
   transform: scaleY(1);
 }
@@ -755,14 +875,24 @@ body.is-dnd .row {
 .panels[data-view="habits"] .streak-badge {
   opacity: 1;
   transform: translate3d(0, 0, 0);
-  transition-delay: 0.14s;
 }
 
+/* Only on view-enter: wait for the slide, then soft opacity/transform */
+.panels.streaks-enter[data-view="habits"] .day-pill {
+  transition-delay: calc(var(--slide-ms) + var(--i, 0) * 12ms);
+}
+
+.panels.streaks-enter[data-view="habits"] .streak-badge {
+  transition-delay: calc(var(--slide-ms) + 16ms);
+}
+
+/* Leaving habits: snap — don't fight the slide track */
 .panels[data-view="tasks"] .day-pill {
   transform: scaleY(0.55);
   opacity: 0.35;
   box-shadow: none;
   background: var(--pill-idle);
+  transition-duration: 0s;
   transition-delay: 0s;
 }
 
@@ -774,6 +904,7 @@ body.is-dnd .row {
 .panels[data-view="tasks"] .streak-badge {
   opacity: 0;
   transform: translate3d(0, 4px, 0);
+  transition-duration: 0s;
   transition-delay: 0s;
 }
 
@@ -859,6 +990,17 @@ body.is-dnd .row {
   padding: 16px;
   background: rgba(0, 0, 0, 0.38);
   -webkit-app-region: no-drag;
+  opacity: 0;
+  transition: opacity var(--panel-ms) var(--ease);
+  pointer-events: none;
+}
+
+.notes-overlay:not([hidden]) {
+  pointer-events: auto;
+}
+
+.notes-overlay.is-open {
+  opacity: 1;
 }
 
 .notes-overlay[hidden] {
@@ -878,8 +1020,19 @@ body.is-dnd .row {
   box-shadow:
     inset 0 1px 0 var(--glass-highlight),
     0 16px 40px rgba(0, 0, 0, 0.4);
+  /* Static blur — never transition backdrop-filter */
   backdrop-filter: blur(calc(var(--glass-blur) * 0.7)) saturate(var(--glass-sat));
   -webkit-backdrop-filter: blur(calc(var(--glass-blur) * 0.7)) saturate(var(--glass-sat));
+  opacity: 0;
+  transform: translate3d(0, 10px, 0) scale(0.97);
+  transition:
+    opacity var(--panel-ms) var(--ease-out),
+    transform var(--panel-ms) var(--ease-slide);
+}
+
+.notes-overlay.is-open .notes-panel {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
 }
 
 .notes-panel-head {
@@ -985,6 +1138,159 @@ body.is-dnd .row {
   margin-left: auto;
 }
 
+.repeat-panel {
+  max-height: none;
+  width: min(100%, 300px);
+}
+
+.repeat-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.repeat-opt {
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-bg) 70%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 9px 10px;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.repeat-opt:hover {
+  background: var(--row-hover);
+}
+
+.repeat-opt.is-active,
+.repeat-opt[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text);
+}
+
+.repeat-hint {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.streak-panel {
+  max-height: none;
+  width: min(100%, 320px);
+}
+
+.streak-month-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.streak-nav-btn {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel-bg) 70%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.streak-nav-btn:hover:not(:disabled) {
+  background: var(--row-hover);
+}
+
+.streak-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.streak-month-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.streak-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+  margin-bottom: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: center;
+  text-transform: lowercase;
+}
+
+.streak-month-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+}
+
+.streak-day {
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border: 1px solid transparent;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+
+.streak-day.is-empty {
+  background: transparent;
+  visibility: hidden;
+}
+
+.streak-day.is-done {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.streak-day.is-today {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  font-weight: 700;
+}
+
+.streak-day.is-future {
+  opacity: 0.35;
+}
+
+.streak-day.is-done.is-today {
+  transform: scale(1.04);
+}
+
+.streak-month-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.streak-month-streak {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .notes-panel-actions {
   display: flex;
   justify-content: flex-end;
@@ -1037,16 +1343,31 @@ body.is-dnd .row {
   box-shadow:
     inset 0 1px 0 var(--glass-highlight),
     0 10px 28px rgba(0, 0, 0, 0.35);
+  /* Static blur — animate opacity/transform only */
   backdrop-filter: blur(calc(var(--glass-blur) * 0.65)) saturate(var(--glass-sat));
   -webkit-backdrop-filter: blur(calc(var(--glass-blur) * 0.65)) saturate(var(--glass-sat));
   display: flex;
   flex-direction: column;
   gap: 2px;
   -webkit-app-region: no-drag;
+  opacity: 0;
+  transform: scale(0.96);
+  transform-origin: top left;
+  transition:
+    opacity var(--ctx-ms) cubic-bezier(0.16, 1, 0.3, 1),
+    transform var(--ctx-ms) cubic-bezier(0.16, 1, 0.3, 1);
+  /* Clickable as soon as shown — don't wait for is-open */
+  pointer-events: auto;
+}
+
+.ctx-menu.is-open {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .ctx-menu[hidden] {
   display: none;
+  pointer-events: none;
 }
 
 .ctx-menu-item {
@@ -1152,6 +1473,22 @@ body.is-dnd .row {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  opacity: 0;
+  transform: translate3d(0, -8px, 0);
+  transform-origin: top center;
+  transition:
+    opacity var(--panel-ms) var(--ease-out),
+    transform var(--panel-ms) var(--ease-slide);
+  pointer-events: none;
+}
+
+.settings-panel:not([hidden]) {
+  pointer-events: auto;
+}
+
+.settings-panel.is-open {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
 }
 
 .settings-panel[hidden] {
@@ -1277,7 +1614,7 @@ body.is-dnd .row {
   border: 1px solid var(--glass-border);
   position: relative;
   flex-shrink: 0;
-  transition: background 0.2s var(--ease), border-color 0.2s var(--ease);
+  transition: background 0.22s var(--ease), border-color 0.22s var(--ease);
 }
 
 .switch-ui::after {
@@ -1289,7 +1626,7 @@ body.is-dnd .row {
   height: 14px;
   border-radius: 50%;
   background: var(--text-muted);
-  transition: transform 0.2s var(--ease), background 0.2s var(--ease);
+  transition: transform 0.22s var(--ease-out), background 0.22s var(--ease);
 }
 
 .switch-row input:checked + .switch-ui {
@@ -1539,6 +1876,11 @@ body.is-dnd .row {
   font-size: 11px;
 }
 
+[data-size="compact"] .filter-chip {
+  font-size: 10px;
+  padding: 2px 5px;
+}
+
 [data-size="compact"] .hide-done-btn {
   width: 24px;
   height: 24px;
@@ -1669,12 +2011,12 @@ body.is-dnd .row {
   padding: 0;
   background: rgba(255, 255, 255, 0.22);
   cursor: pointer;
-  transition: transform 0.15s var(--ease), background 0.15s var(--ease);
+  transition: transform 0.22s var(--ease-out), background 0.22s var(--ease);
 }
 
 .dot[aria-current="true"] {
   background: var(--accent);
-  transform: scale(1.15);
+  transform: scale(1.2);
 }
 
 .empty, .status-banner {
@@ -1710,7 +2052,7 @@ body.is-dnd .row {
   color: #fff;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  animation: inAppToastIn 0.22s ease-out;
+  animation: inAppToastIn 0.28s var(--ease-out);
   cursor: pointer;
 }
 .in-app-toast[hidden] {
@@ -1727,7 +2069,7 @@ body.is-dnd .row {
   opacity: 0.92;
 }
 @keyframes inAppToastIn {
-  from { opacity: 0; transform: translate3d(0, 12px, 0); }
+  from { opacity: 0; transform: translate3d(0, 10px, 0); }
   to { opacity: 1; transform: translate3d(0, 0, 0); }
 }
 html[data-simple-anim="true"] .in-app-toast {
@@ -1737,6 +2079,8 @@ html[data-simple-anim="true"] .in-app-toast {
 /* Quiet motion: OS preference or Settings → «Упрощённые анимации» */
 html[data-simple-anim="true"] {
   --slide-ms: 0s;
+  --panel-ms: 0s;
+  --ctx-ms: 0s;
   --glass-blur: 14px;
   --glass-sat: 1.15;
 }
@@ -1752,12 +2096,29 @@ html[data-simple-anim="true"] .drag-handle,
 html[data-simple-anim="true"] .switch-ui,
 html[data-simple-anim="true"] .switch-ui::after,
 html[data-simple-anim="true"] .seg-btn,
-html[data-simple-anim="true"] .footer-btn {
+html[data-simple-anim="true"] .footer-btn,
+html[data-simple-anim="true"] .notes-overlay,
+html[data-simple-anim="true"] .notes-panel,
+html[data-simple-anim="true"] .settings-panel,
+html[data-simple-anim="true"] .ctx-menu,
+html[data-simple-anim="true"] .check,
+html[data-simple-anim="true"] .row-title {
   transition: none;
+  animation: none;
+}
+
+html[data-simple-anim="true"] .row.row-enter,
+html[data-simple-anim="true"] .row.row-leave {
+  animation: none;
+  transition: none;
+  opacity: 1;
+  transform: none;
 }
 
 html[data-simple-anim="true"] .panels[data-view="habits"] .streak-badge,
-html[data-simple-anim="true"] .panels[data-view="habits"] .day-pill {
+html[data-simple-anim="true"] .panels[data-view="habits"] .day-pill,
+html[data-simple-anim="true"] .panels.streaks-enter[data-view="habits"] .streak-badge,
+html[data-simple-anim="true"] .panels.streaks-enter[data-view="habits"] .day-pill {
   transition-delay: 0s;
 }
 
@@ -1770,11 +2131,20 @@ html[data-simple-anim="true"] .panels.is-sliding {
   pointer-events: auto;
 }
 
+html[data-simple-anim="true"] .ctx-menu.is-open,
+html[data-simple-anim="true"] .notes-overlay.is-open .notes-panel,
+html[data-simple-anim="true"] .settings-panel.is-open {
+  opacity: 1;
+  transform: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root,
   [data-theme="dark"],
   [data-theme="light"] {
     --slide-ms: 0s;
+    --panel-ms: 0s;
+    --ctx-ms: 0s;
     --glass-blur: 12px;
     --glass-sat: 1.1;
   }
@@ -1790,12 +2160,29 @@ html[data-simple-anim="true"] .panels.is-sliding {
   .switch-ui,
   .switch-ui::after,
   .seg-btn,
-  .footer-btn {
+  .footer-btn,
+  .notes-overlay,
+  .notes-panel,
+  .settings-panel,
+  .ctx-menu,
+  .check,
+  .row-title {
     transition: none;
+    animation: none;
+  }
+
+  .row.row-enter,
+  .row.row-leave {
+    animation: none;
+    transition: none;
+    opacity: 1;
+    transform: none;
   }
 
   .panels[data-view="habits"] .streak-badge,
-  .panels[data-view="habits"] .day-pill {
+  .panels[data-view="habits"] .day-pill,
+  .panels.streaks-enter[data-view="habits"] .streak-badge,
+  .panels.streaks-enter[data-view="habits"] .day-pill {
     transition-delay: 0s;
   }
 
@@ -1806,5 +2193,16 @@ html[data-simple-anim="true"] .panels.is-sliding {
   .panels.is-sliding {
     will-change: auto;
     pointer-events: auto;
+  }
+
+  .ctx-menu.is-open,
+  .notes-overlay.is-open .notes-panel,
+  .settings-panel.is-open {
+    opacity: 1;
+    transform: none;
+  }
+
+  .in-app-toast {
+    animation: none;
   }
 }

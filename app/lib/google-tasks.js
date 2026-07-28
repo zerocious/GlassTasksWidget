@@ -87,8 +87,131 @@ function dueKindFor(due, completed) {
 const MANAGED_TIME_LINE_RE =
   /^(?:время|Время|time)\s*[:\-]?\s*\d{1,2}[:.]\d{2}\s*$/i;
 
+/** Managed recurrence line («повтор: ежедневно|будни|еженедельно»). */
+const MANAGED_REPEAT_LINE_RE =
+  /^(?:повтор|Повтор|repeat)\s*[:\-]?\s*(ежедневно|будни|еженедельно|daily|weekdays|weekly)\s*$/i;
+
+/** @type {Record<string, 'daily' | 'weekdays' | 'weekly'>} */
+const REPEAT_ALIAS = {
+  ежедневно: 'daily',
+  daily: 'daily',
+  будни: 'weekdays',
+  weekdays: 'weekdays',
+  еженедельно: 'weekly',
+  weekly: 'weekly',
+};
+
+/** @type {Record<'daily' | 'weekdays' | 'weekly', string>} */
+const REPEAT_MARKER = {
+  daily: 'повтор: ежедневно',
+  weekdays: 'повтор: будни',
+  weekly: 'повтор: еженедельно',
+};
+
+/** @type {Record<'daily' | 'weekdays' | 'weekly', string>} */
+const REPEAT_BADGE = {
+  daily: 'ежедн.',
+  weekdays: 'будни',
+  weekly: 'еженед.',
+};
+
+function isManagedNotesLine(line) {
+  const t = String(line || '').trim();
+  return Boolean(t) && (MANAGED_TIME_LINE_RE.test(t) || MANAGED_REPEAT_LINE_RE.test(t));
+}
+
+/**
+ * @param {string | null | undefined} notes
+ * @returns {'daily' | 'weekdays' | 'weekly' | null}
+ */
+function parseRecurrence(notes) {
+  if (!notes) return null;
+  for (const raw of String(notes).split(/\r?\n/)) {
+    const m = String(raw).trim().match(MANAGED_REPEAT_LINE_RE);
+    if (!m) continue;
+    const key = String(m[1] || '').toLowerCase();
+    return REPEAT_ALIAS[key] || null;
+  }
+  return null;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {'daily' | 'weekdays' | 'weekly' | null}
+ */
+function normalizeRecurrenceInput(value) {
+  if (value === null || value === undefined || value === '' || value === 'none') return null;
+  if (typeof value !== 'string') throw new Error('Некорректный повтор');
+  const key = value.trim().toLowerCase();
+  const mapped = REPEAT_ALIAS[key];
+  if (!mapped) throw new Error('Повтор: ежедневно, будни или еженедельно');
+  return mapped;
+}
+
+/**
+ * Upsert/clear managed «повтор: …» line in notes.
+ * @param {string | null | undefined} notes
+ * @param {'daily' | 'weekdays' | 'weekly' | null} recurrence
+ */
+function applyRecurrenceToNotes(notes, recurrence) {
+  const lines = String(notes || '').split(/\r?\n/);
+  const kept = lines.filter((line) => !MANAGED_REPEAT_LINE_RE.test(String(line).trim()));
+  let rest = kept.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
+  if (!recurrence) return rest;
+  const marker = REPEAT_MARKER[recurrence];
+  return rest ? `${marker}\n${rest}` : marker;
+}
+
+function addDaysToKey(key, delta) {
+  const [y, m, d] = String(key).split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + delta);
+  return localDateKey(dt);
+}
+
+function weekdayOfKey(key) {
+  const [y, m, d] = String(key).split('-').map(Number);
+  return new Date(y, m - 1, d).getDay(); // 0=Sun … 6=Sat
+}
+
+function dueIsoFromLocalKey(key) {
+  return `${key}T00:00:00.000Z`;
+}
+
+/**
+ * Advance one step from a local YYYY-MM-DD key.
+ * @param {string} key
+ * @param {'daily' | 'weekdays' | 'weekly'} recurrence
+ */
+function advanceDateKey(key, recurrence) {
+  if (recurrence === 'weekly') return addDaysToKey(key, 7);
+  if (recurrence === 'daily') return addDaysToKey(key, 1);
+  // weekdays: next Mon–Fri
+  let next = addDaysToKey(key, 1);
+  while (weekdayOfKey(next) === 0 || weekdayOfKey(next) === 6) {
+    next = addDaysToKey(next, 1);
+  }
+  return next;
+}
+
+/**
+ * Next due after completing a recurring task (always after today).
+ * @param {string | null | undefined} due
+ * @param {'daily' | 'weekdays' | 'weekly'} recurrence
+ */
+function nextOccurrenceDue(due, recurrence) {
+  const today = localDateKey();
+  let cursor = dueDateKey(due) || today;
+  if (cursor < today) cursor = today;
+  cursor = advanceDateKey(cursor, recurrence);
+  while (cursor <= today) {
+    cursor = advanceDateKey(cursor, recurrence);
+  }
+  return dueIsoFromLocalKey(cursor);
+}
+
 function formatMeta(task) {
-  // Time is shown as a row chip (dueTime); meta stays date / notes preview only.
+  // Time / recurrence are row chips; meta stays date / notes preview only.
   if (task.due) {
     try {
       const d = new Date(task.due);
@@ -106,7 +229,7 @@ function formatMeta(task) {
       .trim()
       .split(/\r?\n/)
       .map((l) => l.trim())
-      .find((l) => l && !MANAGED_TIME_LINE_RE.test(l));
+      .find((l) => l && !isManagedNotesLine(l));
     if (line) return line.length > 40 ? `${line.slice(0, 37)}…` : line;
   }
   return '';
@@ -286,6 +409,7 @@ function mapTask(item) {
   const due = item.due || null;
   const dueKind = dueKindFor(due, completed);
   const dueTime = resolveTaskTime(item);
+  const recurrence = parseRecurrence(item.notes);
   return {
     id: item.id,
     title: item.title || '(без названия)',
@@ -293,6 +417,7 @@ function mapTask(item) {
     due,
     dueKind,
     dueTime,
+    recurrence,
     status: item.status || 'needsAction',
     completed,
     position: item.position || '',
@@ -302,8 +427,35 @@ function mapTask(item) {
 }
 
 /**
- * Nest children under parents while preserving relative sibling order.
- * @param {Array<{ id: string, parent?: string | null }>} tasks
+ * Sort siblings by Google Tasks `position` (lexicographic). When no item has a
+ * position (mock / array-ordered caches), keep stable input order.
+ * @template {{ position?: string | null }} T
+ * @param {T[]} list
+ * @returns {T[]}
+ */
+function sortSiblingGroup(list) {
+  if (!Array.isArray(list) || list.length < 2) return list;
+  const hasPos = list.some((t) => t && t.position);
+  if (!hasPos) return list;
+  return list
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => {
+      const pa = String((a.item && a.item.position) || '');
+      const pb = String((b.item && b.item.position) || '');
+      if (pa !== pb) {
+        if (!pa) return 1;
+        if (!pb) return -1;
+        return pa < pb ? -1 : 1;
+      }
+      return a.index - b.index;
+    })
+    .map(({ item }) => item);
+}
+
+/**
+ * Nest children under parents. Sibling order follows Google `position` when
+ * present; otherwise preserves relative input order (mock / DnD caches).
+ * @param {Array<{ id: string, parent?: string | null, position?: string | null }>} tasks
  */
 function nestTasksPreserveOrder(tasks) {
   const byId = new Map();
@@ -323,6 +475,9 @@ function nestTasksPreserveOrder(tasks) {
       roots.push(t);
     }
   }
+  for (const [parentId, kids] of children) {
+    children.set(parentId, sortSiblingGroup(kids));
+  }
   /** @type {typeof tasks} */
   const out = [];
   const walk = (list) => {
@@ -332,13 +487,13 @@ function nestTasksPreserveOrder(tasks) {
       if (kids && kids.length) walk(kids);
     }
   };
-  walk(roots);
+  walk(sortSiblingGroup(roots));
   return out;
 }
 
 /**
- * Open first, then up to 5 completed — preserve relative order within each group
- * (Google Tasks list order / manual DnD), nest subtasks under parents.
+ * Open first, then up to 5 completed — Google sibling order via `position`,
+ * nest subtasks under parents (mock keeps array / DnD order).
  */
 function sortTasks(tasks) {
   const open = nestTasksPreserveOrder(tasks.filter((t) => !t.completed));
@@ -351,12 +506,16 @@ function decorateTasks(tasks) {
     tasks.map((t) => {
       const dueKind = dueKindFor(t.due, Boolean(t.completed));
       const dueTime = resolveTaskTime(t);
+      const recurrence =
+        Object.prototype.hasOwnProperty.call(t, 'recurrence') && t.recurrence !== undefined
+          ? t.recurrence
+          : parseRecurrence(t.notes);
       const meta =
         t.due || dueTime || !t.meta
           ? formatMeta({ ...t, status: t.completed ? 'completed' : 'needsAction' }) ||
             (t.completed ? 'Done' : 'Task')
           : t.meta;
-      return { ...t, dueKind, dueTime, meta };
+      return { ...t, dueKind, dueTime, recurrence, meta };
     })
   );
 }
@@ -509,9 +668,9 @@ function withHabits(habitsRaw) {
       completed: Boolean(h.completedToday),
       status: h.completedToday ? 'completed' : 'needsAction',
   }));
-  // Preserve Google/manual order; only partition open vs done for today.
-  const open = enriched.filter((h) => !h.completed);
-  const done = enriched.filter((h) => h.completed);
+  // Google sibling order via position; mock keeps array order. Partition open/done.
+  const open = sortSiblingGroup(enriched.filter((h) => !h.completed));
+  const done = sortSiblingGroup(enriched.filter((h) => h.completed));
   return [...open, ...done];
 }
 
@@ -802,6 +961,69 @@ function lookupCachedItem(listKind, taskId) {
   return null;
 }
 
+/**
+ * Build the item patch returned after a completion toggle (and optional reschedule).
+ * @param {'tasks' | 'habits'} listKind
+ * @param {object | null} cached
+ * @param {boolean} completed
+ * @param {{ due?: string | null, notes?: string, status?: string }} [overrides]
+ * @param {object | null} [stats]
+ */
+function buildCompletedItemPatch(listKind, cached, completed, overrides = {}, stats = null) {
+  const status = overrides.status || (completed ? 'completed' : 'needsAction');
+  const due =
+    Object.prototype.hasOwnProperty.call(overrides, 'due')
+      ? overrides.due
+      : cached && cached.due
+        ? cached.due
+        : null;
+  const notes =
+    Object.prototype.hasOwnProperty.call(overrides, 'notes')
+      ? overrides.notes
+      : cached && cached.notes
+        ? cached.notes
+        : '';
+  const dueKind = dueKindFor(due, completed);
+  const dueTime = resolveTaskTime({ due, notes });
+  const recurrence = parseRecurrence(notes);
+  const meta =
+    formatMeta({ due, notes, status }) ||
+    (completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
+  return {
+    status,
+    completed,
+    due,
+    dueKind,
+    dueTime,
+    recurrence,
+    notes,
+    meta: listKind === 'habits' ? (cached && cached.meta) || 'Daily' : meta,
+    ...(stats
+      ? {
+          streak: stats.streak,
+          week: stats.week,
+          ring: stats.ring,
+          completedToday: stats.completedToday,
+          completedDates: stats.completedDates,
+        }
+      : {}),
+  };
+}
+
+/**
+ * Recurrence from notes marker, with cached.recurrence as fallback.
+ * @param {object | null | undefined} item
+ * @returns {'daily' | 'weekdays' | 'weekly' | null}
+ */
+function recurrenceFromItem(item) {
+  if (!item) return null;
+  const fromNotes = parseRecurrence(item.notes);
+  if (fromNotes) return fromNotes;
+  const r = item.recurrence;
+  if (r === 'daily' || r === 'weekdays' || r === 'weekly') return r;
+  return null;
+}
+
 async function setTaskCompleted(listKind, taskId, completed) {
   if (listKind !== 'tasks' && listKind !== 'habits') {
     throw new Error('Некорректный тип списка');
@@ -815,33 +1037,44 @@ async function setTaskCompleted(listKind, taskId, completed) {
 
   const run = (async () => {
     const config = loadConfig();
+    let cached = lookupCachedItem(listKind, taskId);
+    // Recurring tasks: stay open and roll due forward (keeps id / reminders / nesting).
+    let recurrence = listKind === 'tasks' && completed ? recurrenceFromItem(cached) : null;
 
     if (!hasGoogleCredentials()) {
-      const cached = lookupCachedItem(listKind, taskId);
+      // Cold payload cache: mock store still has notes / due.
+      if (listKind === 'tasks' && completed && !recurrence) {
+        const mockItem = getMockItem(listKind, taskId);
+        if (mockItem) {
+          cached = { ...(cached || {}), ...mockItem };
+          recurrence = recurrenceFromItem(cached);
+        }
+      }
+      if (recurrence) {
+        const nextDue = nextOccurrenceDue(cached && cached.due, recurrence);
+        const result = setMockCompleted(listKind, taskId, false, { due: nextDue });
+        const itemPatch = buildCompletedItemPatch(
+          listKind,
+          cached,
+          false,
+          { due: nextDue, status: 'needsAction' },
+          result.stats || null
+        );
+        patchPayloadCache(listKind, taskId, itemPatch);
+        return {
+          ...result,
+          rescheduled: true,
+          item: { id: taskId, ...itemPatch },
+        };
+      }
       const result = setMockCompleted(listKind, taskId, completed);
-      const status = completed ? 'completed' : 'needsAction';
-      const due = cached && cached.due ? cached.due : null;
-      const notes = cached && cached.notes ? cached.notes : '';
-      const dueKind = dueKindFor(due, completed);
-      const dueTime = resolveTaskTime({ due, notes });
-      const meta =
-        formatMeta({ due, notes, status }) ||
-        (completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
-      const itemPatch = {
-        status,
+      const itemPatch = buildCompletedItemPatch(
+        listKind,
+        cached,
         completed,
-        dueKind,
-        dueTime,
-        meta: listKind === 'habits' ? (cached && cached.meta) || 'Daily' : meta,
-        ...(result.stats
-          ? {
-              streak: result.stats.streak,
-              week: result.stats.week,
-              ring: result.stats.ring,
-              completedToday: result.stats.completedToday,
-            }
-          : {}),
-      };
+        {},
+        result.stats || null
+      );
       patchPayloadCache(listKind, taskId, itemPatch);
       return { ...result, item: { id: taskId, ...itemPatch } };
     }
@@ -854,13 +1087,46 @@ async function setTaskCompleted(listKind, taskId, completed) {
     const listId = await resolveListId(tasksApi, listName);
     if (!listId) throw new Error(`Список «${listName}» не найден`);
 
-    const cached = lookupCachedItem(listKind, taskId);
-    const status = completed ? 'completed' : 'needsAction';
+    // Cold cache: one tasks.get so we don't permanently complete a recurring task.
+    if (listKind === 'tasks' && completed && !cached) {
+      try {
+        const existing = await tasksApi.tasks.get({
+          tasklist: listId,
+          task: taskId,
+        });
+        const data = (existing && existing.data) || {};
+        cached = {
+          id: taskId,
+          notes: data.notes || '',
+          due: data.due || null,
+          parent: data.parent || null,
+          position: data.position || '',
+          status: data.status || 'needsAction',
+          completed: data.status === 'completed',
+        };
+        recurrence = recurrenceFromItem(cached);
+      } catch (err) {
+        console.warn(
+          '[setTaskCompleted] cache miss fetch failed:',
+          err && err.message ? err.message : err
+        );
+      }
+    }
 
-    // Patch-only: skip redundant tasks.get (saves one round-trip per toggle)
-    const requestBody = { status };
-    if (completed) requestBody.completed = new Date().toISOString();
-    else requestBody.completed = null;
+    const reschedule = Boolean(recurrence);
+
+    /** @type {Record<string, any>} */
+    const requestBody = {};
+    let nextDue = null;
+    if (reschedule) {
+      nextDue = nextOccurrenceDue(cached && cached.due, recurrence);
+      requestBody.status = 'needsAction';
+      requestBody.completed = null;
+      requestBody.due = nextDue;
+    } else {
+      requestBody.status = completed ? 'completed' : 'needsAction';
+      requestBody.completed = completed ? new Date().toISOString() : null;
+    }
 
     await tasksApi.tasks.patch({
       tasklist: listId,
@@ -873,29 +1139,14 @@ async function setTaskCompleted(listKind, taskId, completed) {
       stats = completed ? markCompleted(taskId) : unmarkCompleted(taskId);
     }
 
-    const due = cached && cached.due ? cached.due : null;
-    const notes = cached && cached.notes ? cached.notes : '';
-    const dueKind = dueKindFor(due, completed);
-    const dueTime = resolveTaskTime({ due, notes });
-    const meta =
-      formatMeta({ due, notes, status }) ||
-      (completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
-
-    const itemPatch = {
-      status,
-      completed,
-      dueKind,
-      dueTime,
-      meta: listKind === 'habits' ? (cached && cached.meta) || 'Daily' : meta,
-      ...(stats
-        ? {
-            streak: stats.streak,
-            week: stats.week,
-            ring: stats.ring,
-            completedToday: stats.completedToday,
-          }
-        : {}),
-    };
+    const effectiveCompleted = reschedule ? false : completed;
+    const itemPatch = buildCompletedItemPatch(
+      listKind,
+      cached,
+      effectiveCompleted,
+      reschedule ? { due: nextDue, status: 'needsAction' } : {},
+      stats
+    );
 
     patchOfflineCache(listKind, taskId, itemPatch);
     patchPayloadCache(listKind, taskId, itemPatch);
@@ -904,6 +1155,7 @@ async function setTaskCompleted(listKind, taskId, completed) {
       ok: true,
       mode: 'google',
       stats,
+      rescheduled: reschedule,
       item: { id: taskId, ...itemPatch },
     };
   })().finally(() => {
@@ -996,7 +1248,7 @@ async function createItem(listKind, title, opts = {}) {
 /**
  * @param {'tasks' | 'habits'} listKind
  * @param {string} taskId
- * @param {string | { title?: string, notes?: string, dueTime?: string | null }} patchOrTitle
+ * @param {string | { title?: string, notes?: string, dueTime?: string | null, recurrence?: string | null }} patchOrTitle
  */
 async function updateItem(listKind, taskId, patchOrTitle) {
   if (listKind !== 'tasks' && listKind !== 'habits') {
@@ -1006,7 +1258,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     throw new Error('Некорректный id задачи');
   }
 
-  /** @type {{ title?: string, notes?: string, dueTime?: string | null }} */
+  /** @type {{ title?: string, notes?: string, dueTime?: string | null, recurrence?: string | null }} */
   let patch = {};
   if (typeof patchOrTitle === 'string') {
     patch.title = patchOrTitle;
@@ -1016,6 +1268,8 @@ async function updateItem(listKind, taskId, patchOrTitle) {
 
   /** @type {string | null | undefined} undefined = no dueTime change */
   let pendingDueTime;
+  /** @type {'daily' | 'weekdays' | 'weekly' | null | undefined} */
+  let pendingRecurrence;
 
   // Google Tasks due is date-only UTC — persist clock time via notes marker.
   if (Object.prototype.hasOwnProperty.call(patch, 'dueTime')) {
@@ -1039,6 +1293,27 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     }
   }
 
+  if (Object.prototype.hasOwnProperty.call(patch, 'recurrence')) {
+    const rule = normalizeRecurrenceInput(patch.recurrence);
+    delete patch.recurrence;
+    let currentNotes = typeof patch.notes === 'string' ? patch.notes : null;
+    if (currentNotes === null) {
+      if (!hasGoogleCredentials()) {
+        const mockItem = getMockItem(listKind, taskId);
+        if (!mockItem) throw new Error('Элемент не найден');
+        currentNotes = mockItem.notes || '';
+      } else {
+        const cached = lookupCachedItem(listKind, taskId);
+        if (cached && typeof cached.notes === 'string') currentNotes = cached.notes;
+      }
+    }
+    if (currentNotes !== null) {
+      patch.notes = applyRecurrenceToNotes(currentNotes, rule);
+    } else {
+      pendingRecurrence = rule;
+    }
+  }
+
   /** @type {Record<string, string>} */
   const body = {};
   /** @type {Record<string, any>} */
@@ -1057,13 +1332,18 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     body.notes = notes;
     itemPatch.notes = notes;
   }
-  if (!Object.keys(body).length && pendingDueTime === undefined) {
+  if (
+    !Object.keys(body).length &&
+    pendingDueTime === undefined &&
+    pendingRecurrence === undefined
+  ) {
     throw new Error('Нечего обновлять');
   }
 
   const flightKey = `update:${listKind}:${taskId}:${[
     ...Object.keys(body).sort(),
     pendingDueTime !== undefined ? 'dueTime' : '',
+    pendingRecurrence !== undefined ? 'recurrence' : '',
   ]
     .filter(Boolean)
     .join(',')}`;
@@ -1089,6 +1369,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
           notes: item.notes || '',
           meta: item.meta,
           dueTime,
+          recurrence: item.recurrence || null,
         });
       } else {
         invalidatePayloadCache();
@@ -1104,15 +1385,26 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     const listId = await resolveListId(tasksApi, listName);
     if (!listId) throw new Error(`Список «${listName}» не найден`);
 
-    // Cache miss: fetch current notes before applying dueTime so we don't wipe them.
-    if (pendingDueTime !== undefined && body.notes === undefined) {
+    // Cache miss: fetch current notes before applying dueTime/recurrence so we don't wipe them.
+    if (
+      (pendingDueTime !== undefined || pendingRecurrence !== undefined) &&
+      body.notes === undefined
+    ) {
       const existing = await tasksApi.tasks.get({
         tasklist: listId,
         task: taskId,
       });
-      const currentNotes = (existing && existing.data && existing.data.notes) || '';
-      const notes = applyDueTimeToNotes(currentNotes, pendingDueTime);
-      body.notes = notes.length > MAX_NOTES_LEN ? notes.slice(0, MAX_NOTES_LEN) : notes;
+      let currentNotes = (existing && existing.data && existing.data.notes) || '';
+      if (pendingDueTime !== undefined) {
+        currentNotes = applyDueTimeToNotes(currentNotes, pendingDueTime);
+      }
+      if (pendingRecurrence !== undefined) {
+        currentNotes = applyRecurrenceToNotes(currentNotes, pendingRecurrence);
+      }
+      body.notes =
+        currentNotes.length > MAX_NOTES_LEN
+          ? currentNotes.slice(0, MAX_NOTES_LEN)
+          : currentNotes;
       itemPatch.notes = body.notes;
     }
 
@@ -1124,7 +1416,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       requestBody: body,
     });
 
-    // Refresh meta/dueTime when notes change (time may live in notes).
+    // Refresh meta/dueTime/recurrence when notes change.
     if (Object.prototype.hasOwnProperty.call(itemPatch, 'notes')) {
       const cached = lookupCachedItem(listKind, taskId);
       const merged = {
@@ -1133,6 +1425,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
         status: cached && cached.completed ? 'completed' : 'needsAction',
       };
       itemPatch.dueTime = resolveTaskTime(merged);
+      itemPatch.recurrence = parseRecurrence(merged.notes);
       itemPatch.meta =
         formatMeta(merged) ||
         (merged.completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
@@ -1304,7 +1597,7 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
       parent: (res && res.data && res.data.parent) || (cached && cached.parent) || null,
     };
 
-    reorderOfflineCache(listKind, ids);
+    reorderOfflineCache(listKind, ids, movedPatch);
     reorderPayloadCache(listKind, ids, movedPatch);
     // Drop soft TTL so next getData picks up moved order if cache was stale-shaped
     if (payloadCache) payloadCache.at = Date.now();
@@ -1338,5 +1631,8 @@ module.exports = {
   resolveTaskDueAt,
   normalizeDueTimeInput,
   applyDueTimeToNotes,
+  parseRecurrence,
+  applyRecurrenceToNotes,
+  nextOccurrenceDue,
   resetCompletedHabitsForNewDay,
 };
