@@ -17,6 +17,7 @@ const {
   deleteMockItem,
   reorderMockItems,
   resetMockHabitsCompleted,
+  loadMockStore,
 } = require('./mock-data');
 const { loadConfig, hasGoogleCredentials } = require('./config');
 const { loadSettings, saveSettings } = require('./settings-store');
@@ -27,9 +28,16 @@ const {
   patchOfflineCache,
   reorderOfflineCache,
 } = require('./offline-cache');
+const {
+  reorderByIds,
+  normalizeOrderedIds,
+  previousSiblingFromOrder,
+} = require('./reorder-by-ids');
 
 const MAX_TITLE_LEN = 200;
 const MAX_NOTES_LEN = 8000;
+/** Cap IPC reorder payloads (Google list page size is ≤100). */
+const MAX_ORDERED_IDS = 200;
 
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000;
 /** Soft TTL for in-memory widget payload — avoids double network on rapid IPC. */
@@ -196,17 +204,16 @@ function advanceDateKey(key, recurrence) {
 
 /**
  * Next due after completing a recurring task (always after today).
+ * Advances from the scheduled due (preserving weekday for weekly) until past today.
  * @param {string | null | undefined} due
  * @param {'daily' | 'weekdays' | 'weekly'} recurrence
  */
 function nextOccurrenceDue(due, recurrence) {
   const today = localDateKey();
   let cursor = dueDateKey(due) || today;
-  if (cursor < today) cursor = today;
-  cursor = advanceDateKey(cursor, recurrence);
-  while (cursor <= today) {
+  do {
     cursor = advanceDateKey(cursor, recurrence);
-  }
+  } while (cursor <= today);
   return dueIsoFromLocalKey(cursor);
 }
 
@@ -468,7 +475,7 @@ function nestTasksPreserveOrder(tasks) {
   const roots = [];
   for (const t of tasks) {
     if (!t || !t.id) continue;
-    if (t.parent && byId.has(t.parent)) {
+    if (t.parent && byId.has(t.parent) && t.parent !== t.id) {
       if (!children.has(t.parent)) children.set(t.parent, []);
       children.get(t.parent).push(t);
     } else {
@@ -480,14 +487,21 @@ function nestTasksPreserveOrder(tasks) {
   }
   /** @type {typeof tasks} */
   const out = [];
+  const visiting = new Set();
   const walk = (list) => {
     for (const t of list) {
+      if (!t || !t.id || visiting.has(t.id)) continue;
+      visiting.add(t.id);
       out.push(t);
       const kids = children.get(t.id);
       if (kids && kids.length) walk(kids);
+      visiting.delete(t.id);
     }
   };
   walk(sortSiblingGroup(roots));
+  for (const t of tasks) {
+    if (t && t.id && !out.some((x) => x.id === t.id)) out.push(t);
+  }
   return out;
 }
 
@@ -532,25 +546,7 @@ function reorderPayloadCache(listKind, orderedIds, movedPatch = null) {
   const key = listKind === 'habits' ? 'habits' : 'tasks';
   const prev = payloadCache.payload;
   const list = Array.isArray(prev[key]) ? prev[key].slice() : [];
-  const byId = new Map();
-  for (const item of list) {
-    if (item && item.id) byId.set(item.id, item);
-  }
-  const next = [];
-  const seen = new Set();
-  for (const id of orderedIds) {
-    if (typeof id !== 'string' || !id || seen.has(id)) continue;
-    let item = byId.get(id);
-    if (!item) continue;
-    if (movedPatch && movedPatch.id === id) {
-      item = { ...item, ...movedPatch };
-    }
-    next.push(item);
-    seen.add(id);
-  }
-  for (const item of list) {
-    if (item && item.id && !seen.has(item.id)) next.push(item);
-  }
+  const next = reorderByIds(list, orderedIds, movedPatch);
   const ordered =
     listKind === 'tasks'
       ? decorateTasks(next)
@@ -560,6 +556,32 @@ function reorderPayloadCache(listKind, orderedIds, movedPatch = null) {
           return [...open, ...done];
         })();
   setPayloadCache({ ...prev, [key]: ordered, offline: false });
+}
+
+/**
+ * Resolve and validate a parent id for createItem (top-level tasks only).
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string | null} parentId
+ * @returns {string | null}
+ */
+function resolveCreateParentId(listKind, parentId) {
+  if (!parentId) return null;
+  if (listKind !== 'tasks') {
+    throw new Error('Подзадачи доступны только в списке задач');
+  }
+  const parent = lookupCachedItem('tasks', parentId);
+  if (!parent) {
+    // Mock store may hold the parent when payload cache is cold.
+    if (!hasGoogleCredentials()) {
+      const mock = getMockItem('tasks', parentId);
+      if (!mock) throw new Error('Родительская задача не найдена');
+      if (mock.parent) throw new Error('Нельзя вложить в подзадачу');
+      return parentId;
+    }
+    throw new Error('Родительская задача не найдена');
+  }
+  if (parent.parent) throw new Error('Нельзя вложить в подзадачу');
+  return parentId;
 }
 
 function invalidateListCache() {
@@ -1087,8 +1109,8 @@ async function setTaskCompleted(listKind, taskId, completed) {
     const listId = await resolveListId(tasksApi, listName);
     if (!listId) throw new Error(`Список «${listName}» не найден`);
 
-    // Cold cache: one tasks.get so we don't permanently complete a recurring task.
-    if (listKind === 'tasks' && completed && !cached) {
+    // Cold / incomplete cache: fetch notes so we don't permanently complete a recurring task.
+    if (listKind === 'tasks' && completed && !recurrence) {
       try {
         const existing = await tasksApi.tasks.get({
           tasklist: listId,
@@ -1096,12 +1118,13 @@ async function setTaskCompleted(listKind, taskId, completed) {
         });
         const data = (existing && existing.data) || {};
         cached = {
+          ...(cached || {}),
           id: taskId,
-          notes: data.notes || '',
-          due: data.due || null,
-          parent: data.parent || null,
-          position: data.position || '',
-          status: data.status || 'needsAction',
+          notes: data.notes || (cached && cached.notes) || '',
+          due: data.due || (cached && cached.due) || null,
+          parent: data.parent || (cached && cached.parent) || null,
+          position: data.position || (cached && cached.position) || '',
+          status: data.status || (cached && cached.status) || 'needsAction',
           completed: data.status === 'completed',
         };
         recurrence = recurrenceFromItem(cached);
@@ -1173,10 +1196,11 @@ async function createItem(listKind, title, opts = {}) {
   let trimmed = String(title || '').trim();
   if (!trimmed) throw new Error('Введите название');
   if (trimmed.length > MAX_TITLE_LEN) trimmed = trimmed.slice(0, MAX_TITLE_LEN);
-  const parentId =
+  const rawParentId =
     opts && typeof opts.parentId === 'string' && opts.parentId.trim()
       ? opts.parentId.trim()
       : null;
+  const parentId = resolveCreateParentId(listKind, rawParentId);
 
   const flightKey = `create:${listKind}:${parentId || ''}:${trimmed.toLowerCase()}`;
   if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
@@ -1192,9 +1216,7 @@ async function createItem(listKind, title, opts = {}) {
             ? withHabits([result.item])[0]
             : decorateTasks([result.item])[0];
         result.item = item;
-        // Full re-nest for tasks when adding a child
-        if (listKind === 'tasks' && parentId) invalidatePayloadCache();
-        else patchPayloadCache(listKind, item.id, null, item);
+        patchPayloadCache(listKind, item.id, null, item);
       } else {
         invalidatePayloadCache();
       }
@@ -1228,13 +1250,10 @@ async function createItem(listKind, title, opts = {}) {
       mapped = withHabits([mapped])[0];
     }
 
-    if (listKind === 'tasks' && parentId) {
-      invalidatePayloadCache();
-      invalidateListCache();
-    } else {
-      patchOfflineCache(listKind, mapped.id, null, mapped);
-      patchPayloadCache(listKind, mapped.id, null, mapped);
-    }
+    // Always patch caches — invalidating after subtask create caused moveItem
+    // to miss parent and reparent the new child to the list root.
+    patchOfflineCache(listKind, mapped.id, null, mapped);
+    patchPayloadCache(listKind, mapped.id, null, mapped);
 
     return { ok: true, mode: 'google', item: mapped };
   })().finally(() => {
@@ -1491,37 +1510,20 @@ async function deleteItem(listKind, taskId) {
 }
 
 /**
- * Previous sibling for tasks.move — never the parent row, and only an item
- * that shares the same parent (roots share parent=null).
+ * Items used to validate move previousId against the same-parent sibling order.
  * @param {'tasks' | 'habits'} listKind
- * @param {string} taskId
- * @param {string[]} orderedIds
- * @param {string | null} [hintPreviousId]
- * @returns {string | null}
  */
-function resolveMovePreviousSibling(listKind, taskId, orderedIds, hintPreviousId) {
-  const moved = lookupCachedItem(listKind, taskId);
-  const parent = (moved && moved.parent) || null;
-  const ids = Array.isArray(orderedIds) ? orderedIds : [];
-  const idx = ids.indexOf(taskId);
-
-  const isSibling = (id) => {
-    if (!id || id === taskId) return false;
-    if (parent && id === parent) return false;
-    const item = lookupCachedItem(listKind, id);
-    if (!item) return false;
-    return (item.parent || null) === parent;
-  };
-
-  if (hintPreviousId && isSibling(hintPreviousId)) return hintPreviousId;
-
-  if (idx <= 0) return null;
-  for (let i = idx - 1; i >= 0; i -= 1) {
-    const id = ids[i];
-    if (parent && id === parent) return null;
-    if (isSibling(id)) return id;
+function listItemsForMove(listKind) {
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  const fromMem = payloadCache && payloadCache.payload && payloadCache.payload[key];
+  if (Array.isArray(fromMem) && fromMem.length) return fromMem;
+  if (!hasGoogleCredentials()) {
+    const store = loadMockStore();
+    return Array.isArray(store[key]) ? store[key] : [];
   }
-  return null;
+  const offline = loadOfflineCache();
+  if (offline && Array.isArray(offline[key])) return offline[key];
+  return [];
 }
 
 /**
@@ -1538,21 +1540,43 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
   if (typeof taskId !== 'string' || !taskId.trim()) {
     throw new Error('Некорректный id задачи');
   }
-  const ids = Array.isArray(orderedIds)
-    ? orderedIds.filter((id) => typeof id === 'string' && id)
-    : [];
-  if (!ids.length || !ids.includes(taskId)) {
+  const id = taskId.trim();
+  const ids = normalizeOrderedIds(orderedIds, MAX_ORDERED_IDS);
+  if (!ids.length || !ids.includes(id)) {
     throw new Error('Некорректный порядок');
   }
-  const prevHint =
-    previousId == null || previousId === ''
-      ? null
-      : String(previousId);
-  if (prevHint && prevHint === taskId) {
-    throw new Error('Некорректная позиция');
+
+  let prevHint = null;
+  if (previousId != null && previousId !== '') {
+    if (typeof previousId !== 'string') {
+      throw new Error('Некорректная позиция');
+    }
+    prevHint = previousId.trim();
+    if (!prevHint || prevHint === id || !ids.includes(prevHint)) {
+      throw new Error('Некорректная позиция');
+    }
   }
 
-  const flightKey = `move:${listKind}:${taskId}`;
+  /** @type {Array<{ id?: string, parent?: string | null }>} */
+  let items = listItemsForMove(listKind);
+  let cached = items.find((i) => i && i.id === id) || null;
+  if (!cached) {
+    cached = lookupCachedItem(listKind, id);
+    if (cached) items = [...items, cached];
+  }
+  if (!cached) {
+    throw new Error('Элемент не найден');
+  }
+
+  // previousId must match the same-parent sibling immediately before taskId
+  // in orderedIds so Google move and local caches stay consistent.
+  const expectedPrev = previousSiblingFromOrder(items, ids, id);
+  if (prevHint !== expectedPrev) {
+    throw new Error('Некорректная позиция');
+  }
+  const prev = expectedPrev;
+
+  const flightKey = `move:${listKind}:${id}`;
   if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
 
   const run = (async () => {
@@ -1579,12 +1603,9 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
     const listId = await resolveListId(tasksApi, listName);
     if (!listId) throw new Error(`Список «${listName}» не найден`);
 
-    const cached = lookupCachedItem(listKind, taskId);
-    const prev = resolveMovePreviousSibling(listKind, taskId, ids, prevHint);
-
     const moveParams = {
       tasklist: listId,
-      task: taskId,
+      task: id,
     };
     if (prev) moveParams.previous = prev;
     // Keep existing nesting; omit parent for roots so Google does not reparent.
@@ -1592,7 +1613,7 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
 
     const res = await tasksApi.tasks.move(moveParams);
     const movedPatch = {
-      id: taskId,
+      id,
       position: (res && res.data && res.data.position) || '',
       parent: (res && res.data && res.data.parent) || (cached && cached.parent) || null,
     };
