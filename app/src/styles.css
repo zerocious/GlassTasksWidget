@@ -1484,6 +1484,8 @@ body.is-dnd .row {
 
 .settings-panel:not([hidden]) {
   pointer-events: auto;
+  max-height: min(58vh, 420px);
+  overflow-y: auto;
 }
 
 .settings-panel.is-open {
@@ -1711,6 +1713,93 @@ body.is-dnd .row {
 
 .settings-hint.is-ok {
   color: color-mix(in srgb, #3d9a6a 70%, var(--text));
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--glass-border);
+}
+
+.settings-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+.settings-row:has(.seg-toggle[aria-label="Режим блокировки"]) {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.settings-row:has(.seg-toggle[aria-label="Режим блокировки"]) .seg-toggle {
+  width: 100%;
+}
+
+.settings-row:has(.seg-toggle[aria-label="Режим блокировки"]) .seg-btn {
+  flex: 1;
+  text-align: center;
+  padding: 5px 6px;
+}
+
+.work-hours-times {
+  gap: 12px;
+}
+
+.work-hours-time {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.work-hours-time input[type="time"] {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--glass-border);
+  background: var(--control-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  outline: none;
+}
+
+.work-hours-time input[type="time"]:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 72px;
+  border: 1px solid var(--glass-border);
+  background: var(--control-bg);
+  color: var(--text);
+  font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 8px 9px;
+  border-radius: 8px;
+  outline: none;
+}
+
+.settings-textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.settings-textarea.is-invalid {
+  border-color: color-mix(in srgb, #e85d5d 70%, var(--glass-border));
 }
 
 .onboarding-panel {

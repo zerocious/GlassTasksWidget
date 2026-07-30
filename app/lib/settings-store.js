@@ -1,6 +1,12 @@
 'use strict';
 
 const { readJson, writeJson, dataPath } = require('./config');
+const {
+  normalizeTime,
+  normalizeMode,
+  normalizeSitesList,
+  DEFAULT_WORK_HOURS_SITES,
+} = require('./work-hours-blocker');
 
 /**
  * @typedef {'dark' | 'light'} Theme
@@ -23,6 +29,11 @@ const { readJson, writeJson, dataPath } = require('./config');
  *   toggleHotkey: string,
  *   switchViewHotkey: string,
  *   onboardingSkipped: boolean,
+ *   workHoursEnabled: boolean,
+ *   workHoursStart: string,
+ *   workHoursEnd: string,
+ *   workHoursSites: string[],
+ *   workHoursMode: 'instant' | 'warn',
  * }} AppSettings
  */
 
@@ -51,6 +62,11 @@ const DEFAULTS = /** @type {AppSettings} */ ({
   toggleHotkey: DEFAULT_TOGGLE_HOTKEY,
   switchViewHotkey: DEFAULT_SWITCH_HOTKEY,
   onboardingSkipped: false,
+  workHoursEnabled: false,
+  workHoursStart: '09:00',
+  workHoursEnd: '18:00',
+  workHoursSites: DEFAULT_WORK_HOURS_SITES.slice(),
+  workHoursMode: 'warn',
 });
 
 /**
@@ -132,6 +148,13 @@ function normalizeSettings(raw) {
     toggleHotkey: normalizeHotkey(raw.toggleHotkey, DEFAULT_TOGGLE_HOTKEY),
     switchViewHotkey: normalizeHotkey(raw.switchViewHotkey, DEFAULT_SWITCH_HOTKEY),
     onboardingSkipped: Boolean(raw.onboardingSkipped),
+    workHoursEnabled: Boolean(raw.workHoursEnabled),
+    workHoursStart: normalizeTime(raw.workHoursStart, '09:00'),
+    workHoursEnd: normalizeTime(raw.workHoursEnd, '18:00'),
+    workHoursSites: normalizeSitesList(
+      raw.workHoursSites !== undefined ? raw.workHoursSites : DEFAULTS.workHoursSites
+    ).sites,
+    workHoursMode: normalizeMode(raw.workHoursMode),
   };
 }
 
@@ -169,6 +192,11 @@ function saveSettings(patch) {
     next.toggleHotkey === current.toggleHotkey &&
     next.switchViewHotkey === current.switchViewHotkey &&
     next.onboardingSkipped === current.onboardingSkipped &&
+    next.workHoursEnabled === current.workHoursEnabled &&
+    next.workHoursStart === current.workHoursStart &&
+    next.workHoursEnd === current.workHoursEnd &&
+    next.workHoursMode === current.workHoursMode &&
+    JSON.stringify(next.workHoursSites) === JSON.stringify(current.workHoursSites) &&
     ((next.pos === null && current.pos === null) ||
       (next.pos &&
         current.pos &&

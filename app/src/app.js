@@ -31,6 +31,12 @@ const optBgOpacity = document.getElementById('optBgOpacity');
 const bgOpacityValue = document.getElementById('bgOpacityValue');
 const optReminders = document.getElementById('optReminders');
 const optDailyHabitsReset = document.getElementById('optDailyHabitsReset');
+const optWorkHoursEnabled = document.getElementById('optWorkHoursEnabled');
+const optWorkHoursStart = document.getElementById('optWorkHoursStart');
+const optWorkHoursEnd = document.getElementById('optWorkHoursEnd');
+const optWorkHoursSites = document.getElementById('optWorkHoursSites');
+const workHoursSitesHint = document.getElementById('workHoursSitesHint');
+const workHoursStatusHint = document.getElementById('workHoursStatusHint');
 const btnHideCompleted = document.getElementById('btnHideCompleted');
 const btnHideCompletedHabits = document.getElementById('btnHideCompletedHabits');
 const taskFilterChips = document.getElementById('taskFilterChips');
@@ -223,6 +229,20 @@ let settings = {
   hideCompleted: false,
   simpleAnimations: false,
   onboardingSkipped: false,
+  workHoursEnabled: false,
+  workHoursStart: '09:00',
+  workHoursEnd: '18:00',
+  workHoursSites: [
+    'vk.com',
+    'vk.ru',
+    'youtube.com',
+    'ru.pinterest.com',
+    'twitch.tv',
+    'mail.yandex.ru',
+    'web.telegram.org',
+    'music.yandex.ru',
+  ],
+  workHoursMode: 'warn',
 };
 
 /** @type {{ configured: boolean, needsOnboarding: boolean, clientId: string | null, redirectPort: number } | null} */
@@ -328,6 +348,7 @@ function syncSettingsUi() {
   if (optDailyHabitsReset) {
     optDailyHabitsReset.checked = settings.dailyHabitsReset !== false;
   }
+  syncWorkHoursUi();
   syncHideCompletedUi();
   syncRemindersHint(settings);
 
@@ -336,6 +357,91 @@ function syncSettingsUi() {
   let switchLabel = formatAccel(hotkeys.switchViewHotkey || settings.switchViewHotkey || 'Control+Tab');
   if (hotkeys.switchViewFallback) switchLabel += ' (запасная)';
   hkSwitch.textContent = switchLabel;
+}
+
+function formatWorkHoursSitesJson(sites) {
+  try {
+    return JSON.stringify(Array.isArray(sites) ? sites : [], null, 0);
+  } catch {
+    return '[]';
+  }
+}
+
+function validateWorkHoursSitesJson(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return { ok: true, sites: [] };
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!Array.isArray(parsed)) {
+      return { ok: false, error: 'Нужен JSON-массив строк, например ["youtube.com"]' };
+    }
+    return { ok: true, sites: parsed };
+  } catch {
+    return { ok: false, error: 'Некорректный JSON списка сайтов' };
+  }
+}
+
+function syncWorkHoursStatusHint(settingsOrStatus) {
+  if (!workHoursStatusHint) return;
+  const status =
+    (settingsOrStatus && settingsOrStatus.workHoursStatus) ||
+    settingsOrStatus ||
+    settings.workHoursStatus ||
+    null;
+  if (!status) {
+    workHoursStatusHint.hidden = true;
+    workHoursStatusHint.textContent = '';
+    workHoursStatusHint.classList.remove('is-error', 'is-ok');
+    return;
+  }
+  if (status.error) {
+    workHoursStatusHint.hidden = false;
+    workHoursStatusHint.textContent = status.error;
+    workHoursStatusHint.classList.add('is-error');
+    workHoursStatusHint.classList.remove('is-ok');
+    return;
+  }
+  if (status.active && status.hostsApplied) {
+    workHoursStatusHint.hidden = false;
+    workHoursStatusHint.textContent =
+      status.serverPort === 80
+        ? 'Блокировка активна (hosts + страница на 127.0.0.1:80).'
+        : 'Блокировка активна через hosts (сайты недоступны). Страница-предупреждение недоступна без порта 80.';
+    workHoursStatusHint.classList.add('is-ok');
+    workHoursStatusHint.classList.remove('is-error');
+    return;
+  }
+  workHoursStatusHint.hidden = true;
+  workHoursStatusHint.textContent = '';
+  workHoursStatusHint.classList.remove('is-error', 'is-ok');
+}
+
+function syncWorkHoursUi() {
+  if (optWorkHoursEnabled) {
+    optWorkHoursEnabled.checked = Boolean(settings.workHoursEnabled);
+  }
+  if (optWorkHoursStart) {
+    optWorkHoursStart.value = settings.workHoursStart || '09:00';
+  }
+  if (optWorkHoursEnd) {
+    optWorkHoursEnd.value = settings.workHoursEnd || '18:00';
+  }
+  const mode = settings.workHoursMode === 'instant' ? 'instant' : 'warn';
+  document.querySelectorAll('.seg-btn[data-setting="workHoursMode"]').forEach((el) => {
+    el.setAttribute('aria-pressed', String(el.dataset.value === mode));
+  });
+  if (optWorkHoursSites && document.activeElement !== optWorkHoursSites) {
+    optWorkHoursSites.value =
+      typeof settings.workHoursSitesJson === 'string'
+        ? settings.workHoursSitesJson
+        : formatWorkHoursSitesJson(settings.workHoursSites);
+    optWorkHoursSites.classList.remove('is-invalid');
+  }
+  if (workHoursSitesHint && document.activeElement !== optWorkHoursSites) {
+    workHoursSitesHint.textContent = '';
+    workHoursSitesHint.classList.remove('is-error');
+  }
+  syncWorkHoursStatusHint(settings);
 }
 
 /** @type {ReturnType<typeof setTimeout> | null} */
@@ -614,7 +720,14 @@ async function flushSettingsWrites() {
     settings = await window.widgetApi.setSettings(patch);
     syncSettingsUi();
   } catch (err) {
-    setBanner(`Настройки: ${err.message || err}`);
+    const msg = err && err.message ? err.message : String(err);
+    if (workHoursSitesHint && /JSON|сайтов/i.test(msg)) {
+      workHoursSitesHint.textContent = msg;
+      workHoursSitesHint.classList.add('is-error');
+      if (optWorkHoursSites) optWorkHoursSites.classList.add('is-invalid');
+    } else {
+      setBanner(`Настройки: ${msg}`);
+    }
   }
 }
 
@@ -649,6 +762,20 @@ function patchSettings(patch) {
   }
   if (typeof patch.dailyHabitsReset === 'boolean' && optDailyHabitsReset) {
     optDailyHabitsReset.checked = patch.dailyHabitsReset;
+  }
+  if (typeof patch.workHoursEnabled === 'boolean' && optWorkHoursEnabled) {
+    optWorkHoursEnabled.checked = patch.workHoursEnabled;
+  }
+  if (typeof patch.workHoursStart === 'string' && optWorkHoursStart) {
+    optWorkHoursStart.value = patch.workHoursStart;
+  }
+  if (typeof patch.workHoursEnd === 'string' && optWorkHoursEnd) {
+    optWorkHoursEnd.value = patch.workHoursEnd;
+  }
+  if (patch.workHoursMode === 'instant' || patch.workHoursMode === 'warn') {
+    document.querySelectorAll('.seg-btn[data-setting="workHoursMode"]').forEach((el) => {
+      el.setAttribute('aria-pressed', String(el.dataset.value === patch.workHoursMode));
+    });
   }
   if (typeof patch.hideCompleted === 'boolean') {
     syncHideCompletedUi();
@@ -2990,6 +3117,44 @@ if (optDailyHabitsReset) {
   optDailyHabitsReset.addEventListener('change', () =>
     patchSettings({ dailyHabitsReset: optDailyHabitsReset.checked })
   );
+}
+if (optWorkHoursEnabled) {
+  optWorkHoursEnabled.addEventListener('change', () =>
+    patchSettings({ workHoursEnabled: optWorkHoursEnabled.checked })
+  );
+}
+if (optWorkHoursStart) {
+  optWorkHoursStart.addEventListener('change', () => {
+    if (!optWorkHoursStart.value) return;
+    patchSettings({ workHoursStart: optWorkHoursStart.value });
+  });
+}
+if (optWorkHoursEnd) {
+  optWorkHoursEnd.addEventListener('change', () => {
+    if (!optWorkHoursEnd.value) return;
+    patchSettings({ workHoursEnd: optWorkHoursEnd.value });
+  });
+}
+if (optWorkHoursSites) {
+  const commitSites = () => {
+    const check = validateWorkHoursSitesJson(optWorkHoursSites.value);
+    if (!check.ok) {
+      optWorkHoursSites.classList.add('is-invalid');
+      if (workHoursSitesHint) {
+        workHoursSitesHint.textContent = check.error || 'Некорректный JSON';
+        workHoursSitesHint.classList.add('is-error');
+      }
+      return;
+    }
+    optWorkHoursSites.classList.remove('is-invalid');
+    if (workHoursSitesHint) {
+      workHoursSitesHint.textContent = '';
+      workHoursSitesHint.classList.remove('is-error');
+    }
+    patchSettings({ workHoursSitesJson: optWorkHoursSites.value.trim() || '[]' });
+  };
+  optWorkHoursSites.addEventListener('change', commitSites);
+  optWorkHoursSites.addEventListener('blur', commitSites);
 }
 
 function onHideCompletedToggle(e) {

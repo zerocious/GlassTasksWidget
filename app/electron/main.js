@@ -47,6 +47,16 @@ const {
   wasNotifiedToday,
   clearNotifiedToday,
 } = require('../lib/reminder-store');
+const {
+  normalizeSitesList,
+  normalizeTime,
+  normalizeMode,
+  applyWorkHoursState,
+  startWorkHoursScheduler,
+  stopWorkHoursScheduler,
+  cleanupWorkHoursOnQuit,
+  getWorkHoursStatus,
+} = require('../lib/work-hours-blocker');
 
 function credentialsPayload() {
   const status = getGoogleCredentialsStatus();
@@ -314,6 +324,8 @@ function settingsForRenderer() {
   const s = loadSettings();
   return {
     ...s,
+    workHoursSitesJson: JSON.stringify(s.workHoursSites || []),
+    workHoursStatus: getWorkHoursStatus(),
     notificationsSupported: Notification.isSupported(),
     windowsToastsEnabled: windowsToastsGloballyEnabled(),
     hotkeys: {
@@ -1338,6 +1350,27 @@ function applySettingsPatch(patch) {
   if (typeof patch.toggleHotkey === 'string') allowed.toggleHotkey = patch.toggleHotkey;
   if (typeof patch.switchViewHotkey === 'string') allowed.switchViewHotkey = patch.switchViewHotkey;
   if (typeof patch.onboardingSkipped === 'boolean') allowed.onboardingSkipped = patch.onboardingSkipped;
+  if (typeof patch.workHoursEnabled === 'boolean') allowed.workHoursEnabled = patch.workHoursEnabled;
+  if (typeof patch.workHoursStart === 'string') {
+    allowed.workHoursStart = normalizeTime(patch.workHoursStart, '09:00');
+  }
+  if (typeof patch.workHoursEnd === 'string') {
+    allowed.workHoursEnd = normalizeTime(patch.workHoursEnd, '18:00');
+  }
+  if (patch.workHoursMode === 'instant' || patch.workHoursMode === 'warn') {
+    allowed.workHoursMode = normalizeMode(patch.workHoursMode);
+  }
+  if (Array.isArray(patch.workHoursSites)) {
+    allowed.workHoursSites = normalizeSitesList(patch.workHoursSites).sites;
+  } else if (typeof patch.workHoursSitesJson === 'string') {
+    const parsed = normalizeSitesList(patch.workHoursSitesJson);
+    if (parsed.error) {
+      const err = new Error(parsed.error);
+      err.code = 'WORK_HOURS_SITES_JSON';
+      throw err;
+    }
+    allowed.workHoursSites = parsed.sites;
+  }
   if (patch.pos && typeof patch.pos.x === 'number' && typeof patch.pos.y === 'number') {
     allowed.pos = { x: patch.pos.x, y: patch.pos.y };
   }
@@ -1387,7 +1420,23 @@ function applySettingsPatch(patch) {
       );
   }
 
-  return settingsForRenderer();
+  const workHoursChanged =
+    typeof allowed.workHoursEnabled === 'boolean' ||
+    typeof allowed.workHoursStart === 'string' ||
+    typeof allowed.workHoursEnd === 'string' ||
+    typeof allowed.workHoursMode === 'string' ||
+    Array.isArray(allowed.workHoursSites);
+
+  return (async () => {
+    if (workHoursChanged) {
+      try {
+        await applyWorkHoursState(next);
+      } catch (err) {
+        console.warn('[work-hours]', err && err.message ? err.message : err);
+      }
+    }
+    return settingsForRenderer();
+  })();
 }
 
 /**
@@ -1617,6 +1666,7 @@ if (!gotTheLock) {
     registerHotkeys(settings);
     syncRemindersScheduler(settings.remindersEnabled !== false);
     scheduleHabitsDayRollover();
+    startWorkHoursScheduler(() => loadSettings());
     setupAutoUpdater();
 
     app.on('activate', () => {
@@ -1629,12 +1679,14 @@ if (!gotTheLock) {
     isQuitting = true;
     stopRemindersScheduler();
     stopHabitsDayRollover();
+    cleanupWorkHoursOnQuit();
   });
 
   app.on('will-quit', () => {
     unregisterHotkeys();
     stopRemindersScheduler();
     stopHabitsDayRollover();
+    stopWorkHoursScheduler();
     if (tray) {
       tray.destroy();
       tray = null;

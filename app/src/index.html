@@ -112,6 +112,54 @@
           <span class="switch-ui" aria-hidden="true"></span>
         </label>
 
+        <div class="settings-section" id="workHoursSection">
+          <div class="settings-section-title">Блокировка сайтов в рабочее время</div>
+          <p class="settings-hint">
+            В указанный интервал сайты из списка перенаправляются через файл hosts на локальную страницу.
+            Нужны права администратора. HTTPS часто даёт ошибку соединения — сайт всё равно недоступен.
+          </p>
+
+          <label class="settings-row switch-row">
+            <span class="settings-label">Включить блокировку</span>
+            <input type="checkbox" id="optWorkHoursEnabled" />
+            <span class="switch-ui" aria-hidden="true"></span>
+          </label>
+
+          <div class="settings-row work-hours-times">
+            <label class="work-hours-time">
+              <span class="settings-label">С</span>
+              <input type="time" id="optWorkHoursStart" value="09:00" />
+            </label>
+            <label class="work-hours-time">
+              <span class="settings-label">До</span>
+              <input type="time" id="optWorkHoursEnd" value="18:00" />
+            </label>
+          </div>
+          <p class="settings-hint">Локальное время. Если «С» позже «До» — интервал через полночь (напр. 22:00–06:00).</p>
+
+          <div class="settings-row">
+            <span class="settings-label">Режим</span>
+            <div class="seg-toggle" role="group" aria-label="Режим блокировки">
+              <button type="button" class="seg-btn" data-setting="workHoursMode" data-value="instant" aria-pressed="false">Сразу закрывать</button>
+              <button type="button" class="seg-btn" data-setting="workHoursMode" data-value="warn" aria-pressed="true">Предупреждение 3 сек</button>
+            </div>
+          </div>
+
+          <label class="settings-field">
+            <span class="settings-label">Список сайтов (JSON)</span>
+            <textarea
+              id="optWorkHoursSites"
+              class="settings-textarea"
+              rows="4"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder='["vk.com","vk.ru","youtube.com","ru.pinterest.com","twitch.tv","mail.yandex.ru","web.telegram.org","music.yandex.ru"]'
+            ></textarea>
+          </label>
+          <p class="settings-hint" id="workHoursSitesHint"></p>
+          <p class="settings-hint" id="workHoursStatusHint" hidden></p>
+        </div>
+
         <div class="settings-row">
           <span class="settings-label">Обновления</span>
           <button type="button" class="settings-link-btn" id="btnCheckUpdates">Проверить обновления</button>
