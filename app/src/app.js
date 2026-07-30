@@ -13,6 +13,14 @@ const offlinePill = document.getElementById('offlinePill');
 const btnAuth = document.getElementById('btnAuth');
 const btnSettings = document.getElementById('btnSettings');
 const settingsPanel = document.getElementById('settingsPanel');
+const settingsHome = document.getElementById('settingsHome');
+const settingsPageTitle = document.getElementById('settingsPageTitle');
+const btnSettingsBack = document.getElementById('btnSettingsBack');
+const settingsSectionPanels = document.querySelector('.settings-section-panels');
+const widgetEl = document.querySelector('.widget');
+const headerTabs = document.querySelector('.header .tabs');
+const footerEl = document.querySelector('.footer');
+const viewportEl = document.getElementById('viewport');
 const onboardingPanel = document.getElementById('onboardingPanel');
 const onboardingTitle = document.getElementById('onboardingTitle');
 const onboardingError = document.getElementById('onboardingError');
@@ -127,6 +135,17 @@ let streaksEnterTimer = null;
 const icons = {
   tasks: '<svg viewBox="0 0 24 24"><path d="M5 12l4 4L19 6"/></svg>',
   habits: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/></svg>',
+  settings:
+    '<svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 13a7.8 7.8 0 0 0 .1-2l2-1.5-2-3.5-2.4 1a7.4 7.4 0 0 0-1.7-1L15 3h-6l-.4 2.5a7.4 7.4 0 0 0-1.7 1L4.5 6 2.5 9.5 4.5 11a7.8 7.8 0 0 0 0 2l-2 1.5 2 3.5 2.4-1a7.4 7.4 0 0 0 1.7 1L9 21h6l.4-2.5a7.4 7.4 0 0 0 1.7-1l2.4 1 2-3.5-2-1.5z"/></svg>',
+};
+
+const SETTINGS_SECTIONS = {
+  appearance: 'Внешний вид',
+  behavior: 'Поведение',
+  reminders: 'Напоминания',
+  workhours: 'Рабочее время',
+  google: 'Google / Аккаунт',
+  about: 'О приложении',
 };
 
 /** Inline SVGs for habit rows — consistent outline stroke icons, viewBox 0 0 24 24. */
@@ -482,14 +501,66 @@ function afterPaint(fn) {
   requestAnimationFrame(fn);
 }
 
+/** @type {string | null} */
+let settingsSection = null;
+
+function isSettingsOpen() {
+  return btnSettings.getAttribute('aria-expanded') === 'true';
+}
+
+function syncSettingsChrome(open) {
+  if (widgetEl) widgetEl.classList.toggle('is-settings', open);
+  if (headerTabs) headerTabs.hidden = open;
+  if (viewportEl) viewportEl.hidden = open;
+  if (footerEl) footerEl.hidden = open;
+  if (open) {
+    viewTitle.textContent = 'Настройки';
+    if (lastIconView !== 'settings') {
+      lastIconView = 'settings';
+      viewIcon.innerHTML = icons.settings;
+    }
+    return;
+  }
+  lastIconView = '';
+  viewTitle.textContent = view === 'tasks' ? 'Tasks' : 'Habits';
+  viewIcon.innerHTML = icons[view] || icons.tasks;
+  lastIconView = view;
+}
+
+/** @param {string | null} section @param {{ focus?: boolean }} [opts] */
+function showSettingsSection(section, opts = {}) {
+  settingsSection = section && SETTINGS_SECTIONS[section] ? section : null;
+
+  if (settingsHome) settingsHome.hidden = Boolean(settingsSection);
+  if (settingsSectionPanels) settingsSectionPanels.hidden = !settingsSection;
+  if (btnSettingsBack) btnSettingsBack.hidden = !settingsSection;
+  if (settingsPageTitle) {
+    settingsPageTitle.textContent = settingsSection
+      ? SETTINGS_SECTIONS[settingsSection]
+      : 'Настройки';
+  }
+
+  document.querySelectorAll('.settings-section-panel').forEach((panel) => {
+    const id = panel.getAttribute('data-settings-panel');
+    panel.hidden = !(settingsSection && id === settingsSection);
+  });
+
+  if (opts.focus) {
+    if (settingsSection && btnSettingsBack) btnSettingsBack.focus();
+    else settingsHome?.querySelector('.settings-nav-btn')?.focus();
+  }
+}
+
 function setSettingsOpen(open) {
   if (settingsCloseTimer) {
     clearTimeout(settingsCloseTimer);
     settingsCloseTimer = null;
   }
   btnSettings.setAttribute('aria-expanded', String(open));
+  syncSettingsChrome(open);
   if (open) {
     const gen = ++settingsOpenGen;
+    showSettingsSection(null);
     settingsPanel.hidden = false;
     if (motionQuiet()) {
       settingsPanel.classList.add('is-open');
@@ -503,6 +574,7 @@ function setSettingsOpen(open) {
     return;
   }
   settingsOpenGen += 1;
+  settingsSection = null;
   settingsPanel.classList.remove('is-open');
   if (motionQuiet()) {
     settingsPanel.hidden = true;
@@ -668,7 +740,8 @@ function setOnboardingError(msg) {
  */
 function syncCredentialsForm(opts = {}) {
   const open = Boolean(opts.open);
-  credentialsFromSettings = Boolean(opts.fromSettings);
+  const wasFromSettings = credentialsFromSettings;
+  credentialsFromSettings = open ? Boolean(opts.fromSettings) : false;
   if (!onboardingPanel) return;
 
   if (onboardingTitle) {
@@ -697,7 +770,26 @@ function syncCredentialsForm(opts = {}) {
   }
   setOnboardingError('');
   onboardingPanel.hidden = !open;
-  if (open) setSettingsOpen(false);
+  if (open && !credentialsFromSettings) {
+    setSettingsOpen(false);
+  }
+  if (open && credentialsFromSettings) {
+    // Keep settings mode (main UI hidden); credentials replace the settings panel.
+    if (settingsCloseTimer) {
+      clearTimeout(settingsCloseTimer);
+      settingsCloseTimer = null;
+    }
+    settingsPanel.hidden = true;
+    settingsPanel.classList.remove('is-open');
+    syncSettingsChrome(true);
+    btnSettings.setAttribute('aria-expanded', 'true');
+  }
+  if (!open && wasFromSettings && isSettingsOpen()) {
+    settingsPanel.hidden = false;
+    settingsPanel.classList.add('is-open');
+    showSettingsSection('google', { focus: true });
+    syncSettingsChrome(true);
+  }
 }
 
 function maybeShowFirstRunOnboarding() {
@@ -902,12 +994,14 @@ function setView(next, force) {
   panelTasks.setAttribute('aria-hidden', String(view !== 'tasks'));
   panelHabits.setAttribute('aria-hidden', String(view !== 'habits'));
 
-  viewTitle.textContent = view === 'tasks' ? 'Tasks' : 'Habits';
-  updateSourceLabel();
-  if (lastIconView !== view) {
-    lastIconView = view;
-    viewIcon.innerHTML = icons[view];
+  if (!isSettingsOpen()) {
+    viewTitle.textContent = view === 'tasks' ? 'Tasks' : 'Habits';
+    if (lastIconView !== view) {
+      lastIconView = view;
+      viewIcon.innerHTML = icons[view];
+    }
   }
+  updateSourceLabel();
 }
 
 function toggleView() {
@@ -2927,6 +3021,20 @@ document.addEventListener('keydown', (e) => {
     closeNotesPanel({ revert: true });
     return;
   }
+  if (onboardingPanel && !onboardingPanel.hidden && credentialsFromSettings) {
+    e.preventDefault();
+    syncCredentialsForm({ open: false });
+    return;
+  }
+  if (isSettingsOpen()) {
+    e.preventDefault();
+    if (settingsSection) {
+      showSettingsSection(null);
+      return;
+    }
+    setSettingsOpen(false);
+    return;
+  }
   hideCtxMenu({ instant: true });
 });
 window.addEventListener('blur', () => hideCtxMenu({ instant: true }));
@@ -3270,17 +3378,27 @@ btnSettings.addEventListener('click', (e) => {
   if (onboardingPanel && !onboardingPanel.hidden && !credentialsFromSettings) return;
   if (onboardingPanel && !onboardingPanel.hidden && credentialsFromSettings) {
     syncCredentialsForm({ open: false });
+    return;
   }
-  const open = btnSettings.getAttribute('aria-expanded') !== 'true';
+  const open = !isSettingsOpen();
   setSettingsOpen(open);
 });
 
-document.addEventListener('click', (e) => {
-  if (btnSettings.getAttribute('aria-expanded') !== 'true') return;
-  const t = e.target;
-  if (settingsPanel.contains(t) || btnSettings.contains(t)) return;
-  if (onboardingPanel && !onboardingPanel.hidden && onboardingPanel.contains(t)) return;
-  setSettingsOpen(false);
+if (btnSettingsBack) {
+  btnSettingsBack.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showSettingsSection(null, { focus: true });
+  });
+}
+
+document.querySelectorAll('.settings-nav-btn[data-settings-section]').forEach((btn) => {
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const section = btn.getAttribute('data-settings-section');
+    if (section) showSettingsSection(section, { focus: true });
+  });
 });
 
 document.getElementById('btnMin').addEventListener('click', () => window.widgetApi?.minimize());

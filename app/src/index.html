@@ -33,159 +33,230 @@
         </div>
       </header>
 
-      <div class="settings-panel" id="settingsPanel" hidden>
-        <div class="settings-title">Настройки</div>
-
-        <div class="settings-row">
-          <span class="settings-label">Тема стекла</span>
-          <div class="seg-toggle" role="group" aria-label="Тема">
-            <button type="button" class="seg-btn" data-setting="theme" data-value="dark" aria-pressed="true">Тёмная</button>
-            <button type="button" class="seg-btn" data-setting="theme" data-value="light" aria-pressed="false">Светлая</button>
-          </div>
+      <div class="settings-panel" id="settingsPanel" hidden role="region" aria-label="Настройки">
+        <div class="settings-page-head">
+          <button type="button" class="settings-back" id="btnSettingsBack" hidden aria-label="Назад к разделам">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Назад</span>
+          </button>
+          <div class="settings-title" id="settingsPageTitle">Настройки</div>
         </div>
 
-        <div class="settings-row">
-          <span class="settings-label">Размер</span>
-          <div class="seg-toggle" role="group" aria-label="Размер">
-            <button type="button" class="seg-btn" data-setting="size" data-value="normal" aria-pressed="true">Обычный</button>
-            <button type="button" class="seg-btn" data-setting="size" data-value="compact" aria-pressed="false">Компакт</button>
-          </div>
+        <div class="settings-home" id="settingsHome">
+          <nav class="settings-nav" aria-label="Разделы настроек">
+            <button type="button" class="settings-nav-btn" data-settings-section="appearance">
+              <span class="settings-nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+              </span>
+              <span class="settings-nav-label">Внешний вид</span>
+              <span class="settings-nav-chevron" aria-hidden="true">›</span>
+            </button>
+            <button type="button" class="settings-nav-btn" data-settings-section="behavior">
+              <span class="settings-nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+              </span>
+              <span class="settings-nav-label">Поведение</span>
+              <span class="settings-nav-chevron" aria-hidden="true">›</span>
+            </button>
+            <button type="button" class="settings-nav-btn" data-settings-section="reminders">
+              <span class="settings-nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 4a6 6 0 0 1 6 6c0 4 2 5 2 5H4s2-1 2-5a6 6 0 0 1 6-6zM10 19h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              <span class="settings-nav-label">Напоминания</span>
+              <span class="settings-nav-chevron" aria-hidden="true">›</span>
+            </button>
+            <button type="button" class="settings-nav-btn" data-settings-section="workhours">
+              <span class="settings-nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 8v4l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              <span class="settings-nav-label">Рабочее время</span>
+              <span class="settings-nav-chevron" aria-hidden="true">›</span>
+            </button>
+            <button type="button" class="settings-nav-btn" data-settings-section="google">
+              <span class="settings-nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 11v8M8 15h8M7 7h10a2 2 0 0 1 2 2v1H5V9a2 2 0 0 1 2-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              <span class="settings-nav-label">Google / Аккаунт</span>
+              <span class="settings-nav-chevron" aria-hidden="true">›</span>
+            </button>
+            <button type="button" class="settings-nav-btn" data-settings-section="about">
+              <span class="settings-nav-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v5M12 8h.01" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+              </span>
+              <span class="settings-nav-label">О приложении</span>
+              <span class="settings-nav-chevron" aria-hidden="true">›</span>
+            </button>
+          </nav>
         </div>
 
-        <div class="settings-row opacity-row">
-          <div class="opacity-row-head">
-            <label class="settings-label" for="optBgOpacity">Прозрачность фона</label>
-            <span class="opacity-value" id="bgOpacityValue" aria-hidden="true">72%</span>
-          </div>
-          <input
-            type="range"
-            id="optBgOpacity"
-            class="opacity-slider"
-            min="20"
-            max="95"
-            step="1"
-            value="72"
-            aria-valuemin="20"
-            aria-valuemax="95"
-            aria-valuenow="72"
-            aria-label="Прозрачность фона"
-          />
-        </div>
+        <div class="settings-section-panels" hidden>
+          <div class="settings-section-panel" id="settings-section-appearance" data-settings-panel="appearance" hidden>
+            <div class="settings-row">
+              <span class="settings-label">Тема стекла</span>
+              <div class="seg-toggle" role="group" aria-label="Тема">
+                <button type="button" class="seg-btn" data-setting="theme" data-value="dark" aria-pressed="true">Тёмная</button>
+                <button type="button" class="seg-btn" data-setting="theme" data-value="light" aria-pressed="false">Светлая</button>
+              </div>
+            </div>
 
-        <label class="settings-row switch-row">
-          <span class="settings-label">Автозапуск с Windows</span>
-          <input type="checkbox" id="optAutostart" />
-          <span class="switch-ui" aria-hidden="true"></span>
-        </label>
+            <div class="settings-row">
+              <span class="settings-label">Размер</span>
+              <div class="seg-toggle" role="group" aria-label="Размер">
+                <button type="button" class="seg-btn" data-setting="size" data-value="normal" aria-pressed="true">Обычный</button>
+                <button type="button" class="seg-btn" data-setting="size" data-value="compact" aria-pressed="false">Компакт</button>
+              </div>
+            </div>
 
-        <label class="settings-row switch-row">
-          <span class="settings-label">Прилипание к краю</span>
-          <input type="checkbox" id="optSnap" />
-          <span class="switch-ui" aria-hidden="true"></span>
-        </label>
+            <div class="settings-row opacity-row">
+              <div class="opacity-row-head">
+                <label class="settings-label" for="optBgOpacity">Прозрачность фона</label>
+                <span class="opacity-value" id="bgOpacityValue" aria-hidden="true">72%</span>
+              </div>
+              <input
+                type="range"
+                id="optBgOpacity"
+                class="opacity-slider"
+                min="20"
+                max="95"
+                step="1"
+                value="72"
+                aria-valuemin="20"
+                aria-valuemax="95"
+                aria-valuenow="72"
+                aria-label="Прозрачность фона"
+              />
+            </div>
 
-        <label class="settings-row switch-row">
-          <span class="settings-label">Упрощённые анимации</span>
-          <input type="checkbox" id="optSimpleAnim" />
-          <span class="switch-ui" aria-hidden="true"></span>
-        </label>
-        <p class="settings-hint">Выкл. = плавные анимации (по умолчанию). Вкл. = мгновенное переключение Tasks ↔ Habits без stagger — легче для слабых ПК.</p>
-
-        <label class="settings-row switch-row">
-          <span class="settings-label">Напоминания</span>
-          <input type="checkbox" id="optReminders" checked />
-          <span class="switch-ui" aria-hidden="true"></span>
-        </label>
-
-        <div class="settings-row">
-          <span class="settings-label">Проверить напоминания</span>
-          <button type="button" class="settings-link-btn" id="btnCheckReminders">Проверить</button>
-        </div>
-        <p class="settings-hint" id="remindersHint" hidden>
-          Если тосты не появляются: Параметры Windows → Система → Уведомления — разрешите
-          «Glass Tasks Widget». Отключите Фокусировку внимания (Focus Assist).
-        </p>
-
-        <label class="settings-row switch-row">
-          <span class="settings-label">Сбрасывать привычки в Google каждый день</span>
-          <input type="checkbox" id="optDailyHabitsReset" checked />
-          <span class="switch-ui" aria-hidden="true"></span>
-        </label>
-
-        <div class="settings-section" id="workHoursSection">
-          <div class="settings-section-title">Блокировка сайтов в рабочее время</div>
-          <p class="settings-hint">
-            В указанный интервал сайты из списка перенаправляются через файл hosts на локальную страницу.
-            Нужны права администратора. HTTPS часто даёт ошибку соединения — сайт всё равно недоступен.
-          </p>
-
-          <label class="settings-row switch-row">
-            <span class="settings-label">Включить блокировку</span>
-            <input type="checkbox" id="optWorkHoursEnabled" />
-            <span class="switch-ui" aria-hidden="true"></span>
-          </label>
-
-          <div class="settings-row work-hours-times">
-            <label class="work-hours-time">
-              <span class="settings-label">С</span>
-              <input type="time" id="optWorkHoursStart" value="09:00" />
+            <label class="settings-row switch-row">
+              <span class="settings-label">Упрощённые анимации</span>
+              <input type="checkbox" id="optSimpleAnim" />
+              <span class="switch-ui" aria-hidden="true"></span>
             </label>
-            <label class="work-hours-time">
-              <span class="settings-label">До</span>
-              <input type="time" id="optWorkHoursEnd" value="18:00" />
-            </label>
-          </div>
-          <p class="settings-hint">Локальное время. Если «С» позже «До» — интервал через полночь (напр. 22:00–06:00).</p>
+            <p class="settings-hint">Выкл. = плавные анимации (по умолчанию). Вкл. = мгновенное переключение Tasks ↔ Habits без stagger — легче для слабых ПК.</p>
 
-          <div class="settings-row">
-            <span class="settings-label">Режим</span>
-            <div class="seg-toggle" role="group" aria-label="Режим блокировки">
-              <button type="button" class="seg-btn" data-setting="workHoursMode" data-value="instant" aria-pressed="false">Сразу закрывать</button>
-              <button type="button" class="seg-btn" data-setting="workHoursMode" data-value="warn" aria-pressed="true">Предупреждение 3 сек</button>
+            <div class="settings-row palette-row">
+              <label class="switch-row palette-switch" for="optAutoPalette">
+                <span class="settings-label">Автопалитра с обоев</span>
+                <input type="checkbox" id="optAutoPalette" />
+                <span class="switch-ui" aria-hidden="true"></span>
+              </label>
+              <button type="button" class="palette-refresh" id="btnRefreshPalette" title="Обновить палитру с обоев" aria-label="Обновить палитру с обоев">С обоев</button>
             </div>
           </div>
 
-          <label class="settings-field">
-            <span class="settings-label">Список сайтов (JSON)</span>
-            <textarea
-              id="optWorkHoursSites"
-              class="settings-textarea"
-              rows="4"
-              spellcheck="false"
-              autocomplete="off"
-              placeholder='["vk.com","vk.ru","youtube.com","ru.pinterest.com","twitch.tv","mail.yandex.ru","web.telegram.org","music.yandex.ru"]'
-            ></textarea>
-          </label>
-          <p class="settings-hint" id="workHoursSitesHint"></p>
-          <p class="settings-hint" id="workHoursStatusHint" hidden></p>
-        </div>
+          <div class="settings-section-panel" id="settings-section-behavior" data-settings-panel="behavior" hidden>
+            <label class="settings-row switch-row">
+              <span class="settings-label">Автозапуск с Windows</span>
+              <input type="checkbox" id="optAutostart" />
+              <span class="switch-ui" aria-hidden="true"></span>
+            </label>
 
-        <div class="settings-row">
-          <span class="settings-label">Обновления</span>
-          <button type="button" class="settings-link-btn" id="btnCheckUpdates">Проверить обновления</button>
-        </div>
-        <p class="settings-hint" id="updatesHint" hidden></p>
+            <label class="settings-row switch-row">
+              <span class="settings-label">Прилипание к краю</span>
+              <input type="checkbox" id="optSnap" />
+              <span class="switch-ui" aria-hidden="true"></span>
+            </label>
 
-        <div class="settings-row palette-row">
-          <label class="switch-row palette-switch" for="optAutoPalette">
-            <span class="settings-label">Автопалитра с обоев</span>
-            <input type="checkbox" id="optAutoPalette" />
-            <span class="switch-ui" aria-hidden="true"></span>
-          </label>
-          <button type="button" class="palette-refresh" id="btnRefreshPalette" title="Обновить палитру с обоев" aria-label="Обновить палитру с обоев">С обоев</button>
-        </div>
+            <label class="settings-row switch-row">
+              <span class="settings-label">Сбрасывать привычки в Google каждый день</span>
+              <input type="checkbox" id="optDailyHabitsReset" checked />
+              <span class="switch-ui" aria-hidden="true"></span>
+            </label>
 
-        <div class="settings-row">
-          <span class="settings-label">Google API</span>
-          <button type="button" class="settings-link-btn" id="btnGoogleKeys">Google API ключи</button>
-        </div>
+            <div class="settings-hotkeys" id="hotkeysHint">
+              <div class="settings-label">Горячие клавиши</div>
+              <ul>
+                <li><kbd id="hkToggle">Ctrl+Alt+W</kbd> — показать / скрыть</li>
+                <li><kbd id="hkSwitch">Ctrl+Tab</kbd> — Tasks ↔ Habits</li>
+              </ul>
+            </div>
+          </div>
 
-        <div class="settings-hotkeys" id="hotkeysHint">
-          <div class="settings-label">Горячие клавиши</div>
-          <ul>
-            <li><kbd id="hkToggle">Ctrl+Alt+W</kbd> — показать / скрыть</li>
-            <li><kbd id="hkSwitch">Ctrl+Tab</kbd> — Tasks ↔ Habits</li>
-          </ul>
+          <div class="settings-section-panel" id="settings-section-reminders" data-settings-panel="reminders" hidden>
+            <label class="settings-row switch-row">
+              <span class="settings-label">Напоминания</span>
+              <input type="checkbox" id="optReminders" checked />
+              <span class="switch-ui" aria-hidden="true"></span>
+            </label>
+
+            <div class="settings-row">
+              <span class="settings-label">Проверить напоминания</span>
+              <button type="button" class="settings-link-btn" id="btnCheckReminders">Проверить</button>
+            </div>
+            <p class="settings-hint" id="remindersHint" hidden>
+              Если тосты не появляются: Параметры Windows → Система → Уведомления — разрешите
+              «Glass Tasks Widget». Отключите Фокусировку внимания (Focus Assist).
+            </p>
+          </div>
+
+          <div class="settings-section-panel" id="settings-section-workhours" data-settings-panel="workhours" hidden>
+            <div class="settings-section" id="workHoursSection">
+              <p class="settings-hint">
+                В указанный интервал сайты из списка перенаправляются через файл hosts на локальную страницу.
+                Нужны права администратора. HTTPS часто даёт ошибку соединения — сайт всё равно недоступен.
+              </p>
+
+              <label class="settings-row switch-row">
+                <span class="settings-label">Включить блокировку</span>
+                <input type="checkbox" id="optWorkHoursEnabled" />
+                <span class="switch-ui" aria-hidden="true"></span>
+              </label>
+
+              <div class="settings-row work-hours-times">
+                <label class="work-hours-time">
+                  <span class="settings-label">С</span>
+                  <input type="time" id="optWorkHoursStart" value="09:00" />
+                </label>
+                <label class="work-hours-time">
+                  <span class="settings-label">До</span>
+                  <input type="time" id="optWorkHoursEnd" value="18:00" />
+                </label>
+              </div>
+              <p class="settings-hint">Локальное время. Если «С» позже «До» — интервал через полночь (напр. 22:00–06:00).</p>
+
+              <div class="settings-row">
+                <span class="settings-label">Режим</span>
+                <div class="seg-toggle" role="group" aria-label="Режим блокировки">
+                  <button type="button" class="seg-btn" data-setting="workHoursMode" data-value="instant" aria-pressed="false">Сразу закрывать</button>
+                  <button type="button" class="seg-btn" data-setting="workHoursMode" data-value="warn" aria-pressed="true">Предупреждение 3 сек</button>
+                </div>
+              </div>
+
+              <label class="settings-field">
+                <span class="settings-label">Список сайтов (JSON)</span>
+                <textarea
+                  id="optWorkHoursSites"
+                  class="settings-textarea"
+                  rows="4"
+                  spellcheck="false"
+                  autocomplete="off"
+                  placeholder='["vk.com","vk.ru","youtube.com","ru.pinterest.com","twitch.tv","mail.yandex.ru","web.telegram.org","music.yandex.ru"]'
+                ></textarea>
+              </label>
+              <p class="settings-hint" id="workHoursSitesHint"></p>
+              <p class="settings-hint" id="workHoursStatusHint" hidden></p>
+            </div>
+          </div>
+
+          <div class="settings-section-panel" id="settings-section-google" data-settings-panel="google" hidden>
+            <p class="settings-hint">
+              OAuth-клиент Desktop из Google Cloud: Client ID и Client Secret.
+              Вход — кнопкой Google внизу виджета.
+            </p>
+            <div class="settings-row">
+              <span class="settings-label">Google API</span>
+              <button type="button" class="settings-link-btn" id="btnGoogleKeys">Google API ключи</button>
+            </div>
+          </div>
+
+          <div class="settings-section-panel" id="settings-section-about" data-settings-panel="about" hidden>
+            <p class="settings-hint" id="aboutAppHint">Glass Tasks Widget</p>
+            <div class="settings-row">
+              <span class="settings-label">Обновления</span>
+              <button type="button" class="settings-link-btn" id="btnCheckUpdates">Проверить обновления</button>
+            </div>
+            <p class="settings-hint" id="updatesHint" hidden></p>
+          </div>
         </div>
       </div>
 
