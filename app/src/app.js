@@ -802,6 +802,32 @@ function setBanner(text) {
   statusBanner.classList.add('visible');
 }
 
+/** True when main process cleared a revoked Google session (safe Russian message / code). */
+function isGoogleSessionError(err) {
+  if (!err) return false;
+  if (String(err.code || '') === 'invalid_grant') return true;
+  const msg = String(err.message || '');
+  return msg.startsWith('Сессия Google');
+}
+
+/**
+ * Show a mutation error; on revoked Google session, refresh into needs_auth
+ * so the auth button becomes «Google» again.
+ * @param {unknown} err
+ * @param {string} prefix
+ */
+async function reportMutationError(err, prefix) {
+  const msg = err && /** @type {any} */ (err).message
+    ? String(/** @type {any} */ (err).message)
+    : String(err);
+  if (isGoogleSessionError(err)) {
+    setBanner(msg);
+    await loadData(true);
+    return;
+  }
+  setBanner(`${prefix}: ${msg}`);
+}
+
 function taskDueClass(task) {
   if (task.completed) return '';
   if (task.dueKind === 'overdue') return ' due-overdue';
@@ -1493,7 +1519,7 @@ async function toggleItem(listKind, item) {
       resortTasksLocal();
       patchTaskRow(item);
     }
-    setBanner(`Не удалось обновить: ${err.message || err}`);
+    await reportMutationError(err, 'Не удалось обновить');
   } finally {
     pendingIds.delete(item.id);
   }
@@ -1542,7 +1568,7 @@ async function onAddSubmit(listKind, input) {
       await loadData(true);
     }
   } catch (err) {
-    setBanner(`Не удалось добавить: ${err.message || err}`);
+    await reportMutationError(err, 'Не удалось добавить');
   } finally {
     addBusy = false;
   }
@@ -1702,8 +1728,8 @@ function bindListReorder(listKind, listEl) {
     try {
       await window.widgetApi.moveItem(kind, taskId, previousId, orderedIds);
     } catch (err) {
-      setBanner(`Не удалось изменить порядок: ${err.message || err}`);
-      await loadData(true);
+      await reportMutationError(err, 'Не удалось изменить порядок');
+      if (!isGoogleSessionError(err)) await loadData(true);
     }
   }
 
@@ -1849,7 +1875,7 @@ async function renameItem(listKind, item, nextTitle) {
     item.title = prevTitle;
     if (listKind === 'habits') patchHabitRow(item);
     else patchTaskRow(item);
-    setBanner(`Не удалось изменить: ${err.message || err}`);
+    await reportMutationError(err, 'Не удалось изменить');
   } finally {
     pendingIds.delete(item.id);
   }
@@ -1894,7 +1920,7 @@ async function removeItem(listKind, item) {
     state[listKey] = prevList;
     if (listKind === 'habits') renderHabits();
     else renderTasks();
-    setBanner(`Не удалось удалить: ${err.message || err}`);
+    await reportMutationError(err, 'Не удалось удалить');
   } finally {
     pendingIds.delete(item.id);
   }
@@ -2010,7 +2036,7 @@ async function saveNotesPanel({ closeAfter } = {}) {
     if (closeAfter) closeNotesPanel();
     return true;
   } catch (err) {
-    setBanner(`Не удалось сохранить заметки: ${err.message || err}`);
+    await reportMutationError(err, 'Не удалось сохранить заметки');
     return false;
   } finally {
     notesSaving = false;
@@ -2113,7 +2139,7 @@ async function saveTimePanel({ closeAfter, clear } = {}) {
     if (closeAfter) closeTimePanel();
     return true;
   } catch (err) {
-    setBanner(`Не удалось сохранить время: ${err.message || err}`);
+    await reportMutationError(err, 'Не удалось сохранить время');
     return false;
   } finally {
     timeSaving = false;
@@ -2206,7 +2232,7 @@ async function saveRepeatPanel(next) {
     closeRepeatPanel();
     return true;
   } catch (err) {
-    setBanner(`Не удалось сохранить повтор: ${err.message || err}`);
+    await reportMutationError(err, 'Не удалось сохранить повтор');
     return false;
   } finally {
     repeatSaving = false;
@@ -2396,7 +2422,7 @@ async function beginAddSubtask(parentItem, parentRow) {
         await loadData(true);
       }
     } catch (err) {
-      setBanner(`Не удалось добавить подзадачу: ${err.message || err}`);
+      await reportMutationError(err, 'Не удалось добавить подзадачу');
     } finally {
       addBusy = false;
     }
@@ -2623,7 +2649,8 @@ async function onAuthClick() {
     renderAll();
   } catch (err) {
     const msg = err && err.message ? String(err.message) : String(err);
-    setBanner(msg.indexOf('Сессия Google') === 0 ? msg : `OAuth: ${msg}`);
+    setBanner(isGoogleSessionError(err) ? msg : `OAuth: ${msg}`);
+    if (isGoogleSessionError(err)) await loadData(true);
   } finally {
     addBusy = false;
   }
