@@ -9,6 +9,63 @@ const { loadEnvFile, readJson, writeSecretJson, dataPath, hasGoogleCredentials }
 const SCOPES = ['https://www.googleapis.com/auth/tasks'];
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
+/** Shown in the widget when Google rejects / revokes the refresh token. */
+const INVALID_GRANT_USER_MESSAGE =
+  'Сессия Google истекла или отозвана. Войдите в Google снова. Возможно, сменили пароль, отозвали доступ или проверьте Client ID.';
+
+/**
+ * Detect OAuth grant failures (expired/revoked refresh token, wrong client, etc.).
+ * Does not log or return secrets — only boolean / safe codes.
+ * @param {unknown} err
+ */
+function isInvalidGrantError(err) {
+  if (!err || typeof err !== 'object') {
+    return typeof err === 'string' && /\binvalid_grant\b/i.test(err);
+  }
+  const e = /** @type {Record<string, any>} */ (err);
+  const data = e.response && e.response.data;
+  const errorCode = String(
+    (data && data.error) || e.error || e.code || ''
+  ).toLowerCase();
+  if (
+    errorCode === 'invalid_grant' ||
+    errorCode === 'invalid_token' ||
+    errorCode === 'invalid_rapt'
+  ) {
+    return true;
+  }
+  const msg = String(e.message || '');
+  if (/\binvalid_grant\b/i.test(msg)) return true;
+  if (/token has been expired or revoked/i.test(msg)) return true;
+  if (data && typeof data.error_description === 'string') {
+    const desc = data.error_description;
+    if (/\binvalid_grant\b/i.test(desc)) return true;
+    if (/expired or revoked/i.test(desc)) return true;
+  }
+  return false;
+}
+
+/**
+ * Map Google OAuth / API auth errors to a safe user-facing Error.
+ * Clears saved tokens on invalid_grant so the UI can show «Google» login again.
+ * @param {unknown} err
+ * @returns {Error}
+ */
+function normalizeGoogleAuthError(err) {
+  if (isInvalidGrantError(err)) {
+    try {
+      clearTokens();
+    } catch {
+      /* ignore */
+    }
+    const out = new Error(INVALID_GRANT_USER_MESSAGE);
+    out.code = 'invalid_grant';
+    return out;
+  }
+  if (err instanceof Error) return err;
+  return new Error(err && /** @type {any} */ (err).message ? String(/** @type {any} */ (err).message) : String(err));
+}
+
 /** Lazy-load heavy googleapis only when OAuth is needed. */
 function getGoogle() {
   return require('googleapis').google;
@@ -197,9 +254,10 @@ function interactiveLogin(oauth2, port) {
         );
         finish(null, oauth2);
       } catch (e) {
+        const mapped = normalizeGoogleAuthError(e);
         res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end(String(e.message || e));
-        finish(e);
+        res.end(mapped.message);
+        finish(mapped);
       }
     });
 
@@ -219,8 +277,11 @@ function interactiveLogin(oauth2, port) {
 
 module.exports = {
   SCOPES,
+  INVALID_GRANT_USER_MESSAGE,
   getAuthorizedClient,
   hasGoogleCredentials,
   clearTokens,
   loadSavedTokens,
+  isInvalidGrantError,
+  normalizeGoogleAuthError,
 };

@@ -1356,7 +1356,10 @@ function renderAll() {
   } else if (state.mode === 'mock') {
     banner = 'Демо-режим: UI на mock-данных. Подключите Google в настройках (Google API ключи).';
   } else if (state.mode === 'needs_auth') {
-    banner = 'Учётные данные есть — нажмите Google для входа.';
+    banner =
+      state.message ||
+      state.warning ||
+      'Учётные данные есть — нажмите Google для входа.';
   } else if (state.warning) {
     banner = `Предупреждение: ${state.warning}`;
   } else if (state.mode === 'google') {
@@ -2619,7 +2622,8 @@ async function onAuthClick() {
     }
     renderAll();
   } catch (err) {
-    setBanner(`OAuth: ${err.message || err}`);
+    const msg = err && err.message ? String(err.message) : String(err);
+    setBanner(msg.indexOf('Сессия Google') === 0 ? msg : `OAuth: ${msg}`);
   } finally {
     addBusy = false;
   }

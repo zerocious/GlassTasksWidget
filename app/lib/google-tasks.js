@@ -1,6 +1,10 @@
 'use strict';
 
-const { getAuthorizedClient } = require('./google-auth');
+const {
+  getAuthorizedClient,
+  isInvalidGrantError,
+  normalizeGoogleAuthError,
+} = require('./google-auth');
 const {
   enrichHabits,
   markCompleted,
@@ -45,6 +49,11 @@ let payloadCache = null;
 const mutationInFlight = new Map();
 /** @type {Promise<any> | null} */
 let habitsResetInFlight = null;
+
+/** Re-throw Google API failures with a user-safe Russian message when needed. */
+function rejectGoogleAuth(err) {
+  throw normalizeGoogleAuthError(err);
+}
 
 /** Lazy-load heavy googleapis only on first Google API use. */
 function getGoogle() {
@@ -854,9 +863,14 @@ async function resetCompletedHabitsForNewDay() {
       invalidatePayloadCache();
       return { ok: true, reset: true, mode: 'google', count: items.length };
     } catch (err) {
-      const msg = err && err.message ? err.message : String(err);
-      console.warn('[habits-reset]', msg);
-      return { ok: false, reset: false, reason: 'error', message: msg };
+      const mapped = normalizeGoogleAuthError(err);
+      console.warn('[habits-reset]', mapped.message);
+      return {
+        ok: false,
+        reset: false,
+        reason: isInvalidGrantError(err) ? 'auth' : 'error',
+        message: mapped.message,
+      };
     }
   })().finally(() => {
     habitsResetInFlight = null;
@@ -892,8 +906,23 @@ async function getWidgetDataUncached(force) {
   try {
     return await fetchLivePayload(config);
   } catch (err) {
-    console.error('Google Tasks fetch failed:', err.message);
-    const offline = offlineFromCache(config, err.message);
+    const mapped = normalizeGoogleAuthError(err);
+    console.error('Google Tasks fetch failed:', mapped.message);
+    if (isInvalidGrantError(err) || mapped.code === 'invalid_grant') {
+      invalidateListCache();
+      invalidatePayloadCache();
+      return {
+        mode: 'needs_auth',
+        tasksListName: config.tasksListName,
+        habitsListName: config.habitsListName,
+        accentColor: config.accentColor,
+        tasks: [],
+        habits: [],
+        offline: false,
+        message: mapped.message,
+      };
+    }
+    const offline = offlineFromCache(config, mapped.message);
     if (offline) {
       setPayloadCache(offline);
       return offline;
@@ -908,7 +937,7 @@ async function getWidgetDataUncached(force) {
       tasks: [],
       habits: [],
       offline: true,
-      warning: err.message || 'Нет сети и нет локального кэша',
+      warning: mapped.message || 'Нет сети и нет локального кэша',
     };
   }
 }
@@ -940,8 +969,12 @@ async function loginGoogle() {
   }
   invalidateListCache();
   invalidatePayloadCache();
-  await getAuthorizedClient({ interactive: true });
-  return fetchLivePayload(config);
+  try {
+    await getAuthorizedClient({ interactive: true });
+    return await fetchLivePayload(config);
+  } catch (err) {
+    throw normalizeGoogleAuthError(err);
+  }
 }
 
 /**
@@ -1158,7 +1191,9 @@ async function setTaskCompleted(listKind, taskId, completed) {
       rescheduled: reschedule,
       item: { id: taskId, ...itemPatch },
     };
-  })().finally(() => {
+  })()
+    .catch(rejectGoogleAuth)
+    .finally(() => {
     mutationInFlight.delete(flightKey);
   });
 
@@ -1237,7 +1272,9 @@ async function createItem(listKind, title, opts = {}) {
     }
 
     return { ok: true, mode: 'google', item: mapped };
-  })().finally(() => {
+  })()
+    .catch(rejectGoogleAuth)
+    .finally(() => {
     mutationInFlight.delete(flightKey);
   });
 
@@ -1435,7 +1472,9 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     patchPayloadCache(listKind, taskId, itemPatch);
 
     return { ok: true, mode: 'google', item: { id: taskId, ...itemPatch } };
-  })().finally(() => {
+  })()
+    .catch(rejectGoogleAuth)
+    .finally(() => {
     mutationInFlight.delete(flightKey);
   });
 
@@ -1482,7 +1521,9 @@ async function deleteItem(listKind, taskId) {
     patchPayloadCache(listKind, taskId, null);
 
     return { ok: true, mode: 'google' };
-  })().finally(() => {
+  })()
+    .catch(rejectGoogleAuth)
+    .finally(() => {
     mutationInFlight.delete(flightKey);
   });
 
@@ -1608,7 +1649,9 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
       orderedIds: ids,
       item: movedPatch,
     };
-  })().finally(() => {
+  })()
+    .catch(rejectGoogleAuth)
+    .finally(() => {
     mutationInFlight.delete(flightKey);
   });
 
