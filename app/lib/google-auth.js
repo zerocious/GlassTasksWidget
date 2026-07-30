@@ -9,13 +9,38 @@ const { loadEnvFile, readJson, writeSecretJson, dataPath, hasGoogleCredentials }
 const SCOPES = ['https://www.googleapis.com/auth/tasks'];
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
+/** Stable Error.code for revoked / expired Google refresh tokens. */
+const INVALID_GRANT_CODE = 'invalid_grant';
+
 /** Shown in the widget when Google rejects / revokes the refresh token. */
 const INVALID_GRANT_USER_MESSAGE =
   'Сессия Google истекла или отозвана. Войдите в Google снова. Возможно, сменили пароль, отозвали доступ или проверьте Client ID.';
 
 /**
- * Detect OAuth grant failures (expired/revoked refresh token, wrong client, etc.).
+ * Prefer OAuth token-endpoint / JSON body codes over Node errno or HTTP status.
+ * @param {Record<string, any>} e
+ * @returns {string}
+ */
+function oauthErrorCode(e) {
+  const data = e.response && e.response.data;
+  if (data && data.error != null && data.error !== '') {
+    return String(data.error).toLowerCase();
+  }
+  if (e.error != null && e.error !== '') {
+    return String(e.error).toLowerCase();
+  }
+  // google-auth-library sometimes sets string codes; ignore numeric HTTP statuses / errno.
+  if (typeof e.code === 'string' && !/^\d+$/.test(e.code)) {
+    return e.code.toLowerCase();
+  }
+  return '';
+}
+
+/**
+ * Detect OAuth grant failures (expired/revoked refresh token, RAPT reauth, etc.).
  * Does not log or return secrets — only boolean / safe codes.
+ * Deliberately ignores bare `invalid_token` (often a transient access token) so we
+ * do not wipe a still-valid refresh token.
  * @param {unknown} err
  */
 function isInvalidGrantError(err) {
@@ -23,20 +48,17 @@ function isInvalidGrantError(err) {
     return typeof err === 'string' && /\binvalid_grant\b/i.test(err);
   }
   const e = /** @type {Record<string, any>} */ (err);
-  const data = e.response && e.response.data;
-  const errorCode = String(
-    (data && data.error) || e.error || e.code || ''
-  ).toLowerCase();
-  if (
-    errorCode === 'invalid_grant' ||
-    errorCode === 'invalid_token' ||
-    errorCode === 'invalid_rapt'
-  ) {
+  if (e.code === INVALID_GRANT_CODE && e.message === INVALID_GRANT_USER_MESSAGE) {
+    return true;
+  }
+  const errorCode = oauthErrorCode(e);
+  if (errorCode === 'invalid_grant' || errorCode === 'invalid_rapt') {
     return true;
   }
   const msg = String(e.message || '');
   if (/\binvalid_grant\b/i.test(msg)) return true;
   if (/token has been expired or revoked/i.test(msg)) return true;
+  const data = e.response && e.response.data;
   if (data && typeof data.error_description === 'string') {
     const desc = data.error_description;
     if (/\binvalid_grant\b/i.test(desc)) return true;
@@ -52,6 +74,18 @@ function isInvalidGrantError(err) {
  * @returns {Error}
  */
 function normalizeGoogleAuthError(err) {
+  if (
+    err &&
+    typeof err === 'object' &&
+    /** @type {any} */ (err).code === INVALID_GRANT_CODE &&
+    /** @type {any} */ (err).message === INVALID_GRANT_USER_MESSAGE
+  ) {
+    return err instanceof Error
+      ? err
+      : Object.assign(new Error(INVALID_GRANT_USER_MESSAGE), {
+          code: INVALID_GRANT_CODE,
+        });
+  }
   if (isInvalidGrantError(err)) {
     try {
       clearTokens();
@@ -59,11 +93,15 @@ function normalizeGoogleAuthError(err) {
       /* ignore */
     }
     const out = new Error(INVALID_GRANT_USER_MESSAGE);
-    out.code = 'invalid_grant';
+    out.code = INVALID_GRANT_CODE;
     return out;
   }
   if (err instanceof Error) return err;
-  return new Error(err && /** @type {any} */ (err).message ? String(/** @type {any} */ (err).message) : String(err));
+  return new Error(
+    err && /** @type {any} */ (err).message
+      ? String(/** @type {any} */ (err).message)
+      : String(err)
+  );
 }
 
 /** Lazy-load heavy googleapis only when OAuth is needed. */
@@ -255,8 +293,11 @@ function interactiveLogin(oauth2, port) {
         finish(null, oauth2);
       } catch (e) {
         const mapped = normalizeGoogleAuthError(e);
-        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end(mapped.message);
+        // Localhost callback only — still escape so odd provider text cannot inject HTML.
+        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(
+          `<h1>Ошибка OAuth</h1><p>${escapeHtml(mapped.message)}</p>`
+        );
         finish(mapped);
       }
     });
@@ -277,6 +318,7 @@ function interactiveLogin(oauth2, port) {
 
 module.exports = {
   SCOPES,
+  INVALID_GRANT_CODE,
   INVALID_GRANT_USER_MESSAGE,
   getAuthorizedClient,
   hasGoogleCredentials,
