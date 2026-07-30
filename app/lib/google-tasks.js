@@ -4,6 +4,8 @@ const {
   getAuthorizedClient,
   isInvalidGrantError,
   normalizeGoogleAuthError,
+  INVALID_GRANT_CODE,
+  INVALID_GRANT_USER_MESSAGE,
 } = require('./google-auth');
 const {
   enrichHabits,
@@ -50,9 +52,24 @@ const mutationInFlight = new Map();
 /** @type {Promise<any> | null} */
 let habitsResetInFlight = null;
 
+/**
+ * Normalize Google auth failures and drop warm caches when the session is dead
+ * so callers do not keep serving mode:"google" after tokens were cleared.
+ * @param {unknown} err
+ * @returns {Error}
+ */
+function mapGoogleAuthFailure(err) {
+  const mapped = normalizeGoogleAuthError(err);
+  if (mapped.code === INVALID_GRANT_CODE || isInvalidGrantError(err)) {
+    invalidateListCache();
+    invalidatePayloadCache();
+  }
+  return mapped;
+}
+
 /** Re-throw Google API failures with a user-safe Russian message when needed. */
 function rejectGoogleAuth(err) {
-  throw normalizeGoogleAuthError(err);
+  throw mapGoogleAuthFailure(err);
 }
 
 /** Lazy-load heavy googleapis only on first Google API use. */
@@ -863,12 +880,12 @@ async function resetCompletedHabitsForNewDay() {
       invalidatePayloadCache();
       return { ok: true, reset: true, mode: 'google', count: items.length };
     } catch (err) {
-      const mapped = normalizeGoogleAuthError(err);
+      const mapped = mapGoogleAuthFailure(err);
       console.warn('[habits-reset]', mapped.message);
       return {
         ok: false,
         reset: false,
-        reason: isInvalidGrantError(err) ? 'auth' : 'error',
+        reason: mapped.code === INVALID_GRANT_CODE ? 'auth' : 'error',
         message: mapped.message,
       };
     }
@@ -881,13 +898,35 @@ async function resetCompletedHabitsForNewDay() {
 
 async function getWidgetDataUncached(force) {
   // Day rollover before serving data so habits aren't stuck completed in Google.
+  /** @type {{ ok?: boolean, reason?: string, message?: string } | null} */
+  let resetResult = null;
   try {
-    await resetCompletedHabitsForNewDay();
+    resetResult = await resetCompletedHabitsForNewDay();
   } catch (err) {
     console.warn(
       '[habits-reset]',
       err && err.message ? err.message : err
     );
+  }
+
+  // Habits reset may have cleared revoked tokens — surface needs_auth instead of
+  // returning a warm google payload from before the grant died.
+  if (
+    resetResult &&
+    resetResult.reason === 'auth' &&
+    resetResult.message === INVALID_GRANT_USER_MESSAGE
+  ) {
+    const config = loadConfig();
+    return {
+      mode: 'needs_auth',
+      tasksListName: config.tasksListName,
+      habitsListName: config.habitsListName,
+      accentColor: config.accentColor,
+      tasks: [],
+      habits: [],
+      offline: false,
+      message: resetResult.message,
+    };
   }
 
   if (!force) {
@@ -906,11 +945,9 @@ async function getWidgetDataUncached(force) {
   try {
     return await fetchLivePayload(config);
   } catch (err) {
-    const mapped = normalizeGoogleAuthError(err);
+    const mapped = mapGoogleAuthFailure(err);
     console.error('Google Tasks fetch failed:', mapped.message);
-    if (isInvalidGrantError(err) || mapped.code === 'invalid_grant') {
-      invalidateListCache();
-      invalidatePayloadCache();
+    if (mapped.code === INVALID_GRANT_CODE) {
       return {
         mode: 'needs_auth',
         tasksListName: config.tasksListName,
@@ -969,11 +1006,24 @@ async function loginGoogle() {
   }
   invalidateListCache();
   invalidatePayloadCache();
-  try {
+
+  const run = async () => {
     await getAuthorizedClient({ interactive: true });
-    return await fetchLivePayload(config);
+    return fetchLivePayload(config);
+  };
+
+  try {
+    return await run();
   } catch (err) {
-    throw normalizeGoogleAuthError(err);
+    const mapped = mapGoogleAuthFailure(err);
+    // Saved refresh token was revoked: first attempt used it without opening the
+    // browser. Tokens are cleared now — retry once so the user gets a fresh consent.
+    if (mapped.code !== INVALID_GRANT_CODE) throw mapped;
+    try {
+      return await run();
+    } catch (err2) {
+      throw mapGoogleAuthFailure(err2);
+    }
   }
 }
 
