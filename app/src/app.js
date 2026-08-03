@@ -531,7 +531,10 @@ function syncSettingsChrome(open) {
 function showSettingsSection(section, opts = {}) {
   settingsSection = section && SETTINGS_SECTIONS[section] ? section : null;
 
-  if (settingsHome) settingsHome.hidden = Boolean(settingsSection);
+  if (settingsHome) {
+    settingsHome.hidden = Boolean(settingsSection);
+    if (!settingsSection) settingsHome.scrollTop = 0;
+  }
   if (settingsSectionPanels) settingsSectionPanels.hidden = !settingsSection;
   if (btnSettingsBack) btnSettingsBack.hidden = !settingsSection;
   if (settingsPageTitle) {
@@ -542,7 +545,9 @@ function showSettingsSection(section, opts = {}) {
 
   document.querySelectorAll('.settings-section-panel').forEach((panel) => {
     const id = panel.getAttribute('data-settings-panel');
-    panel.hidden = !(settingsSection && id === settingsSection);
+    const show = Boolean(settingsSection && id === settingsSection);
+    panel.hidden = !show;
+    if (show) panel.scrollTop = 0;
   });
 
   if (opts.focus) {

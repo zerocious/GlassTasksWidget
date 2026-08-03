@@ -239,10 +239,21 @@
           </div>
 
           <div class="settings-section-panel" id="settings-section-google" data-settings-panel="google" hidden>
-            <p class="settings-hint">
-              OAuth-клиент Desktop из Google Cloud: Client ID и Client Secret.
-              Вход — кнопкой Google внизу виджета.
-            </p>
+            <div class="settings-guide" aria-label="Как подключить Google Tasks">
+              <div class="settings-guide-title">Как подключить</div>
+              <ol class="settings-guide-steps">
+                <li>В <strong>Google Cloud Console</strong> включите <strong>Google Tasks API</strong>.</li>
+                <li>Создайте OAuth-клиент типа <strong>Desktop</strong> и скопируйте Client ID и Client Secret.</li>
+                <li>Если приложение в статусе <strong>Testing</strong> — добавьте свой Google-аккаунт в <strong>Test users</strong>.</li>
+                <li>В Google Tasks создайте списки <strong>Tasks</strong> и <strong>Habits</strong> (имена как в конфиге).</li>
+                <li>Нажмите <strong>Google API ключи</strong> ниже, вставьте ID и Secret, сохраните.</li>
+                <li>Внизу виджета нажмите <strong>Google</strong> и разрешите доступ.</li>
+              </ol>
+              <p class="settings-hint">
+                Redirect обычно не нужен для Desktop. Loopback по умолчанию:
+                <code class="settings-code">http://127.0.0.1:42813/oauth2callback</code>
+              </p>
+            </div>
             <div class="settings-row">
               <span class="settings-label">Google API</span>
               <button type="button" class="settings-link-btn" id="btnGoogleKeys">Google API ключи</button>
