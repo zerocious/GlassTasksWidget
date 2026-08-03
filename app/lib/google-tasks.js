@@ -35,6 +35,9 @@ const {
 const MAX_TITLE_LEN = 200;
 const MAX_NOTES_LEN = 8000;
 
+// Pre-compiled regex for line splitting (avoid re-compilation on every call)
+const LINE_SPLIT_RE = /\r?\n/;
+
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000;
 /** Soft TTL for in-memory widget payload — avoids double network on rapid IPC. */
 const PAYLOAD_CACHE_TTL_MS = 45 * 1000;
@@ -49,15 +52,19 @@ let payloadCache = null;
 const mutationInFlight = new Map();
 /** @type {Promise<any> | null} */
 let habitsResetInFlight = null;
+/** @type {any | null} */
+let googleCache = null;
 
 /** Re-throw Google API failures with a user-safe Russian message when needed. */
 function rejectGoogleAuth(err) {
   throw normalizeGoogleAuthError(err);
 }
 
-/** Lazy-load heavy googleapis only on first Google API use. */
+/** Lazy-load heavy googleapis only on first Google API use (cached). */
 function getGoogle() {
-  return require('googleapis').google;
+  if (googleCache) return googleCache;
+  googleCache = require('googleapis').google;
+  return googleCache;
 }
 
 function localDateKey(date = new Date()) {
@@ -125,7 +132,7 @@ const REPEAT_BADGE = {
 };
 
 function isManagedNotesLine(line) {
-  const t = String(line || '').trim();
+  const t = String(line).trim();
   return Boolean(t) && (MANAGED_TIME_LINE_RE.test(t) || MANAGED_REPEAT_LINE_RE.test(t));
 }
 
@@ -135,11 +142,14 @@ function isManagedNotesLine(line) {
  */
 function parseRecurrence(notes) {
   if (!notes) return null;
-  for (const raw of String(notes).split(/\r?\n/)) {
-    const m = String(raw).trim().match(MANAGED_REPEAT_LINE_RE);
+  const lines = String(notes).split(LINE_SPLIT_RE);
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const m = MANAGED_REPEAT_LINE_RE.exec(raw);
     if (!m) continue;
-    const key = String(m[1] || '').toLowerCase();
-    return REPEAT_ALIAS[key] || null;
+    const key = m[1] || '';
+    const lowerKey = key.toLowerCase();
+    return REPEAT_ALIAS[lowerKey] || null;
   }
   return null;
 }
@@ -163,8 +173,8 @@ function normalizeRecurrenceInput(value) {
  * @param {'daily' | 'weekdays' | 'weekly' | null} recurrence
  */
 function applyRecurrenceToNotes(notes, recurrence) {
-  const lines = String(notes || '').split(/\r?\n/);
-  const kept = lines.filter((line) => !MANAGED_REPEAT_LINE_RE.test(String(line).trim()));
+  const lines = String(notes || '').split(LINE_SPLIT_RE);
+  const kept = lines.filter((line) => !MANAGED_REPEAT_LINE_RE.test(line.trim()));
   let rest = kept.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
   if (!recurrence) return rest;
   const marker = REPEAT_MARKER[recurrence];
@@ -236,7 +246,7 @@ function formatMeta(task) {
   if (task.notes && String(task.notes).trim()) {
     const line = String(task.notes)
       .trim()
-      .split(/\r?\n/)
+      .split(LINE_SPLIT_RE)
       .map((l) => l.trim())
       .find((l) => l && !isManagedNotesLine(l));
     if (line) return line.length > 40 ? `${line.slice(0, 37)}…` : line;
@@ -268,16 +278,16 @@ function normalizeDueTimeInput(value) {
  * @param {string | null} dueTime HH:MM or null to clear
  */
 function applyDueTimeToNotes(notes, dueTime) {
-  const lines = String(notes || '').split(/\r?\n/);
-  const kept = lines.filter((line) => !MANAGED_TIME_LINE_RE.test(String(line).trim()));
+  const lines = String(notes || '').split(LINE_SPLIT_RE);
+  const kept = lines.filter((line) => !MANAGED_TIME_LINE_RE.test(line.trim()));
   let rest = kept.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
 
   if (dueTime == null || dueTime === '') {
     // Drop standalone time-only lines so Clear fully removes resolvable time.
     rest = rest
-      .split(/\r?\n/)
+      .split(LINE_SPLIT_RE)
       .filter((line) => {
-        const t = String(line).trim();
+        const t = line.trim();
         if (!t) return true;
         if (/^(?:в|at)\s+\d{1,2}[:.]\d{2}$/i.test(t)) return false;
         if (/^\d{1,2}:\d{2}$/.test(t)) return false;

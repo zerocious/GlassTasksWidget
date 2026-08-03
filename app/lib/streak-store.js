@@ -79,18 +79,34 @@ function unmarkCompleted(habitId, isoDate = todayIso()) {
 
 /**
  * Consecutive days ending today or yesterday (if today not done yet, streak can still count yesterday).
+ * Optimized: iterate backwards through sorted dates array instead of while+Set.
  * @param {string[]} dates sorted ascending unique
  * @param {string} today
  */
 function computeStreak(dates, today = todayIso()) {
-  const set = new Set(dates);
-  let cursor = set.has(today) ? today : addDaysIso(today, -1);
-  if (!set.has(cursor)) return 0;
-  let streak = 0;
-  while (set.has(cursor)) {
-    streak += 1;
-    cursor = addDaysIso(cursor, -1);
+  if (!dates || dates.length === 0) return 0;
+  
+  const len = dates.length;
+  const lastDate = dates[len - 1];
+  
+  // Если последняя дата не сегодня и не вчера — стрик прерван
+  const yesterday = addDaysIso(today, -1);
+  if (lastDate !== today && lastDate !== yesterday) return 0;
+  
+  let cursor = lastDate;
+  let streak = 1;
+  
+  // Идем назад по массиву, проверяя непрерывность
+  for (let i = len - 2; i >= 0; i--) {
+    const expectedPrev = addDaysIso(cursor, -1);
+    if (dates[i] === expectedPrev) {
+      streak++;
+      cursor = dates[i];
+    } else {
+      break;
+    }
   }
+  
   return streak;
 }
 
