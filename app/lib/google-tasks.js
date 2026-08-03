@@ -132,7 +132,7 @@ const REPEAT_BADGE = {
 };
 
 function isManagedNotesLine(line) {
-  const t = String(line).trim();
+  const t = String(line || '').trim();
   return Boolean(t) && (MANAGED_TIME_LINE_RE.test(t) || MANAGED_REPEAT_LINE_RE.test(t));
 }
 
@@ -144,12 +144,12 @@ function parseRecurrence(notes) {
   if (!notes) return null;
   const lines = String(notes).split(LINE_SPLIT_RE);
   for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    const m = MANAGED_REPEAT_LINE_RE.exec(raw);
+    const t = String(lines[i] || '').trim();
+    if (!t) continue;
+    const m = t.match(MANAGED_REPEAT_LINE_RE);
     if (!m) continue;
-    const key = m[1] || '';
-    const lowerKey = key.toLowerCase();
-    return REPEAT_ALIAS[lowerKey] || null;
+    const key = String(m[1] || '').toLowerCase();
+    return REPEAT_ALIAS[key] || null;
   }
   return null;
 }
