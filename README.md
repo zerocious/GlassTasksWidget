@@ -37,16 +37,27 @@ npm run pack    # app\dist\win-unpacked\ + ярлык
 | `npm run dist` / `npm run build:win` | NSIS-установщик + автоярлык |
 | `npm run pack` / `npm run pack:desktop` | `win-unpacked/` + автоярлык |
 | `npm run shortcut` | Только обновить ярлык |
+| `npm test` | Юнит-тесты (`node:test`, папка `app/test/`) |
+| `npm run lint` | ESLint |
+
+Чтобы запустить dev-сборку рядом с установленным виджетом (отдельные настройки, токены и single-instance lock), укажите отдельный профиль:
+
+```powershell
+$env:GT_USER_DATA_DIR = "$env:TEMP\gt-dev"
+npm start
+```
+
+Dev-запуск не перезаписывает существующие ярлыки «Glass Tasks Widget».
 
 ## Первый запуск (Google)
 
 Ручной `.env` **не нужен** для обычных пользователей.
 
 1. При старте без ключей — онбординг: **Client ID / Secret** (опционально порт redirect) или **«Продолжить в демо»**.
-2. Ключи сохраняются в `%APPDATA%\glass-tasks-widget\.env` и `data\credentials.json`.
+2. Ключи сохраняются в `data\credentials.json`, зашифрованными через Electron `safeStorage` (DPAPI). `.env`, который писали старые версии, при первом запуске переносится туда и удаляется.
 3. Позже: Настройки → **Google API ключи**. Затем кнопка **Google** для OAuth.
 
-Разработчики по-прежнему могут скопировать `app/.env.example` → `.env`.
+Разработчики по-прежнему могут скопировать `app/.env.example` → `.env` (читаются только `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `OAUTH_REDIRECT_PORT`; ключи из `credentials.json` имеют приоритет).
 
 ## Возможности
 
@@ -112,24 +123,25 @@ npm run pack    # app\dist\win-unpacked\ + ярлык
    Для Desktop обычно ничего дописывать не нужно; для Web-клиента — точный URI в Authorized redirect URIs.
 5. В Google Tasks создайте списки с именами из `app/config.json` (по умолчанию `Tasks`, `Habits`).
 
-OAuth: **state** + **PKCE (S256)**.
+OAuth: **state** + **PKCE (S256)**. Refresh-токен хранится зашифрованным; «Выйти» отзывает его в Google.
 
 ## Где лежат данные
 
 | Что | Dev | Установка / Electron |
 |-----|-----|----------------------|
-| `.env` (ключи) | `%APPDATA%\glass-tasks-widget\.env` (или `app/.env`) | `%APPDATA%\glass-tasks-widget\.env` |
+| `.env` (необязательно, для разработки) | `app/.env` или `%APPDATA%\glass-tasks-widget\.env` | — |
 | credentials, tokens, streaks, reminders, offline-cache, settings | `app/data/` | `%APPDATA%\glass-tasks-widget\data\` |
 
-Типичные файлы: `tokens.json`, `streaks.json`, `reminders.json`, `offline-cache.json`, `settings.json`, `credentials.json`.
+Типичные файлы: `tokens.json`, `streaks.json`, `reminders.json`, `offline-cache.json`, `settings.json`, `credentials.json`. `tokens.json` и `credentials.json` зашифрованы. Все файлы пишутся атомарно (временный файл, затем переименование). Повреждённый JSON не перезаписывается молча, а переименовывается в `*.corrupt-<время>`.
 
 ## Структура
 
 ```
 GlassTasksWidget/
   app/
-    electron/   # main, preload, tray, hotkeys, reminders
-    lib/        # Google, streaks, settings, mock, offline, wallpaper, reminders
+    electron/   # main (окно, трей, IPC), notifications, reminders, updater, preload
+    lib/        # Google API, task-parse (время/повторы), list-ops, dates, streaks, settings, mock, offline, wallpaper
+    test/       # node:test
     src/        # UI + Geist Mono fonts
     build/      # icon
     dist/       # вывод сборки
