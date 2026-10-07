@@ -152,31 +152,15 @@ function saveSettings(patch) {
   const current = loadSettings();
   const next = normalizeSettings({ ...current, ...patch });
 
-  // Skip disk write when nothing meaningful changed (e.g. same pos after snap)
-  if (
-    next.theme === current.theme &&
-    next.size === current.size &&
-    next.autostart === current.autostart &&
-    next.snapToEdge === current.snapToEdge &&
-    next.autoPalette === current.autoPalette &&
-    next.accentColor === current.accentColor &&
-    next.bgOpacity === current.bgOpacity &&
-    next.remindersEnabled === current.remindersEnabled &&
-    next.dailyHabitsReset === current.dailyHabitsReset &&
-    next.lastHabitsResetDate === current.lastHabitsResetDate &&
-    next.hideCompleted === current.hideCompleted &&
-    next.simpleAnimations === current.simpleAnimations &&
-    next.toggleHotkey === current.toggleHotkey &&
-    next.switchViewHotkey === current.switchViewHotkey &&
-    next.onboardingSkipped === current.onboardingSkipped &&
-    ((next.pos === null && current.pos === null) ||
-      (next.pos &&
-        current.pos &&
-        next.pos.x === current.pos.x &&
-        next.pos.y === current.pos.y))
-  ) {
-    return current;
-  }
+  // Skip disk write when nothing meaningful changed (e.g. same pos after snap).
+  // DEFAULTS lists every setting, so a new key can't be forgotten here.
+  const unchanged = Object.keys(DEFAULTS).every((key) =>
+    key === 'pos'
+      ? (next.pos === null && current.pos === null) ||
+        Boolean(next.pos && current.pos && next.pos.x === current.pos.x && next.pos.y === current.pos.y)
+      : next[key] === current[key]
+  );
+  if (unchanged) return current;
 
   writeJson(settingsFile(), next);
   settingsCache = next;
@@ -188,7 +172,6 @@ function getSizePreset(size) {
 }
 
 module.exports = {
-  DEFAULTS,
   DEFAULT_BG_OPACITY,
   BG_OPACITY_MIN,
   BG_OPACITY_MAX,

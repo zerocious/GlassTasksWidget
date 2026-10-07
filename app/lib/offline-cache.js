@@ -1,6 +1,7 @@
 'use strict';
 
 const { readJson, writeJson, dataPath } = require('./config');
+const { applyItemPatch, reorderList } = require('./list-ops');
 
 /** @type {object | null | undefined} undefined = not loaded yet */
 let memoryCache = undefined;
@@ -73,19 +74,7 @@ function patchOfflineCache(listKind, taskId, patch, append = null) {
   const cached = loadOfflineCache();
   if (!cached) return;
   const key = listKind === 'habits' ? 'habits' : 'tasks';
-  let list = Array.isArray(cached[key]) ? cached[key].slice() : [];
-  if (append) {
-    list = [append, ...list.filter((item) => item && item.id !== append.id)];
-  } else if (patch === null) {
-    // Cascade: Google deletes subtasks with their parent.
-    list = list.filter(
-      (item) => item && item.id !== taskId && item.parent !== taskId
-    );
-  } else {
-    list = list.map((item) =>
-      item && item.id === taskId ? { ...item, ...patch } : item
-    );
-  }
+  const list = applyItemPatch(cached[key], taskId, patch, append);
   saveOfflineCache({ ...cached, mode: 'google', [key]: list });
 }
 
@@ -99,26 +88,7 @@ function reorderOfflineCache(listKind, orderedIds, movedPatch = null) {
   const cached = loadOfflineCache();
   if (!cached || !Array.isArray(orderedIds) || !orderedIds.length) return;
   const key = listKind === 'habits' ? 'habits' : 'tasks';
-  const list = Array.isArray(cached[key]) ? cached[key] : [];
-  const byId = new Map();
-  for (const item of list) {
-    if (item && item.id) byId.set(item.id, item);
-  }
-  const next = [];
-  const seen = new Set();
-  for (const id of orderedIds) {
-    if (typeof id !== 'string' || !id || seen.has(id)) continue;
-    let item = byId.get(id);
-    if (!item) continue;
-    if (movedPatch && movedPatch.id === id) {
-      item = { ...item, ...movedPatch };
-    }
-    next.push(item);
-    seen.add(id);
-  }
-  for (const item of list) {
-    if (item && item.id && !seen.has(item.id)) next.push(item);
-  }
+  const next = reorderList(cached[key], orderedIds, movedPatch);
   saveOfflineCache({ ...cached, mode: 'google', [key]: next });
 }
 
