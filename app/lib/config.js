@@ -215,15 +215,47 @@ function readJson(filePath, fallback) {
   }
 }
 
-function writeJson(filePath, data) {
+/**
+ * Write via temp file + rename so a crash / power loss mid-write can't leave a
+ * truncated JSON (readJson would then silently fall back to defaults and wipe
+ * settings, streak history or tokens).
+ */
+function writeFileAtomic(filePath, text, options) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+  const tmp = `${filePath}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, text, options);
+    // Antivirus / indexer can briefly lock the target on Windows — retry the
+    // rename before giving up on atomicity.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        fs.renameSync(tmp, filePath);
+        return;
+      } catch (err) {
+        if (attempt >= 4 || !err || (err.code !== 'EPERM' && err.code !== 'EBUSY' && err.code !== 'EACCES')) {
+          throw err;
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15);
+      }
+    }
+  } catch {
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+    // Rename can fail on Windows if another process holds the target open.
+    fs.writeFileSync(filePath, text, options);
+  }
+}
+
+function writeJson(filePath, data) {
+  writeFileAtomic(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
 /** Like writeJson, but prefer owner-only file mode for secrets (tokens, credentials). */
 function writeSecretJson(filePath, data) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), {
+  writeFileAtomic(filePath, JSON.stringify(data, null, 2), {
     encoding: 'utf8',
     mode: 0o600,
   });

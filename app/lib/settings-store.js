@@ -5,6 +5,7 @@ const { readJson, writeJson, dataPath } = require('./config');
 /**
  * @typedef {'dark' | 'light'} Theme
  * @typedef {'normal' | 'compact'} WidgetSize
+ * @typedef {'geist' | 'system' | 'mono' | 'serif'} FontFamily
  * @typedef {{ x: number, y: number }} WindowPos
  * @typedef {{
  *   theme: Theme,
@@ -19,6 +20,7 @@ const { readJson, writeJson, dataPath } = require('./config');
  *   lastHabitsResetDate: string | null,
  *   hideCompleted: boolean,
  *   simpleAnimations: boolean,
+ *   fontFamily: FontFamily,
  *   pos: WindowPos | null,
  *   toggleHotkey: string,
  *   switchViewHotkey: string,
@@ -30,6 +32,10 @@ const { readJson, writeJson, dataPath } = require('./config');
 const DEFAULT_BG_OPACITY = 0.72;
 const BG_OPACITY_MIN = 0.2;
 const BG_OPACITY_MAX = 0.95;
+
+/** UI font presets — CSS maps each to a stack via html[data-font]. */
+const FONT_FAMILIES = ['geist', 'system', 'mono', 'serif'];
+const DEFAULT_FONT_FAMILY = 'geist';
 
 const DEFAULT_TOGGLE_HOTKEY = 'Control+Alt+W';
 const DEFAULT_SWITCH_HOTKEY = 'Control+Tab';
@@ -47,6 +53,7 @@ const DEFAULTS = /** @type {AppSettings} */ ({
   lastHabitsResetDate: null,
   hideCompleted: false,
   simpleAnimations: false,
+  fontFamily: DEFAULT_FONT_FAMILY,
   pos: null,
   toggleHotkey: DEFAULT_TOGGLE_HOTKEY,
   switchViewHotkey: DEFAULT_SWITCH_HOTKEY,
@@ -128,6 +135,7 @@ function normalizeSettings(raw) {
         : null,
     hideCompleted: Boolean(raw.hideCompleted),
     simpleAnimations: Boolean(raw.simpleAnimations),
+    fontFamily: FONT_FAMILIES.includes(raw.fontFamily) ? raw.fontFamily : DEFAULT_FONT_FAMILY,
     pos,
     toggleHotkey: normalizeHotkey(raw.toggleHotkey, DEFAULT_TOGGLE_HOTKEY),
     switchViewHotkey: normalizeHotkey(raw.switchViewHotkey, DEFAULT_SWITCH_HOTKEY),
@@ -166,6 +174,7 @@ function saveSettings(patch) {
     next.lastHabitsResetDate === current.lastHabitsResetDate &&
     next.hideCompleted === current.hideCompleted &&
     next.simpleAnimations === current.simpleAnimations &&
+    next.fontFamily === current.fontFamily &&
     next.toggleHotkey === current.toggleHotkey &&
     next.switchViewHotkey === current.switchViewHotkey &&
     next.onboardingSkipped === current.onboardingSkipped &&
@@ -194,6 +203,7 @@ module.exports = {
   BG_OPACITY_MAX,
   DEFAULT_TOGGLE_HOTKEY,
   DEFAULT_SWITCH_HOTKEY,
+  FONT_FAMILIES,
   SIZE_PRESETS,
   loadSettings,
   saveSettings,
