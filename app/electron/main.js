@@ -11,11 +11,9 @@ const {
   Menu,
   nativeImage,
   Notification,
-  dialog,
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { execSync, execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const { loadConfig, getGoogleCredentialsStatus, saveGoogleCredentials } = require('../lib/config');
 const {
@@ -29,7 +27,6 @@ const {
   invalidateListCache,
   invalidatePayloadCache,
   clearOfflineCache,
-  resolveTaskDueAt,
   resetCompletedHabitsForNewDay,
 } = require('../lib/google-tasks');
 const { revokeAndClearTokens, resetAuthClient } = require('../lib/google-auth');
@@ -41,13 +38,20 @@ const {
   DEFAULT_SWITCH_HOTKEY,
 } = require('../lib/settings-store');
 const { sampleWallpaperPalette } = require('../lib/wallpaper-palette');
-const { todayIso } = require('../lib/dates');
 const {
-  loadReminderState,
-  markNotified,
-  wasNotifiedToday,
-  clearNotifiedToday,
-} = require('../lib/reminder-store');
+  APP_USER_MODEL_ID,
+  configureNotifications,
+  windowsToastsGloballyEnabled,
+  ensureWindowsNotificationShortcut,
+} = require('./notifications');
+const {
+  configureReminders,
+  runReminderCheck,
+  syncRemindersScheduler,
+  stopRemindersScheduler,
+  refreshExactReminders,
+} = require('./reminders');
+const { setupAutoUpdater, checkForAppUpdates } = require('./updater');
 
 function credentialsPayload() {
   const status = getGoogleCredentialsStatus();
@@ -73,24 +77,8 @@ let applyingBounds = false;
 /** @type {boolean | null} */
 let trayMenuVisible = null;
 
-/** @type {ReturnType<typeof setInterval> | null} */
-let reminderInterval = null;
-/** @type {ReturnType<typeof setTimeout> | null} */
-let reminderStartupTimer = null;
-let reminderCheckInFlight = false;
-/** @type {Map<string, ReturnType<typeof setTimeout>>} */
-const exactReminderTimers = new Map();
 /** @type {ReturnType<typeof setTimeout> | null} */
 let habitsRolloverTimer = null;
-/** @type {boolean} */
-let updateCheckInFlight = false;
-
-const APP_USER_MODEL_ID = 'com.glasstasks.widget';
-const REMINDER_INTERVAL_MS = 45 * 60 * 1000;
-/** First check soon after launch so toasts are easy to verify; then every 45 min. */
-const REMINDER_STARTUP_DELAY_MS = 8 * 1000;
-/** Only schedule one-shot timers for due times within this horizon. */
-const EXACT_REMINDER_HORIZON_MS = 24 * 60 * 60 * 1000;
 
 // Windows toasts require a matching AppUserModelID before ready (and a Start Menu .lnk).
 if (process.platform === 'win32') {
@@ -100,36 +88,6 @@ if (process.platform === 'win32') {
 // Dev only: separate profile (tokens, settings, single-instance lock) from an installed widget.
 if (!app.isPackaged && process.env.GT_USER_DATA_DIR) {
   app.setPath('userData', path.resolve(process.env.GT_USER_DATA_DIR));
-}
-
-/**
- * HKCU PushNotifications\ToastEnabled — master switch in
- * Settings → System → Notifications. 0 blocks all Electron toasts.
- * @returns {boolean}
- */
-/** @type {{ value: boolean, at: number } | null} */
-let toastsEnabledCache = null;
-const TOASTS_ENABLED_TTL_MS = 30 * 1000;
-
-function windowsToastsGloballyEnabled() {
-  if (process.platform !== 'win32') return true;
-  // Synchronous `reg query` — cache it so bootstrap / settings IPC don't block every call.
-  if (toastsEnabledCache && Date.now() - toastsEnabledCache.at < TOASTS_ENABLED_TTL_MS) {
-    return toastsEnabledCache.value;
-  }
-  let value = true;
-  try {
-    const out = execSync(
-      'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications" /v ToastEnabled',
-      { encoding: 'utf8', windowsHide: true }
-    );
-    const m = out.match(/ToastEnabled\s+REG_DWORD\s+0x([0-9a-fA-F]+)/i);
-    if (m) value = parseInt(m[1], 16) !== 0;
-  } catch {
-    value = true;
-  }
-  toastsEnabledCache = { value, at: Date.now() };
-  return value;
 }
 
 // Minimal 16×16 accent PNG (glass-tasks red square with check hint)
@@ -533,341 +491,6 @@ function createWindow() {
 }
 
 /**
- * Ensure Start Menu + Desktop shortcuts carry AppUserModelID matching
- * app.setAppUserModelId — required for Windows Action Center toasts.
- * Always rewrite both so pack scripts / stale .lnk files cannot strip AUMID.
- */
-function ensureWindowsNotificationShortcut() {
-  if (process.platform !== 'win32') return;
-  try {
-    const startMenuDir = path.join(
-      app.getPath('appData'),
-      'Microsoft',
-      'Windows',
-      'Start Menu',
-      'Programs'
-    );
-    fs.mkdirSync(startMenuDir, { recursive: true });
-
-    const appRoot = path.resolve(__dirname, '..');
-    const target = process.execPath;
-    const cwd = app.isPackaged ? path.dirname(process.execPath) : appRoot;
-    const args = app.isPackaged ? '' : `"${appRoot}"`;
-
-    /** @type {Electron.ShortcutDetails} */
-    const details = {
-      target,
-      cwd,
-      args,
-      appUserModelId: APP_USER_MODEL_ID,
-      description: 'Glass Tasks Widget',
-      icon: process.execPath,
-      iconIndex: 0,
-    };
-
-    const startMenuLnk = path.join(startMenuDir, 'Glass Tasks Widget.lnk');
-    const desktopLnk = path.join(app.getPath('desktop'), 'Glass Tasks Widget.lnk');
-    for (const lnk of [startMenuLnk, desktopLnk]) {
-      const op = fs.existsSync(lnk) ? 'update' : 'create';
-      const ok = shell.writeShortcutLink(lnk, op, details);
-      if (!ok) console.warn('[reminders] shortcut write failed', lnk);
-    }
-  } catch (err) {
-    console.warn('[reminders] shortcut', err && err.message ? err.message : err);
-  }
-}
-
-/**
- * Collect actionable open items for the periodic sweep toast.
- * Timed tasks still in the future are skipped (exact timers handle them).
- * Timed tasks whose time already passed (today / overdue / notes+today) stay as safety net.
- * @param {any} data
- * @returns {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]}
- */
-function collectReminderCandidates(data) {
-  /** @type {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]} */
-  const out = [];
-  const now = Date.now();
-  const today = todayIso();
-  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
-  for (const t of tasks) {
-    if (!t || t.completed || !t.id) continue;
-    const dueAt = resolveTaskDueAt(t);
-    if (dueAt) {
-      if (dueAt.getTime() > now) continue; // exact timer pending
-      // Past timed: only if due calendar day is today or earlier (notes-only → today).
-      if (todayIso(dueAt) > today) continue;
-      out.push({
-        id: `task:${t.id}`,
-        kind: 'task',
-        title: String(t.title || 'Задача').trim() || 'Задача',
-        dueKind: 'overdue',
-        dueTime: t.dueTime || null,
-      });
-      continue;
-    }
-    if (t.dueKind !== 'today' && t.dueKind !== 'overdue') continue;
-    out.push({
-      id: `task:${t.id}`,
-      kind: 'task',
-      title: String(t.title || 'Задача').trim() || 'Задача',
-      dueKind: t.dueKind,
-      dueTime: t.dueTime || null,
-    });
-  }
-  const habits = Array.isArray(data?.habits) ? data.habits : [];
-  for (const h of habits) {
-    if (!h || h.completed || !h.id) continue;
-    out.push({
-      id: `habit:${h.id}`,
-      kind: 'habit',
-      title: String(h.title || 'Привычка').trim() || 'Привычка',
-    });
-  }
-  return out;
-}
-
-/**
- * Build Russian title/body for a reminder toast.
- * @param {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]} items
- */
-function formatReminderToast(items) {
-  const overdue = items.filter((i) => i.dueKind === 'overdue');
-  const today = items.filter((i) => i.dueKind === 'today');
-  const habits = items.filter((i) => i.kind === 'habit');
-  const parts = [];
-  if (overdue.length) parts.push(`просрочено: ${overdue.length}`);
-  if (today.length) parts.push(`на сегодня: ${today.length}`);
-  if (habits.length) parts.push(`привычки: ${habits.length}`);
-
-  const title =
-    overdue.length && !today.length && !habits.length
-      ? 'Просроченные задачи'
-      : habits.length && !overdue.length && !today.length
-        ? 'Привычки на сегодня'
-        : 'Напоминание Glass Tasks';
-
-  const names = items
-    .slice(0, 3)
-    .map((i) => {
-      const time = i.dueTime ? ` (${i.dueTime})` : '';
-      return `${i.title}${time}`;
-    })
-    .join(', ');
-  const more = items.length > 3 ? ` и ещё ${items.length - 3}` : '';
-  const body = parts.length
-    ? `${parts.join(' · ')}. ${names}${more}`
-    : `${names}${more}`;
-
-  return { title, body };
-}
-
-function clearExactReminderTimers() {
-  for (const timer of exactReminderTimers.values()) {
-    clearTimeout(timer);
-  }
-  exactReminderTimers.clear();
-}
-
-function stopRemindersScheduler() {
-  if (reminderStartupTimer) {
-    clearTimeout(reminderStartupTimer);
-    reminderStartupTimer = null;
-  }
-  if (reminderInterval) {
-    clearInterval(reminderInterval);
-    reminderInterval = null;
-  }
-  clearExactReminderTimers();
-}
-
-/**
- * Fire a one-shot exact-time toast for a single task.
- * Re-checks the task is still open so completed/deleted items stay silent.
- * @param {{ id: string, title: string, dueTime?: string | null }} task
- */
-async function fireExactTaskReminder(task) {
-  const reminderId = `task:${task.id}`;
-  if (isQuitting || !loadSettings().remindersEnabled) return;
-  if (wasNotifiedToday(reminderId)) return;
-  if (!Notification.isSupported()) return;
-
-  try {
-    const data = await getWidgetData();
-    if (isQuitting || !loadSettings().remindersEnabled) return;
-    const live = (Array.isArray(data?.tasks) ? data.tasks : []).find(
-      (t) => t && t.id === task.id
-    );
-    if (!live || live.completed) return;
-  } catch (err) {
-    console.warn('[reminders] exact recheck', err && err.message ? err.message : err);
-    // Fall through and notify — better a late toast than a missed one if fetch fails.
-  }
-
-  const time = task.dueTime || '';
-  const title = 'Пора';
-  const body = time
-    ? `Пора: ${task.title} (${time})`
-    : `Пора: ${task.title}`;
-  await showReminderToast(title, body, [reminderId]);
-}
-
-/**
- * Schedule one-shot timers for open tasks with a resolvable due datetime
- * within the next 24 hours. Cancels previous schedule.
- * @param {any} data
- */
-function scheduleExactReminders(data) {
-  clearExactReminderTimers();
-  if (isQuitting || !loadSettings().remindersEnabled) return;
-  if (!Notification.isSupported()) return;
-
-  const now = Date.now();
-  const horizon = now + EXACT_REMINDER_HORIZON_MS;
-  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
-  const state = loadReminderState();
-  const notified = new Set(state.notifiedIds);
-
-  /** @type {{ id: string, title: string, dueTime: string | null, dueAt: Date }[]} */
-  const upcoming = [];
-  for (const t of tasks) {
-    if (!t || t.completed || !t.id) continue;
-    const dueAt = resolveTaskDueAt(t);
-    if (!dueAt) continue;
-    const ts = dueAt.getTime();
-    if (ts <= now || ts > horizon) continue;
-    const reminderId = `task:${t.id}`;
-    if (notified.has(reminderId)) continue;
-    upcoming.push({
-      id: t.id,
-      title: String(t.title || 'Задача').trim() || 'Задача',
-      dueTime:
-        t.dueTime ||
-        `${String(dueAt.getHours()).padStart(2, '0')}:${String(dueAt.getMinutes()).padStart(2, '0')}`,
-      dueAt,
-    });
-  }
-
-  upcoming.sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
-
-  for (const item of upcoming) {
-    const delay = Math.max(0, item.dueAt.getTime() - Date.now());
-    const timer = setTimeout(() => {
-      exactReminderTimers.delete(item.id);
-      fireExactTaskReminder(item).catch((err) =>
-        console.warn('[reminders] exact', err && err.message ? err.message : err)
-      );
-    }, delay);
-    if (typeof timer.unref === 'function') timer.unref();
-    exactReminderTimers.set(item.id, timer);
-  }
-}
-
-/**
- * Refresh exact timers from current widget data (best-effort, non-blocking).
- * @param {any} [data]
- */
-function refreshExactReminders(data) {
-  if (!loadSettings().remindersEnabled || isQuitting) {
-    clearExactReminderTimers();
-    return;
-  }
-  if (data) {
-    scheduleExactReminders(data);
-    return;
-  }
-  getWidgetData()
-    .then((d) => scheduleExactReminders(d))
-    .catch((err) =>
-      console.warn('[reminders] reschedule', err && err.message ? err.message : err)
-    );
-}
-
-function reminderToastIconPath() {
-  const fileIcon = path.join(__dirname, '..', 'build', 'icon.png');
-  if (fs.existsSync(fileIcon)) return fileIcon;
-  return undefined;
-}
-
-function reminderToastIcon() {
-  const fileIcon = reminderToastIconPath();
-  if (fileIcon) {
-    try {
-      const img = nativeImage.createFromPath(fileIcon);
-      if (!img.isEmpty()) return img.resize({ width: 64, height: 64 });
-    } catch {
-      /* fall through */
-    }
-  }
-  try {
-    const fromExe = nativeImage.createFromPath(process.execPath);
-    if (!fromExe.isEmpty()) return fromExe.resize({ width: 64, height: 64 });
-  } catch {
-    /* ignore */
-  }
-  return undefined;
-}
-
-/**
- * Static WinRT toast script. Title, body and icon arrive only through environment
- * variables and are XML-escaped inside PowerShell — user text is never part of the code.
- */
-const WINRT_TOAST_PS = `
-[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-$t = [Security.SecurityElement]::Escape([string]$env:GT_TOAST_TITLE)
-$b = [Security.SecurityElement]::Escape([string]$env:GT_TOAST_BODY)
-$img = ''
-if ($env:GT_TOAST_ICON) { $img = '<image placement="appLogoOverride" src="' + [Security.SecurityElement]::Escape($env:GT_TOAST_ICON) + '" />' }
-$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml('<toast><visual><binding template="ToastGeneric">' + $img + '<text>' + $t + '</text><text>' + $b + '</text></binding></visual><audio src="ms-winsoundevent:Notification.Default"/></toast>')
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-$toast.Tag = 'glass-tasks-reminder'
-$toast.Group = 'glass-tasks'
-$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($env:GT_TOAST_AUMID)
-$n.Show($toast)
-`;
-
-/**
- * Native WinRT toast via PowerShell — fallback when Electron Notification fails.
- * Uses the same AppUserModelID so the toast lands under "Glass Tasks Widget"
- * in Action Center (requires Start Menu .lnk with matching AUMID).
- * @param {string} title
- * @param {string} body
- * @returns {Promise<boolean>}
- */
-function showNativeWinRtToast(title, body) {
-  if (process.platform !== 'win32') return Promise.resolve(false);
-  const iconPath = reminderToastIconPath();
-  const encoded = Buffer.from(WINRT_TOAST_PS, 'utf16le').toString('base64');
-  return new Promise((resolve) => {
-    execFile(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
-      {
-        windowsHide: true,
-        timeout: 8000,
-        env: {
-          ...process.env,
-          GT_TOAST_TITLE: String(title || '').slice(0, 120),
-          GT_TOAST_BODY: String(body || '').slice(0, 240),
-          GT_TOAST_ICON: iconPath ? pathToFileURL(iconPath).href : '',
-          GT_TOAST_AUMID: APP_USER_MODEL_ID,
-        },
-      },
-      (err) => {
-        if (err) {
-          console.warn('[reminders] winrt', err.message || err);
-          resolve(false);
-        } else {
-          resolve(true);
-        }
-      }
-    );
-  });
-}
-
-/**
  * Visible in-widget toast (fallback / secondary cue).
  * @param {string} title
  * @param {string} body
@@ -884,306 +507,6 @@ function pushInAppReminder(title, body, opts = {}) {
   } catch (err) {
     console.warn('[reminders] in-app', err && err.message ? err.message : err);
   }
-}
-
-/**
- * Tray balloon last-resort backup (not Action Center).
- * @param {string} title
- * @param {string} body
- */
-function showTrayBalloon(title, body) {
-  if (!tray || tray.isDestroyed()) return false;
-  try {
-    const icon = reminderToastIcon();
-    tray.displayBalloon({
-      title: String(title || 'Glass Tasks').slice(0, 63),
-      content: String(body || '').slice(0, 255),
-      icon,
-      iconType: icon ? 'custom' : 'info',
-    });
-    return true;
-  } catch (err) {
-    console.warn('[reminders] balloon', err && err.message ? err.message : err);
-    return false;
-  }
-}
-
-/**
- * Try Electron Notification (lands in Windows Action Center when AUMID + shortcut match).
- * @param {string} title
- * @param {string} body
- * @returns {Promise<{ shown: boolean, error?: string }>}
- */
-function tryElectronNotification(title, body) {
-  return new Promise((resolve) => {
-    if (!Notification.isSupported()) {
-      resolve({ shown: false, error: 'unsupported' });
-      return;
-    }
-
-    let settled = false;
-    /** @type {ReturnType<typeof setTimeout> | null} */
-    let fallback = null;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      if (fallback) {
-        clearTimeout(fallback);
-        fallback = null;
-      }
-      resolve(result);
-    };
-
-    try {
-      /** @type {Electron.NotificationConstructorOptions} */
-      const nOpts = {
-        title,
-        body,
-        silent: false,
-        timeoutType: 'default',
-      };
-      // Prefer file path — Windows uses shortcut icon when AUMID is registered;
-      // NativeImage icon can make some builds show the raw AUMID string.
-      const iconPath = reminderToastIconPath();
-      if (iconPath) nOpts.icon = iconPath;
-
-      const n = new Notification(nOpts);
-      n.on('click', () => {
-        if (isQuitting) return;
-        showWidget();
-        syncTrayMenu();
-      });
-      n.on('show', () => finish({ shown: true }));
-      n.on('failed', (_e, error) => {
-        const msg = error ? String(error) : 'failed';
-        console.warn('[reminders] electron toast failed', msg);
-        finish({ shown: false, error: msg });
-      });
-      // Windows sometimes omits 'show'; treat no failure as success.
-      fallback = setTimeout(() => finish({ shown: true }), 1200);
-      if (typeof fallback.unref === 'function') fallback.unref();
-      n.show();
-    } catch (err) {
-      const msg = err && err.message ? err.message : String(err);
-      console.warn('[reminders] electron toast', msg);
-      finish({ shown: false, error: msg });
-    }
-  });
-}
-
-/**
- * Primary: Electron Notification → Windows Action Center.
- * Fallback: WinRT PowerShell toast with same AppId.
- * Secondary: quiet in-app card (always for force check; otherwise only if OS toast failed).
- * Last resort: tray balloon if nothing OS-level worked.
- * @param {string} title
- * @param {string} body
- * @param {string[]} ids
- * @param {{ force?: boolean }} [opts]
- * @returns {Promise<{ shown: boolean, error?: string, channel?: string, balloon?: boolean, winrt?: boolean, electron?: boolean }>}
- */
-async function showReminderToast(title, body, ids, opts = {}) {
-  ensureWindowsNotificationShortcut();
-
-  const electron = await tryElectronNotification(title, body);
-  let winrt = false;
-  let balloon = false;
-  let channel = 'none';
-  let shown = Boolean(electron.shown);
-
-  if (shown) {
-    channel = 'electron';
-  } else {
-    winrt = await showNativeWinRtToast(title, body);
-    if (winrt) {
-      shown = true;
-      channel = 'winrt';
-    }
-  }
-
-  // In-app: secondary cue — don't steal focus when OS toast already showed.
-  if (!shown || opts.force) {
-    pushInAppReminder(title, body, { focus: !shown });
-  }
-
-  if (!shown) {
-    balloon = showTrayBalloon(title, body);
-    if (balloon) {
-      shown = true;
-      channel = 'balloon';
-    }
-  }
-
-  if (shown && ids.length) markNotified(ids);
-
-  return {
-    shown,
-    channel,
-    electron: Boolean(electron.shown),
-    winrt,
-    balloon,
-    error: electron.error,
-  };
-}
-
-/**
- * @param {{ force?: boolean }} [opts]
- * @returns {Promise<{
- *   ok: boolean,
- *   shown: boolean,
- *   count: number,
- *   reason?: string,
- *   message?: string,
- *   notificationsSupported: boolean,
- * }>}
- */
-async function runReminderCheck(opts = {}) {
-  const notificationsSupported = Notification.isSupported();
-  const empty = {
-    ok: false,
-    shown: false,
-    count: 0,
-    notificationsSupported,
-  };
-
-  if (reminderCheckInFlight || isQuitting) {
-    return { ...empty, reason: 'busy', message: 'Проверка уже выполняется.' };
-  }
-  const settings = loadSettings();
-  if (!settings.remindersEnabled) {
-    return {
-      ...empty,
-      reason: 'disabled',
-      message: 'Напоминания выключены в настройках.',
-    };
-  }
-  if (!notificationsSupported) {
-    return {
-      ...empty,
-      reason: 'unsupported',
-      message:
-        'Система не поддерживает уведомления. Проверьте Параметры Windows → Система → Уведомления.',
-    };
-  }
-  if (!windowsToastsGloballyEnabled()) {
-    return {
-      ...empty,
-      reason: 'os-disabled',
-      message:
-        'Уведомления Windows выключены глобально (ToastEnabled=0). Включите: Параметры → Система → Уведомления.',
-    };
-  }
-
-  reminderCheckInFlight = true;
-  try {
-    const data = await getWidgetData();
-    // Re-check after await: user may have quit or disabled reminders mid-fetch.
-    if (isQuitting || !loadSettings().remindersEnabled) {
-      return {
-        ...empty,
-        reason: 'disabled',
-        message: 'Напоминания выключены.',
-      };
-    }
-
-    // Manual «Проверить» must always be allowed to re-fire toasts the same day.
-    if (opts.force) clearNotifiedToday();
-
-    const candidates = collectReminderCandidates(data);
-    scheduleExactReminders(data);
-    const state = loadReminderState();
-    const notified = new Set(state.notifiedIds);
-    const fresh = opts.force
-      ? candidates
-      : candidates.filter((c) => !notified.has(c.id));
-    if (!fresh.length) {
-      return {
-        ok: true,
-        shown: false,
-        count: 0,
-        reason: candidates.length ? 'already' : 'empty',
-        message: candidates.length
-          ? 'На сегодня уже отправляли. Нажмите «Проверить» — покажем снова (тост Windows + Action Center).'
-          : 'Нет открытых задач на сегодня/просроченных и незакрытых привычек.',
-        notificationsSupported,
-      };
-    }
-
-    const { title, body } = formatReminderToast(fresh);
-    const result = await showReminderToast(
-      title,
-      body,
-      fresh.map((c) => c.id),
-      { force: Boolean(opts.force) }
-    );
-
-    if (!result.shown) {
-      return {
-        ok: false,
-        shown: false,
-        count: fresh.length,
-        reason: 'failed',
-        message:
-          'Системный тост не удалось показать. Параметры → Система → Уведомления: включите баннеры и «Glass Tasks Widget». Отключите Фокусировку внимания.',
-        notificationsSupported,
-      };
-    }
-
-    const via =
-      result.channel === 'electron'
-        ? 'Windows (Electron)'
-        : result.channel === 'winrt'
-          ? 'Windows (WinRT)'
-          : result.channel === 'balloon'
-            ? 'подсказка у трея'
-            : 'уведомление';
-    return {
-      ok: true,
-      shown: true,
-      count: fresh.length,
-      channel: result.channel,
-      balloon: Boolean(result.balloon),
-      winrt: Boolean(result.winrt),
-      electron: Boolean(result.electron),
-      message: `Отправлено: ${fresh.length} через ${via}. Смотрите баннер Windows / Центр уведомлений.`,
-      notificationsSupported,
-    };
-  } catch (err) {
-    const msg = err && err.message ? err.message : String(err);
-    console.warn('[reminders]', msg);
-    return {
-      ...empty,
-      reason: 'error',
-      message: msg,
-    };
-  } finally {
-    reminderCheckInFlight = false;
-  }
-}
-
-/**
- * @param {boolean} enabled
- * @param {{ immediate?: boolean }} [opts]
- */
-function syncRemindersScheduler(enabled, opts = {}) {
-  stopRemindersScheduler();
-  if (!enabled) return;
-
-  const delay = opts.immediate ? 2500 : REMINDER_STARTUP_DELAY_MS;
-  reminderStartupTimer = setTimeout(() => {
-    reminderStartupTimer = null;
-    runReminderCheck().catch((err) =>
-      console.warn('[reminders]', err && err.message ? err.message : err)
-    );
-  }, delay);
-  if (typeof reminderStartupTimer.unref === 'function') reminderStartupTimer.unref();
-
-  reminderInterval = setInterval(() => {
-    runReminderCheck().catch((err) =>
-      console.warn('[reminders]', err && err.message ? err.message : err)
-    );
-  }, REMINDER_INTERVAL_MS);
-  if (typeof reminderInterval.unref === 'function') reminderInterval.unref();
 }
 
 function msUntilNextLocalMidnight() {
@@ -1230,136 +553,6 @@ function scheduleHabitsDayRollover() {
       .finally(() => scheduleHabitsDayRollover());
   }, msUntilNextLocalMidnight());
   if (typeof habitsRolloverTimer.unref === 'function') habitsRolloverTimer.unref();
-}
-
-/**
- * Auto-update via GitHub Releases (packaged builds only).
- * Unsigned NSIS (`signAndEditExecutable: false`) cannot verify publisher —
- * we skip code-signature check so updates still install; SmartScreen may warn.
- */
-function setupAutoUpdater() {
-  if (!app.isPackaged) return;
-
-  let autoUpdater;
-  try {
-    ({ autoUpdater } = require('electron-updater'));
-  } catch (err) {
-    console.warn('[updater] electron-updater missing', err && err.message ? err.message : err);
-    return;
-  }
-
-  // Project ships unsigned installers — signature verify would always fail.
-  autoUpdater.verifyUpdateCodeSignature = false;
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-
-  autoUpdater.on('error', (err) => {
-    console.warn('[updater]', err && err.message ? err.message : err);
-  });
-
-  autoUpdater.on('update-downloaded', (info) => {
-    const ver = (info && info.version) || '';
-    dialog
-      .showMessageBox({
-        type: 'info',
-        title: 'Обновление готово',
-        message: ver
-          ? `Версия ${ver} скачана. Перезапустить сейчас?`
-          : 'Обновление скачано. Перезапустить сейчас?',
-        detail:
-          'Можно продолжить работу — установка выполнится при следующем выходе из приложения.',
-        buttons: ['Перезапустить', 'Позже'],
-        defaultId: 0,
-        cancelId: 1,
-        noLink: true,
-      })
-      .then((result) => {
-        if (result.response === 0) {
-          isQuitting = true;
-          autoUpdater.quitAndInstall(false, true);
-        }
-      })
-      .catch((err) =>
-        console.warn('[updater] dialog', err && err.message ? err.message : err)
-      );
-  });
-
-  setTimeout(() => {
-    autoUpdater.checkForUpdates().catch((err) =>
-      console.warn('[updater] check', err && err.message ? err.message : err)
-    );
-  }, 12_000);
-}
-
-/**
- * Manual update check from Settings.
- * @returns {Promise<{
- *   ok: boolean,
- *   reason: string,
- *   message: string,
- *   version?: string,
- * }>}
- */
-async function checkForAppUpdates() {
-  if (!app.isPackaged) {
-    return {
-      ok: true,
-      reason: 'dev',
-      message: 'В режиме разработки обновления не проверяются (только сборка).',
-    };
-  }
-  if (updateCheckInFlight) {
-    return {
-      ok: false,
-      reason: 'busy',
-      message: 'Проверка обновлений уже выполняется.',
-    };
-  }
-
-  let autoUpdater;
-  try {
-    ({ autoUpdater } = require('electron-updater'));
-  } catch {
-    return {
-      ok: false,
-      reason: 'missing',
-      message: 'Модуль обновлений недоступен в этой сборке.',
-    };
-  }
-
-  updateCheckInFlight = true;
-  try {
-    autoUpdater.verifyUpdateCodeSignature = false;
-    const result = await autoUpdater.checkForUpdates();
-    const info = result && result.updateInfo;
-    const remote = info && info.version;
-    const current = app.getVersion();
-    if (remote && remote !== current) {
-      return {
-        ok: true,
-        reason: 'available',
-        message: `Доступна версия ${remote}. Скачивание началось — предложим перезапуск.`,
-        version: remote,
-      };
-    }
-    return {
-      ok: true,
-      reason: 'uptodate',
-      message: `У вас актуальная версия (${current}).`,
-      version: current,
-    };
-  } catch (err) {
-    const msg = err && err.message ? err.message : String(err);
-    console.warn('[updater] manual', msg);
-    return {
-      ok: false,
-      reason: 'error',
-      message:
-        'Не удалось проверить обновления. Нужен релиз на GitHub (latest.yml) и доступ в интернет.',
-    };
-  } finally {
-    updateCheckInFlight = false;
-  }
 }
 
 function applySettingsPatch(patch) {
@@ -1623,7 +816,7 @@ function registerIpc() {
 
   ipcMain.handle('widget:check-reminders', async (event) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    ensureWindowsNotificationShortcut();
+    ensureWindowsNotificationShortcut({ force: true });
     return runReminderCheck({ force: true });
   });
 
@@ -1663,6 +856,17 @@ if (!gotTheLock) {
     syncTrayMenu();
   });
 
+  configureNotifications({
+    getTray: () => tray,
+    pushInApp: pushInAppReminder,
+    onClick: () => {
+      if (isQuitting) return;
+      showWidget();
+      syncTrayMenu();
+    },
+  });
+  configureReminders({ isQuitting: () => isQuitting });
+
   app.whenReady().then(() => {
     ensureWindowsNotificationShortcut();
     const settings = loadSettings();
@@ -1673,7 +877,7 @@ if (!gotTheLock) {
     registerHotkeys(settings);
     syncRemindersScheduler(settings.remindersEnabled !== false);
     scheduleHabitsDayRollover();
-    setupAutoUpdater();
+    setupAutoUpdater({ onBeforeQuitAndInstall: () => { isQuitting = true; } });
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

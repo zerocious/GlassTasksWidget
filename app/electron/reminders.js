@@ -1,0 +1,412 @@
+'use strict';
+
+/**
+ * Reminders: one-shot timers for timed tasks within 24 h, plus a periodic sweep
+ * for today / overdue tasks and open habits.
+ */
+
+const { Notification } = require('electron');
+const { getWidgetData, resolveTaskDueAt } = require('../lib/google-tasks');
+const { loadSettings } = require('../lib/settings-store');
+const { todayIso } = require('../lib/dates');
+const {
+  loadReminderState,
+  wasNotifiedToday,
+  clearNotifiedToday,
+} = require('../lib/reminder-store');
+const { windowsToastsGloballyEnabled, showReminderToast } = require('./notifications');
+
+const REMINDER_INTERVAL_MS = 45 * 60 * 1000;
+/** First check soon after launch so toasts are easy to verify; then every 45 min. */
+const REMINDER_STARTUP_DELAY_MS = 8 * 1000;
+/** Only schedule one-shot timers for due times within this horizon. */
+const EXACT_REMINDER_HORIZON_MS = 24 * 60 * 60 * 1000;
+
+/** @type {ReturnType<typeof setInterval> | null} */
+let reminderInterval = null;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let reminderStartupTimer = null;
+let reminderCheckInFlight = false;
+/** @type {Map<string, ReturnType<typeof setTimeout>>} */
+const exactReminderTimers = new Map();
+
+/** Set by main.js so timers stay quiet while the app is quitting. */
+let isQuittingFn = () => false;
+function configureReminders({ isQuitting }) {
+  if (typeof isQuitting === 'function') isQuittingFn = isQuitting;
+}
+
+/**
+ * Collect actionable open items for the periodic sweep toast.
+ * Timed tasks still in the future are skipped (exact timers handle them).
+ * Timed tasks whose time already passed (today / overdue / notes+today) stay as safety net.
+ * @param {any} data
+ * @returns {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]}
+ */
+function collectReminderCandidates(data) {
+  /** @type {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]} */
+  const out = [];
+  const now = Date.now();
+  const today = todayIso();
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  for (const t of tasks) {
+    if (!t || t.completed || !t.id) continue;
+    const dueAt = resolveTaskDueAt(t);
+    if (dueAt) {
+      if (dueAt.getTime() > now) continue; // exact timer pending
+      // Past timed: only if due calendar day is today or earlier (notes-only → today).
+      if (todayIso(dueAt) > today) continue;
+      out.push({
+        id: `task:${t.id}`,
+        kind: 'task',
+        title: String(t.title || 'Задача').trim() || 'Задача',
+        dueKind: 'overdue',
+        dueTime: t.dueTime || null,
+      });
+      continue;
+    }
+    if (t.dueKind !== 'today' && t.dueKind !== 'overdue') continue;
+    out.push({
+      id: `task:${t.id}`,
+      kind: 'task',
+      title: String(t.title || 'Задача').trim() || 'Задача',
+      dueKind: t.dueKind,
+      dueTime: t.dueTime || null,
+    });
+  }
+  const habits = Array.isArray(data?.habits) ? data.habits : [];
+  for (const h of habits) {
+    if (!h || h.completed || !h.id) continue;
+    out.push({
+      id: `habit:${h.id}`,
+      kind: 'habit',
+      title: String(h.title || 'Привычка').trim() || 'Привычка',
+    });
+  }
+  return out;
+}
+
+/**
+ * Build Russian title/body for a reminder toast.
+ * @param {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]} items
+ */
+function formatReminderToast(items) {
+  const overdue = items.filter((i) => i.dueKind === 'overdue');
+  const today = items.filter((i) => i.dueKind === 'today');
+  const habits = items.filter((i) => i.kind === 'habit');
+  const parts = [];
+  if (overdue.length) parts.push(`просрочено: ${overdue.length}`);
+  if (today.length) parts.push(`на сегодня: ${today.length}`);
+  if (habits.length) parts.push(`привычки: ${habits.length}`);
+
+  const title =
+    overdue.length && !today.length && !habits.length
+      ? 'Просроченные задачи'
+      : habits.length && !overdue.length && !today.length
+        ? 'Привычки на сегодня'
+        : 'Напоминание Glass Tasks';
+
+  const names = items
+    .slice(0, 3)
+    .map((i) => {
+      const time = i.dueTime ? ` (${i.dueTime})` : '';
+      return `${i.title}${time}`;
+    })
+    .join(', ');
+  const more = items.length > 3 ? ` и ещё ${items.length - 3}` : '';
+  const body = parts.length
+    ? `${parts.join(' · ')}. ${names}${more}`
+    : `${names}${more}`;
+
+  return { title, body };
+}
+
+function clearExactReminderTimers() {
+  for (const timer of exactReminderTimers.values()) {
+    clearTimeout(timer);
+  }
+  exactReminderTimers.clear();
+}
+
+function stopRemindersScheduler() {
+  if (reminderStartupTimer) {
+    clearTimeout(reminderStartupTimer);
+    reminderStartupTimer = null;
+  }
+  if (reminderInterval) {
+    clearInterval(reminderInterval);
+    reminderInterval = null;
+  }
+  clearExactReminderTimers();
+}
+
+/**
+ * Fire a one-shot exact-time toast for a single task.
+ * Re-checks the task is still open so completed/deleted items stay silent.
+ * @param {{ id: string, title: string, dueTime?: string | null }} task
+ */
+async function fireExactTaskReminder(task) {
+  const reminderId = `task:${task.id}`;
+  if (isQuittingFn() || !loadSettings().remindersEnabled) return;
+  if (wasNotifiedToday(reminderId)) return;
+  if (!Notification.isSupported()) return;
+
+  try {
+    const data = await getWidgetData();
+    if (isQuittingFn() || !loadSettings().remindersEnabled) return;
+    const live = (Array.isArray(data?.tasks) ? data.tasks : []).find(
+      (t) => t && t.id === task.id
+    );
+    if (!live || live.completed) return;
+  } catch (err) {
+    console.warn('[reminders] exact recheck', err && err.message ? err.message : err);
+    // Fall through and notify — better a late toast than a missed one if fetch fails.
+  }
+
+  const time = task.dueTime || '';
+  const title = 'Пора';
+  const body = time
+    ? `Пора: ${task.title} (${time})`
+    : `Пора: ${task.title}`;
+  await showReminderToast(title, body, [reminderId]);
+}
+
+/**
+ * Schedule one-shot timers for open tasks with a resolvable due datetime
+ * within the next 24 hours. Cancels previous schedule.
+ * @param {any} data
+ */
+function scheduleExactReminders(data) {
+  clearExactReminderTimers();
+  if (isQuittingFn() || !loadSettings().remindersEnabled) return;
+  if (!Notification.isSupported()) return;
+
+  const now = Date.now();
+  const horizon = now + EXACT_REMINDER_HORIZON_MS;
+  const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+  const state = loadReminderState();
+  const notified = new Set(state.notifiedIds);
+
+  /** @type {{ id: string, title: string, dueTime: string | null, dueAt: Date }[]} */
+  const upcoming = [];
+  for (const t of tasks) {
+    if (!t || t.completed || !t.id) continue;
+    const dueAt = resolveTaskDueAt(t);
+    if (!dueAt) continue;
+    const ts = dueAt.getTime();
+    if (ts <= now || ts > horizon) continue;
+    const reminderId = `task:${t.id}`;
+    if (notified.has(reminderId)) continue;
+    upcoming.push({
+      id: t.id,
+      title: String(t.title || 'Задача').trim() || 'Задача',
+      dueTime:
+        t.dueTime ||
+        `${String(dueAt.getHours()).padStart(2, '0')}:${String(dueAt.getMinutes()).padStart(2, '0')}`,
+      dueAt,
+    });
+  }
+
+  upcoming.sort((a, b) => a.dueAt.getTime() - b.dueAt.getTime());
+
+  for (const item of upcoming) {
+    const delay = Math.max(0, item.dueAt.getTime() - Date.now());
+    const timer = setTimeout(() => {
+      exactReminderTimers.delete(item.id);
+      fireExactTaskReminder(item).catch((err) =>
+        console.warn('[reminders] exact', err && err.message ? err.message : err)
+      );
+    }, delay);
+    if (typeof timer.unref === 'function') timer.unref();
+    exactReminderTimers.set(item.id, timer);
+  }
+}
+
+/**
+ * Refresh exact timers from current widget data (best-effort, non-blocking).
+ * @param {any} [data]
+ */
+function refreshExactReminders(data) {
+  if (!loadSettings().remindersEnabled || isQuittingFn()) {
+    clearExactReminderTimers();
+    return;
+  }
+  if (data) {
+    scheduleExactReminders(data);
+    return;
+  }
+  getWidgetData()
+    .then((d) => scheduleExactReminders(d))
+    .catch((err) =>
+      console.warn('[reminders] reschedule', err && err.message ? err.message : err)
+    );
+}
+
+/**
+ * @param {{ force?: boolean }} [opts]
+ * @returns {Promise<{
+ *   ok: boolean,
+ *   shown: boolean,
+ *   count: number,
+ *   reason?: string,
+ *   message?: string,
+ *   notificationsSupported: boolean,
+ * }>}
+ */
+async function runReminderCheck(opts = {}) {
+  const notificationsSupported = Notification.isSupported();
+  const empty = {
+    ok: false,
+    shown: false,
+    count: 0,
+    notificationsSupported,
+  };
+
+  if (reminderCheckInFlight || isQuittingFn()) {
+    return { ...empty, reason: 'busy', message: 'Проверка уже выполняется.' };
+  }
+  const settings = loadSettings();
+  if (!settings.remindersEnabled) {
+    return {
+      ...empty,
+      reason: 'disabled',
+      message: 'Напоминания выключены в настройках.',
+    };
+  }
+  if (!notificationsSupported) {
+    return {
+      ...empty,
+      reason: 'unsupported',
+      message:
+        'Система не поддерживает уведомления. Проверьте Параметры Windows → Система → Уведомления.',
+    };
+  }
+  if (!windowsToastsGloballyEnabled()) {
+    return {
+      ...empty,
+      reason: 'os-disabled',
+      message:
+        'Уведомления Windows выключены глобально (ToastEnabled=0). Включите: Параметры → Система → Уведомления.',
+    };
+  }
+
+  reminderCheckInFlight = true;
+  try {
+    const data = await getWidgetData();
+    // Re-check after await: user may have quit or disabled reminders mid-fetch.
+    if (isQuittingFn() || !loadSettings().remindersEnabled) {
+      return {
+        ...empty,
+        reason: 'disabled',
+        message: 'Напоминания выключены.',
+      };
+    }
+
+    // Manual «Проверить» must always be allowed to re-fire toasts the same day.
+    if (opts.force) clearNotifiedToday();
+
+    const candidates = collectReminderCandidates(data);
+    scheduleExactReminders(data);
+    const state = loadReminderState();
+    const notified = new Set(state.notifiedIds);
+    const fresh = opts.force
+      ? candidates
+      : candidates.filter((c) => !notified.has(c.id));
+    if (!fresh.length) {
+      return {
+        ok: true,
+        shown: false,
+        count: 0,
+        reason: candidates.length ? 'already' : 'empty',
+        message: candidates.length
+          ? 'На сегодня уже отправляли. Нажмите «Проверить» — покажем снова (тост Windows + Action Center).'
+          : 'Нет открытых задач на сегодня/просроченных и незакрытых привычек.',
+        notificationsSupported,
+      };
+    }
+
+    const { title, body } = formatReminderToast(fresh);
+    const result = await showReminderToast(
+      title,
+      body,
+      fresh.map((c) => c.id),
+      { force: Boolean(opts.force) }
+    );
+
+    if (!result.shown) {
+      return {
+        ok: false,
+        shown: false,
+        count: fresh.length,
+        reason: 'failed',
+        message:
+          'Системный тост не удалось показать. Параметры → Система → Уведомления: включите баннеры и «Glass Tasks Widget». Отключите Фокусировку внимания.',
+        notificationsSupported,
+      };
+    }
+
+    const via =
+      result.channel === 'electron'
+        ? 'Windows (Electron)'
+        : result.channel === 'winrt'
+          ? 'Windows (WinRT)'
+          : result.channel === 'balloon'
+            ? 'подсказка у трея'
+            : 'уведомление';
+    return {
+      ok: true,
+      shown: true,
+      count: fresh.length,
+      channel: result.channel,
+      balloon: Boolean(result.balloon),
+      winrt: Boolean(result.winrt),
+      electron: Boolean(result.electron),
+      message: `Отправлено: ${fresh.length} через ${via}. Смотрите баннер Windows / Центр уведомлений.`,
+      notificationsSupported,
+    };
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    console.warn('[reminders]', msg);
+    return {
+      ...empty,
+      reason: 'error',
+      message: msg,
+    };
+  } finally {
+    reminderCheckInFlight = false;
+  }
+}
+
+/**
+ * @param {boolean} enabled
+ * @param {{ immediate?: boolean }} [opts]
+ */
+function syncRemindersScheduler(enabled, opts = {}) {
+  stopRemindersScheduler();
+  if (!enabled) return;
+
+  const delay = opts.immediate ? 2500 : REMINDER_STARTUP_DELAY_MS;
+  reminderStartupTimer = setTimeout(() => {
+    reminderStartupTimer = null;
+    runReminderCheck().catch((err) =>
+      console.warn('[reminders]', err && err.message ? err.message : err)
+    );
+  }, delay);
+  if (typeof reminderStartupTimer.unref === 'function') reminderStartupTimer.unref();
+
+  reminderInterval = setInterval(() => {
+    runReminderCheck().catch((err) =>
+      console.warn('[reminders]', err && err.message ? err.message : err)
+    );
+  }, REMINDER_INTERVAL_MS);
+  if (typeof reminderInterval.unref === 'function') reminderInterval.unref();
+}
+
+module.exports = {
+  configureReminders,
+  runReminderCheck,
+  syncRemindersScheduler,
+  stopRemindersScheduler,
+  refreshExactReminders,
+  scheduleExactReminders,
+};
