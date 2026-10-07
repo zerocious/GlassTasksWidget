@@ -341,22 +341,22 @@ function syncSettingsUi() {
 /** @type {ReturnType<typeof setTimeout> | null} */
 let settingsCloseTimer = null;
 /** @type {ReturnType<typeof setTimeout> | null} */
-let notesCloseTimer = null;
-/** @type {ReturnType<typeof setTimeout> | null} */
-let timeCloseTimer = null;
-/** @type {ReturnType<typeof setTimeout> | null} */
-let repeatCloseTimer = null;
-/** @type {ReturnType<typeof setTimeout> | null} */
-let streakCloseTimer = null;
-/** @type {ReturnType<typeof setTimeout> | null} */
 let ctxCloseTimer = null;
 /** Bump to cancel a pending afterPaint open (close raced open). */
 let settingsOpenGen = 0;
-let notesOpenGen = 0;
-let timeOpenGen = 0;
-let repeatOpenGen = 0;
-let streakOpenGen = 0;
 let ctxOpenGen = 0;
+
+/**
+ * Per-overlay animation state: pending close timer and an open generation
+ * (bumped to cancel a pending afterPaint open when a close races it).
+ * @type {Record<'notes' | 'time' | 'repeat' | 'streak', { timer: ReturnType<typeof setTimeout> | null, gen: number }>}
+ */
+const overlayAnim = {
+  notes: { timer: null, gen: 0 },
+  time: { timer: null, gen: 0 },
+  repeat: { timer: null, gen: 0 },
+  streak: { timer: null, gen: 0 },
+};
 
 function motionMs(cssVar, fallback) {
   if (motionQuiet()) return 0;
@@ -415,40 +415,13 @@ function setSettingsOpen(open) {
  */
 function setOverlayOpen(overlay, open, opts) {
   if (!overlay) return;
-  const timerKey = opts.timerRef;
-  const clearClose = () => {
-    if (timerKey === 'notes' && notesCloseTimer) {
-      clearTimeout(notesCloseTimer);
-      notesCloseTimer = null;
-    }
-    if (timerKey === 'time' && timeCloseTimer) {
-      clearTimeout(timeCloseTimer);
-      timeCloseTimer = null;
-    }
-    if (timerKey === 'repeat' && repeatCloseTimer) {
-      clearTimeout(repeatCloseTimer);
-      repeatCloseTimer = null;
-    }
-    if (timerKey === 'streak' && streakCloseTimer) {
-      clearTimeout(streakCloseTimer);
-      streakCloseTimer = null;
-    }
-  };
-  clearClose();
-  const bumpOpenGen = () => {
-    if (timerKey === 'notes') return ++notesOpenGen;
-    if (timerKey === 'repeat') return ++repeatOpenGen;
-    if (timerKey === 'streak') return ++streakOpenGen;
-    return ++timeOpenGen;
-  };
-  const latestOpenGen = () => {
-    if (timerKey === 'notes') return notesOpenGen;
-    if (timerKey === 'repeat') return repeatOpenGen;
-    if (timerKey === 'streak') return streakOpenGen;
-    return timeOpenGen;
-  };
+  const anim = overlayAnim[opts.timerRef];
+  if (anim.timer) {
+    clearTimeout(anim.timer);
+    anim.timer = null;
+  }
   if (open) {
-    const gen = bumpOpenGen();
+    const gen = ++anim.gen;
     overlay.hidden = false;
     if (motionQuiet()) {
       overlay.classList.add('is-open');
@@ -457,34 +430,50 @@ function setOverlayOpen(overlay, open, opts) {
     }
     overlay.classList.remove('is-open');
     afterPaint(() => {
-      if (gen !== latestOpenGen() || overlay.hidden) return;
+      if (gen !== anim.gen || overlay.hidden) return;
       overlay.classList.add('is-open');
       opts.focusEl?.focus?.();
     });
     return;
   }
-  if (timerKey === 'notes') notesOpenGen += 1;
-  else if (timerKey === 'repeat') repeatOpenGen += 1;
-  else if (timerKey === 'streak') streakOpenGen += 1;
-  else timeOpenGen += 1;
+  anim.gen += 1;
   overlay.classList.remove('is-open');
   const finish = () => {
     overlay.hidden = true;
     opts.onClosed?.();
-    if (timerKey === 'notes') notesCloseTimer = null;
-    if (timerKey === 'time') timeCloseTimer = null;
-    if (timerKey === 'repeat') repeatCloseTimer = null;
-    if (timerKey === 'streak') streakCloseTimer = null;
+    anim.timer = null;
   };
   if (motionQuiet()) {
     finish();
     return;
   }
-  const delay = motionMs('--panel-ms', 210) + 40;
-  if (timerKey === 'notes') notesCloseTimer = setTimeout(finish, delay);
-  else if (timerKey === 'repeat') repeatCloseTimer = setTimeout(finish, delay);
-  else if (timerKey === 'streak') streakCloseTimer = setTimeout(finish, delay);
-  else timeCloseTimer = setTimeout(finish, delay);
+  anim.timer = setTimeout(finish, motionMs('--panel-ms', 210) + 40);
+}
+
+/** True while an overlay is visible or still animating closed. */
+function isOverlayShown(overlay) {
+  return Boolean(overlay) && !(overlay.hidden && !overlay.classList.contains('is-open'));
+}
+
+/**
+ * Close an overlay, animated or immediately (when another panel replaces it).
+ * @param {HTMLElement} overlay
+ * @param {'notes' | 'time' | 'repeat' | 'streak'} key
+ * @param {boolean} [instant]
+ */
+function closeOverlay(overlay, key, instant) {
+  if (!instant) {
+    setOverlayOpen(overlay, false, { timerRef: key });
+    return;
+  }
+  const anim = overlayAnim[key];
+  if (anim.timer) {
+    clearTimeout(anim.timer);
+    anim.timer = null;
+  }
+  anim.gen += 1;
+  overlay.classList.remove('is-open');
+  overlay.hidden = true;
 }
 
 function syncHideCompletedUi() {
@@ -887,10 +876,26 @@ function syncRowRepeatBadge(li, task) {
         : 'Повтор: еженедельно';
 }
 
+/** @type {{ list: any[] | null, size: number, byId: Map<string, any> }} */
+let taskIndex = { list: null, size: 0, byId: new Map() };
+
+/** Task by id without scanning the list for every row (index follows state.tasks). */
+function taskById(id) {
+  const list = state.tasks;
+  if (taskIndex.list !== list || taskIndex.size !== list.length) {
+    taskIndex = {
+      list,
+      size: list.length,
+      byId: new Map(list.filter(Boolean).map((t) => [t.id, t])),
+    };
+  }
+  return taskIndex.byId.get(id);
+}
+
 /** Indent only when parent is present in the same open/done bucket. */
 function taskShowsAsSubtask(task) {
   if (!task || !task.parent) return false;
-  const parent = state.tasks.find((t) => t && t.id === task.parent);
+  const parent = taskById(task.parent);
   if (!parent) return false;
   if (Boolean(parent.completed) !== Boolean(task.completed)) return false;
   if (settings.hideCompleted && parent.completed) return false;
@@ -1147,12 +1152,16 @@ function removeRowAnimated(li, done) {
 }
 
 function syncListOrder(listEl, items) {
+  const rows = new Map([...listEl.querySelectorAll('li.row')].map((row) => [row.dataset.id, row]));
+  const keep = new Set();
   for (const item of items) {
-    const row = rowById(listEl, item.id);
-    if (row) listEl.appendChild(row);
+    const row = rows.get(item.id);
+    if (!row) continue;
+    listEl.appendChild(row);
+    keep.add(item.id);
   }
-  for (const row of [...listEl.querySelectorAll('li.row')]) {
-    if (!items.some((it) => it.id === row.dataset.id)) row.remove();
+  for (const [id, row] of rows) {
+    if (!keep.has(id)) row.remove();
   }
 }
 
@@ -1605,6 +1614,24 @@ function bindListReorder(listKind, listEl) {
    *   moved: boolean,
    * } | null} */
   let session = null;
+  let dropFrame = 0;
+  let pendingDropY = 0;
+
+  function scheduleDropTarget(clientY) {
+    pendingDropY = clientY;
+    if (dropFrame) return;
+    dropFrame = requestAnimationFrame(() => {
+      dropFrame = 0;
+      updateDropTarget(pendingDropY);
+    });
+  }
+
+  function flushDropTarget(apply) {
+    if (!dropFrame) return;
+    cancelAnimationFrame(dropFrame);
+    dropFrame = 0;
+    if (apply) updateDropTarget(pendingDropY);
+  }
 
   function clearDropIndicator() {
     listEl.querySelectorAll('.row.drop-before, .row.drop-after').forEach((el) => {
@@ -1618,6 +1645,7 @@ function bindListReorder(listKind, listEl) {
 
   function endSession(commit) {
     if (!session) return;
+    flushDropTarget(commit);
     detachDocListeners();
     const { pointerId, row, ghost, fromIndex, toIndex, ids, moved } = session;
     try {
@@ -1759,7 +1787,8 @@ function bindListReorder(listKind, listEl) {
     swipeArmed = false;
 
     session.ghost.style.top = `${e.clientY - session.offsetY}px`;
-    updateDropTarget(e.clientY);
+    // Layout reads per row are costly; at most once per frame.
+    scheduleDropTarget(e.clientY);
   }
 
   function onPointerUp(e) {
@@ -1972,7 +2001,7 @@ let ctxMenuTarget = null;
 let ctxMenuEl = null;
 
 function closeNotesPanel({ revert, instant } = {}) {
-  if (!notesOverlay || (notesOverlay.hidden && !notesOverlay.classList.contains('is-open'))) return;
+  if (!isOverlayShown(notesOverlay)) return;
   if (revert && notesTarget) {
     const items = notesTarget.listKind === 'habits' ? state.habits : state.tasks;
     const item = items.find((i) => i.id === notesTarget.itemId);
@@ -1980,17 +2009,7 @@ function closeNotesPanel({ revert, instant } = {}) {
   }
   notesTarget = null;
   if (notesTextarea) notesTextarea.value = '';
-  if (instant) {
-    if (notesCloseTimer) {
-      clearTimeout(notesCloseTimer);
-      notesCloseTimer = null;
-    }
-    notesOpenGen += 1;
-    notesOverlay.classList.remove('is-open');
-    notesOverlay.hidden = true;
-    return;
-  }
-  setOverlayOpen(notesOverlay, false, { timerRef: 'notes' });
+  closeOverlay(notesOverlay, 'notes', instant);
 }
 
 async function saveNotesPanel({ closeAfter } = {}) {
@@ -2061,20 +2080,10 @@ function openNotesPanel(listKind, item) {
 }
 
 function closeTimePanel({ instant } = {}) {
-  if (!timeOverlay || (timeOverlay.hidden && !timeOverlay.classList.contains('is-open'))) return;
+  if (!isOverlayShown(timeOverlay)) return;
   timeTarget = null;
   if (timeInput) timeInput.value = '';
-  if (instant) {
-    if (timeCloseTimer) {
-      clearTimeout(timeCloseTimer);
-      timeCloseTimer = null;
-    }
-    timeOpenGen += 1;
-    timeOverlay.classList.remove('is-open');
-    timeOverlay.hidden = true;
-    return;
-  }
-  setOverlayOpen(timeOverlay, false, { timerRef: 'time' });
+  closeOverlay(timeOverlay, 'time', instant);
 }
 
 async function saveTimePanel({ closeAfter, clear } = {}) {
@@ -2163,21 +2172,9 @@ function openTimePanel(listKind, item) {
 }
 
 function closeRepeatPanel({ instant } = {}) {
-  if (!repeatOverlay || (repeatOverlay.hidden && !repeatOverlay.classList.contains('is-open'))) {
-    return;
-  }
+  if (!isOverlayShown(repeatOverlay)) return;
   repeatTarget = null;
-  if (instant) {
-    if (repeatCloseTimer) {
-      clearTimeout(repeatCloseTimer);
-      repeatCloseTimer = null;
-    }
-    repeatOpenGen += 1;
-    repeatOverlay.classList.remove('is-open');
-    repeatOverlay.hidden = true;
-    return;
-  }
-  setOverlayOpen(repeatOverlay, false, { timerRef: 'repeat' });
+  closeOverlay(repeatOverlay, 'repeat', instant);
 }
 
 function syncRepeatOptionsUi(selected) {
@@ -2257,21 +2254,9 @@ function localIsoFromParts(y, m, d) {
 }
 
 function closeStreakPanel({ instant } = {}) {
-  if (!streakOverlay || (streakOverlay.hidden && !streakOverlay.classList.contains('is-open'))) {
-    return;
-  }
+  if (!isOverlayShown(streakOverlay)) return;
   streakTarget = null;
-  if (instant) {
-    if (streakCloseTimer) {
-      clearTimeout(streakCloseTimer);
-      streakCloseTimer = null;
-    }
-    streakOpenGen += 1;
-    streakOverlay.classList.remove('is-open');
-    streakOverlay.hidden = true;
-    return;
-  }
-  setOverlayOpen(streakOverlay, false, { timerRef: 'streak' });
+  closeOverlay(streakOverlay, 'streak', instant);
 }
 
 function renderStreakMonth() {
