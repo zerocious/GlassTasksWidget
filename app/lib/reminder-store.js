@@ -1,19 +1,12 @@
 'use strict';
 
 const { readJson, writeJson, dataPath } = require('./config');
+const { todayIso } = require('./dates');
 
 /**
  * Persist which items were notified today to avoid spam.
  * @typedef {{ date: string, notifiedIds: string[] }} ReminderState
  */
-
-function todayKey() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
 
 function remindersFile() {
   return dataPath('reminders.json');
@@ -25,7 +18,7 @@ function remindersFile() {
 function loadReminderState() {
   const raw = readJson(remindersFile(), {});
   const date = typeof raw.date === 'string' ? raw.date : '';
-  const today = todayKey();
+  const today = todayIso();
   if (date !== today) {
     return { date: today, notifiedIds: [] };
   }
@@ -40,7 +33,7 @@ function loadReminderState() {
  */
 function saveReminderState(state) {
   writeJson(remindersFile(), {
-    date: state.date || todayKey(),
+    date: state.date || todayIso(),
     notifiedIds: [...new Set(state.notifiedIds || [])],
   });
 }
@@ -70,11 +63,10 @@ function wasNotifiedToday(id) {
  * Clear today's notified set (used by manual «Проверить» so toasts can fire again).
  */
 function clearNotifiedToday() {
-  saveReminderState({ date: todayKey(), notifiedIds: [] });
+  saveReminderState({ date: todayIso(), notifiedIds: [] });
 }
 
 module.exports = {
-  todayKey,
   loadReminderState,
   saveReminderState,
   markNotified,

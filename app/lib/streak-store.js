@@ -1,6 +1,7 @@
 'use strict';
 
 const { readJson, writeJson, dataPath } = require('./config');
+const { todayIso, addDaysIso } = require('./dates');
 
 /** @typedef {{ dates: string[] }} HabitHistory */
 /** @typedef {{ habits: Record<string, HabitHistory> }} StreakStore */
@@ -12,19 +13,6 @@ function streaksFile() {
   return dataPath('streaks.json');
 }
 
-function todayIso(date = new Date()) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-function addDaysIso(iso, delta) {
-  const [y, m, d] = iso.split('-').map(Number);
-  const dt = new Date(y, m - 1, d);
-  dt.setDate(dt.getDate() + delta);
-  return todayIso(dt);
-}
 
 function loadStore() {
   if (storeCache) return storeCache;
@@ -158,7 +146,6 @@ function removeHabit(habitId) {
 }
 
 module.exports = {
-  todayIso,
   markCompleted,
   unmarkCompleted,
   removeHabit,

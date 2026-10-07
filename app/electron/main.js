@@ -41,6 +41,7 @@ const {
   DEFAULT_SWITCH_HOTKEY,
 } = require('../lib/settings-store');
 const { sampleWallpaperPalette } = require('../lib/wallpaper-palette');
+const { todayIso } = require('../lib/dates');
 const {
   loadReminderState,
   markNotified,
@@ -587,13 +588,7 @@ function collectReminderCandidates(data) {
   /** @type {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]} */
   const out = [];
   const now = Date.now();
-  const today = (() => {
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  })();
+  const today = todayIso();
   const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
   for (const t of tasks) {
     if (!t || t.completed || !t.id) continue;
@@ -601,11 +596,7 @@ function collectReminderCandidates(data) {
     if (dueAt) {
       if (dueAt.getTime() > now) continue; // exact timer pending
       // Past timed: only if due calendar day is today or earlier (notes-only → today).
-      const y = dueAt.getFullYear();
-      const m = String(dueAt.getMonth() + 1).padStart(2, '0');
-      const day = String(dueAt.getDate()).padStart(2, '0');
-      const dueDay = `${y}-${m}-${day}`;
-      if (dueDay > today) continue;
+      if (todayIso(dueAt) > today) continue;
       out.push({
         id: `task:${t.id}`,
         kind: 'task',
