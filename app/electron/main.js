@@ -15,7 +15,7 @@ const {
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const { loadConfig, getGoogleCredentialsStatus, saveGoogleCredentials } = require('../lib/config');
 const {
@@ -32,7 +32,7 @@ const {
   resolveTaskDueAt,
   resetCompletedHabitsForNewDay,
 } = require('../lib/google-tasks');
-const { clearTokens } = require('../lib/google-auth');
+const { revokeAndClearTokens, resetAuthClient } = require('../lib/google-auth');
 const {
   loadSettings,
   saveSettings,
@@ -96,29 +96,62 @@ if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID);
 }
 
+// Dev only: separate profile (tokens, settings, single-instance lock) from an installed widget.
+if (!app.isPackaged && process.env.GT_USER_DATA_DIR) {
+  app.setPath('userData', path.resolve(process.env.GT_USER_DATA_DIR));
+}
+
 /**
  * HKCU PushNotifications\ToastEnabled — master switch in
  * Settings → System → Notifications. 0 blocks all Electron toasts.
  * @returns {boolean}
  */
+/** @type {{ value: boolean, at: number } | null} */
+let toastsEnabledCache = null;
+const TOASTS_ENABLED_TTL_MS = 30 * 1000;
+
 function windowsToastsGloballyEnabled() {
   if (process.platform !== 'win32') return true;
+  // Synchronous `reg query` — cache it so bootstrap / settings IPC don't block every call.
+  if (toastsEnabledCache && Date.now() - toastsEnabledCache.at < TOASTS_ENABLED_TTL_MS) {
+    return toastsEnabledCache.value;
+  }
+  let value = true;
   try {
     const out = execSync(
       'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications" /v ToastEnabled',
       { encoding: 'utf8', windowsHide: true }
     );
     const m = out.match(/ToastEnabled\s+REG_DWORD\s+0x([0-9a-fA-F]+)/i);
-    if (!m) return true;
-    return parseInt(m[1], 16) !== 0;
+    if (m) value = parseInt(m[1], 16) !== 0;
   } catch {
-    return true;
+    value = true;
   }
+  toastsEnabledCache = { value, at: Date.now() };
+  return value;
 }
 
 // Minimal 16×16 accent PNG (glass-tasks red square with check hint)
 const TRAY_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAhElEQVQ4T2NkYGD4z0ABYBzVMKoBBgYGBgYGBgYQgP+MDAwMjIyMjP8ZGRkZ/jMwMDD8Z2Bg+M/AwPCfkZGR4T8DAwPDf0YGBoZRq2E0GhgYGBgYGBgYQAD+MzIwMDAyMjL+Z2RkZPjPwMDA8J+BgeE/IyMjw38GBgaG/4wMDAyjVjNoNDAwMAAAHw4JAfkYZqkAAAAASUVORK5CYII=';
+
+/** Hosts the renderer may open in the system browser. */
+const EXTERNAL_URL_HOSTS = new Set([
+  'console.cloud.google.com',
+  'developers.google.com',
+  'myaccount.google.com',
+  'github.com',
+]);
+
+function isAllowedExternalUrl(url) {
+  if (typeof url !== 'string') return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && EXTERNAL_URL_HOSTS.has(u.hostname);
+  } catch {
+    return false;
+  }
+}
 
 function isFromWidget(event) {
   if (!mainWindow || mainWindow.isDestroyed()) return false;
@@ -275,23 +308,38 @@ function unregisterHotkeys() {
   hotkeyState = { toggle: null, switchView: null, switchFallback: false };
 }
 
+/** Accelerator shape only (e.g. "Control+Alt+W"); Electron still decides if it is registrable. */
+function isValidAccelerator(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9]+(\+[A-Za-z0-9]+)*$/.test(value) && value.length <= 64;
+}
+
+/** globalShortcut.register throws on malformed accelerators — never let that abort startup. */
+function safeRegisterShortcut(accel, handler) {
+  try {
+    return globalShortcut.register(accel, handler);
+  } catch (err) {
+    console.warn('Hotkey rejected:', accel, err && err.message ? err.message : err);
+    return false;
+  }
+}
+
 function registerHotkeys(settings) {
   unregisterHotkeys();
 
   const toggleAccel = settings.toggleHotkey || DEFAULT_TOGGLE_HOTKEY;
   const switchAccel = settings.switchViewHotkey || DEFAULT_SWITCH_HOTKEY;
 
-  const toggleOk = globalShortcut.register(toggleAccel, () => toggleVisibility());
+  const toggleOk = safeRegisterShortcut(toggleAccel, () => toggleVisibility());
   hotkeyState.toggle = toggleOk ? toggleAccel : null;
   if (!toggleOk) console.warn('Hotkey not registered (toggle):', toggleAccel);
 
-  let switchOk = globalShortcut.register(switchAccel, () => notifySwitchView());
+  let switchOk = safeRegisterShortcut(switchAccel, () => notifySwitchView());
   hotkeyState.switchView = switchOk ? switchAccel : null;
   hotkeyState.switchFallback = false;
 
   if (!switchOk) {
     const fallback = 'Control+Shift+Tab';
-    switchOk = globalShortcut.register(fallback, () => notifySwitchView());
+    switchOk = safeRegisterShortcut(fallback, () => notifySwitchView());
     if (switchOk) {
       hotkeyState.switchView = fallback;
       hotkeyState.switchFallback = true;
@@ -770,50 +818,62 @@ function reminderToastIcon() {
 }
 
 /**
+ * Static WinRT toast script. Title, body and icon arrive only through environment
+ * variables and are XML-escaped inside PowerShell — user text is never part of the code.
+ */
+const WINRT_TOAST_PS = `
+[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+$t = [Security.SecurityElement]::Escape([string]$env:GT_TOAST_TITLE)
+$b = [Security.SecurityElement]::Escape([string]$env:GT_TOAST_BODY)
+$img = ''
+if ($env:GT_TOAST_ICON) { $img = '<image placement="appLogoOverride" src="' + [Security.SecurityElement]::Escape($env:GT_TOAST_ICON) + '" />' }
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+$xml.LoadXml('<toast><visual><binding template="ToastGeneric">' + $img + '<text>' + $t + '</text><text>' + $b + '</text></binding></visual><audio src="ms-winsoundevent:Notification.Default"/></toast>')
+$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+$toast.Tag = 'glass-tasks-reminder'
+$toast.Group = 'glass-tasks'
+$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($env:GT_TOAST_AUMID)
+$n.Show($toast)
+`;
+
+/**
  * Native WinRT toast via PowerShell — fallback when Electron Notification fails.
  * Uses the same AppUserModelID so the toast lands under "Glass Tasks Widget"
  * in Action Center (requires Start Menu .lnk with matching AUMID).
  * @param {string} title
  * @param {string} body
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
 function showNativeWinRtToast(title, body) {
-  if (process.platform !== 'win32') return false;
-  try {
-    const esc = (s) =>
-      String(s || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, "''");
-    const safeTitle = esc(title).slice(0, 120);
-    const safeBody = esc(body).slice(0, 240);
-    const iconPath = reminderToastIconPath();
-    const iconXml = iconPath
-      ? `<image placement="appLogoOverride" src="${esc(pathToFileURL(iconPath).href)}" />`
-      : '';
-    const ps = `
-[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
-[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
-$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml('<toast><visual><binding template="ToastGeneric">${iconXml}<text>${safeTitle}</text><text>${safeBody}</text></binding></visual><audio src="ms-winsoundevent:Notification.Default"/></toast>')
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-$toast.Tag = 'glass-tasks-reminder'
-$toast.Group = 'glass-tasks'
-$n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${APP_USER_MODEL_ID}')
-$n.Show($toast)
-`;
-    const encoded = Buffer.from(ps, 'utf16le').toString('base64');
-    execSync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, {
-      windowsHide: true,
-      timeout: 8000,
-    });
-    return true;
-  } catch (err) {
-    console.warn('[reminders] winrt', err && err.message ? err.message : err);
-    return false;
-  }
+  if (process.platform !== 'win32') return Promise.resolve(false);
+  const iconPath = reminderToastIconPath();
+  const encoded = Buffer.from(WINRT_TOAST_PS, 'utf16le').toString('base64');
+  return new Promise((resolve) => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+      {
+        windowsHide: true,
+        timeout: 8000,
+        env: {
+          ...process.env,
+          GT_TOAST_TITLE: String(title || '').slice(0, 120),
+          GT_TOAST_BODY: String(body || '').slice(0, 240),
+          GT_TOAST_ICON: iconPath ? pathToFileURL(iconPath).href : '',
+          GT_TOAST_AUMID: APP_USER_MODEL_ID,
+        },
+      },
+      (err) => {
+        if (err) {
+          console.warn('[reminders] winrt', err.message || err);
+          resolve(false);
+        } else {
+          resolve(true);
+        }
+      }
+    );
+  });
 }
 
 /**
@@ -943,7 +1003,7 @@ async function showReminderToast(title, body, ids, opts = {}) {
   if (shown) {
     channel = 'electron';
   } else {
-    winrt = showNativeWinRtToast(title, body);
+    winrt = await showNativeWinRtToast(title, body);
     if (winrt) {
       shown = true;
       channel = 'winrt';
@@ -1335,8 +1395,8 @@ function applySettingsPatch(patch) {
   if (typeof patch.simpleAnimations === 'boolean') {
     allowed.simpleAnimations = patch.simpleAnimations;
   }
-  if (typeof patch.toggleHotkey === 'string') allowed.toggleHotkey = patch.toggleHotkey;
-  if (typeof patch.switchViewHotkey === 'string') allowed.switchViewHotkey = patch.switchViewHotkey;
+  if (isValidAccelerator(patch.toggleHotkey)) allowed.toggleHotkey = patch.toggleHotkey;
+  if (isValidAccelerator(patch.switchViewHotkey)) allowed.switchViewHotkey = patch.switchViewHotkey;
   if (typeof patch.onboardingSkipped === 'boolean') allowed.onboardingSkipped = patch.onboardingSkipped;
   if (patch.pos && typeof patch.pos.x === 'number' && typeof patch.pos.y === 'number') {
     allowed.pos = { x: patch.pos.x, y: patch.pos.y };
@@ -1466,6 +1526,7 @@ function registerIpc() {
       clientSecret,
       redirectPort: payload.redirectPort,
     });
+    resetAuthClient();
     saveSettings({ onboardingSkipped: false });
     invalidateListCache();
     invalidatePayloadCache();
@@ -1504,7 +1565,7 @@ function registerIpc() {
 
   ipcMain.handle('widget:logout', async (event) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    clearTokens();
+    await revokeAndClearTokens();
     invalidateListCache();
     invalidatePayloadCache();
     clearOfflineCache();
@@ -1592,9 +1653,13 @@ function registerIpc() {
 
   ipcMain.on('widget:open-external', (event, url) => {
     if (!isFromWidget(event)) return;
-    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
-      shell.openExternal(url);
+    if (!isAllowedExternalUrl(url)) {
+      console.warn('[open-external] blocked:', typeof url === 'string' ? url.slice(0, 200) : url);
+      return;
     }
+    shell.openExternal(url).catch((err) =>
+      console.warn('[open-external]', err && err.message ? err.message : err)
+    );
   });
 }
 
@@ -1623,6 +1688,8 @@ if (!gotTheLock) {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
       else showWidget();
     });
+  }).catch((err) => {
+    console.error('[startup]', err);
   });
 
   app.on('before-quit', () => {

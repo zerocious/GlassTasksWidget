@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const { URL } = require('url');
-const { loadEnvFile, readJson, writeSecretJson, dataPath, hasGoogleCredentials } = require('./config');
+const { loadEnvFile, readSecretJson, writeSecretJson, dataPath, hasGoogleCredentials } = require('./config');
 
 const SCOPES = ['https://www.googleapis.com/auth/tasks'];
 const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
@@ -28,8 +28,9 @@ function isInvalidGrantError(err) {
     (data && data.error) || e.error || e.code || ''
   ).toLowerCase();
   if (
+    // invalid_token is an access-token problem the client refreshes on its own —
+    // treating it as a dead grant would wipe a still-valid refresh token.
     errorCode === 'invalid_grant' ||
-    errorCode === 'invalid_token' ||
     errorCode === 'invalid_rapt'
   ) {
     return true;
@@ -114,16 +115,28 @@ function getOAuthClient() {
 }
 
 function loadSavedTokens() {
-  return readJson(tokensFile(), null);
+  return readSecretJson(tokensFile(), null);
 }
 
 function saveTokens(tokens) {
   writeSecretJson(tokensFile(), tokens);
 }
 
-function clearTokens() {
+/** Bumped on logout / credential change so late OAuth results are discarded. */
+let authGeneration = 0;
+/** @type {(() => void) | null} */
+let cancelInteractiveLogin = null;
+
+/** Drop the in-memory client (e.g. after Client ID / Secret change) and abort a pending login. */
+function resetAuthClient() {
+  authGeneration += 1;
   cachedClient = null;
   loginInFlight = null;
+  if (cancelInteractiveLogin) cancelInteractiveLogin();
+}
+
+function clearTokens() {
+  resetAuthClient();
   const file = tokensFile();
   try {
     if (fs.existsSync(file)) fs.unlinkSync(file);
@@ -132,8 +145,31 @@ function clearTokens() {
   }
 }
 
+/**
+ * Best-effort revoke of the saved refresh token at Google, then clear it locally.
+ * Never throws: logout must work offline too.
+ */
+async function revokeAndClearTokens() {
+  const saved = loadSavedTokens();
+  const token = saved && (saved.refresh_token || saved.access_token);
+  if (token && hasGoogleCredentials()) {
+    try {
+      const { oauth2 } = getOAuthClient();
+      await Promise.race([
+        oauth2.revokeToken(token),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('revoke timeout')), 5000)),
+      ]);
+    } catch (err) {
+      console.warn('[auth] revoke failed:', err && err.message ? err.message : err);
+    }
+  }
+  clearTokens();
+}
+
 function attachTokenSaver(oauth2) {
+  const generation = authGeneration;
   oauth2.on('tokens', (tokens) => {
+    if (generation !== authGeneration) return;
     const merged = { ...(loadSavedTokens() || {}), ...tokens };
     saveTokens(merged);
   });
@@ -172,15 +208,18 @@ async function getAuthorizedClient(opts = {}) {
   if (!interactive) return null;
 
   if (loginInFlight) return loginInFlight;
-  loginInFlight = interactiveLogin(oauth2, port)
+  const generation = authGeneration;
+  const flight = interactiveLogin(oauth2, port)
     .then((client) => {
+      if (generation !== authGeneration) throw new Error('Вход в Google отменён');
       cachedClient = client;
       return client;
     })
     .finally(() => {
-      loginInFlight = null;
+      if (loginInFlight === flight) loginInFlight = null;
     });
-  return loginInFlight;
+  loginInFlight = flight;
+  return flight;
 }
 
 function interactiveLogin(oauth2, port) {
@@ -202,10 +241,12 @@ function interactiveLogin(oauth2, port) {
     /** @type {NodeJS.Timeout | null} */
     let timer = null;
 
+    const generation = authGeneration;
     const finish = (err, client) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (cancelInteractiveLogin === cancel) cancelInteractiveLogin = null;
       try {
         server.close();
       } catch {
@@ -214,6 +255,8 @@ function interactiveLogin(oauth2, port) {
       if (err) reject(err);
       else resolve(client);
     };
+    const cancel = () => finish(new Error('Вход в Google отменён'));
+    cancelInteractiveLogin = cancel;
 
     const server = http.createServer(async (req, res) => {
       try {
@@ -245,6 +288,11 @@ function interactiveLogin(oauth2, port) {
           return;
         }
         const { tokens } = await oauth2.getToken({ code, codeVerifier });
+        if (settled || generation !== authGeneration) {
+          res.writeHead(409, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end('<h1>Вход отменён</h1><p>Закройте окно и войдите снова из виджета.</p>');
+          return;
+        }
         oauth2.setCredentials(tokens);
         attachTokenSaver(oauth2);
         saveTokens(tokens);
@@ -281,6 +329,8 @@ module.exports = {
   getAuthorizedClient,
   hasGoogleCredentials,
   clearTokens,
+  revokeAndClearTokens,
+  resetAuthClient,
   loadSavedTokens,
   isInvalidGrantError,
   normalizeGoogleAuthError,

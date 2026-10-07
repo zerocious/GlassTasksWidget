@@ -47,12 +47,85 @@ let dataInFlight = null;
 let payloadCache = null;
 /** @type {Map<string, Promise<any>>} */
 const mutationInFlight = new Map();
+/** @type {Map<string, Promise<any>>} last queued mutation per item (serializes edits). */
+const itemQueues = new Map();
+/** Bumped when any mutation settles; a fetch that overlapped one must not overwrite caches. */
+let mutationGeneration = 0;
+let mutationsActive = 0;
+/** @type {Promise<any> | null} */
+let forcedDataInFlight = null;
 /** @type {Promise<any> | null} */
 let habitsResetInFlight = null;
+/** After a network failure, don't block every data load on another reset attempt. */
+let habitsResetRetryAt = 0;
+const HABITS_RESET_RETRY_MS = 5 * 60 * 1000;
+/** Google Tasks API page size cap and a sanity ceiling on pages per list. */
+const PAGE_SIZE = 100;
+const MAX_PAGES = 20;
 
 /** Re-throw Google API failures with a user-safe Russian message when needed. */
 function rejectGoogleAuth(err) {
   throw normalizeGoogleAuthError(err);
+}
+
+/**
+ * Run a mutation with per-item ordering and safe de-duplication.
+ * - Same `flightKey` while it is still the latest queued op for the item → share the promise
+ *   (double-click). A different op in between breaks the dedupe, so on→off→on ends "on".
+ * - Ops on the same `queueKey` run strictly in order, each reading caches the previous one wrote.
+ * @template T
+ * @param {string} flightKey  identity of this exact request (kind + id + values)
+ * @param {string} queueKey   item identity (kind + id)
+ * @param {() => Promise<T>} task
+ * @returns {Promise<T>}
+ */
+function runMutation(flightKey, queueKey, task) {
+  const existing = mutationInFlight.get(flightKey);
+  if (existing && itemQueues.get(queueKey) === existing) return existing;
+
+  const prev = itemQueues.get(queueKey);
+  mutationsActive += 1;
+  const run = (async () => {
+    if (prev) {
+      try {
+        await prev;
+      } catch {
+        /* previous failure doesn't block the next edit */
+      }
+    }
+    return task();
+  })()
+    .catch(rejectGoogleAuth)
+    .finally(() => {
+      mutationsActive -= 1;
+      mutationGeneration += 1;
+      if (mutationInFlight.get(flightKey) === run) mutationInFlight.delete(flightKey);
+      if (itemQueues.get(queueKey) === run) itemQueues.delete(queueKey);
+    });
+
+  mutationInFlight.set(flightKey, run);
+  itemQueues.set(queueKey, run);
+  return run;
+}
+
+/**
+ * Collect every page of a Google list call (`tasks.list`, `tasklists.list`).
+ * @param {(params: object) => Promise<{ data: { items?: any[], nextPageToken?: string } }>} listFn
+ * @param {object} params
+ * @returns {Promise<any[]>}
+ */
+async function listAllPages(listFn, params) {
+  /** @type {any[]} */
+  const items = [];
+  let pageToken;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const res = await listFn({ ...params, maxResults: PAGE_SIZE, ...(pageToken ? { pageToken } : {}) });
+    const data = (res && res.data) || {};
+    if (Array.isArray(data.items)) items.push(...data.items);
+    pageToken = data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return items;
 }
 
 /** Lazy-load heavy googleapis only on first Google API use. */
@@ -94,11 +167,11 @@ function dueKindFor(due, completed) {
 
 /** Managed time line written by the widget UI («время HH:MM»). */
 const MANAGED_TIME_LINE_RE =
-  /^(?:время|Время|time)\s*[:\-]?\s*\d{1,2}[:.]\d{2}\s*$/i;
+  /^(?:время|Время|time)\s*[:-]?\s*\d{1,2}[:.]\d{2}\s*$/i;
 
 /** Managed recurrence line («повтор: ежедневно|будни|еженедельно»). */
 const MANAGED_REPEAT_LINE_RE =
-  /^(?:повтор|Повтор|repeat)\s*[:\-]?\s*(ежедневно|будни|еженедельно|daily|weekdays|weekly)\s*$/i;
+  /^(?:повтор|Повтор|repeat)\s*[:-]?\s*(ежедневно|будни|еженедельно|daily|weekdays|weekly)\s*$/i;
 
 /** @type {Record<string, 'daily' | 'weekdays' | 'weekly'>} */
 const REPEAT_ALIAS = {
@@ -115,13 +188,6 @@ const REPEAT_MARKER = {
   daily: 'повтор: ежедневно',
   weekdays: 'повтор: будни',
   weekly: 'повтор: еженедельно',
-};
-
-/** @type {Record<'daily' | 'weekdays' | 'weekly', string>} */
-const REPEAT_BADGE = {
-  daily: 'ежедн.',
-  weekdays: 'будни',
-  weekly: 'еженед.',
 };
 
 function isManagedNotesLine(line) {
@@ -352,7 +418,7 @@ function timeFromNotes(notes) {
   if (!notes) return null;
   const text = String(notes);
   const patterns = [
-    /(?:^|[\s,;|(])(?:в|В|at|time|время|Время)\s*[:\-]?\s*(\d{1,2})[:\.](\d{2})\b/i,
+    /(?:^|[\s,;|(])(?:в|В|at|time|время|Время)\s*[:-]?\s*(\d{1,2})[:.](\d{2})\b/i,
     /\b(\d{1,2}):(\d{2})\b/,
   ];
   for (const re of patterns) {
@@ -568,7 +634,7 @@ function reorderPayloadCache(listKind, orderedIds, movedPatch = null) {
           const done = next.filter((h) => h.completed);
           return [...open, ...done];
         })();
-  setPayloadCache({ ...prev, [key]: ordered, offline: false });
+  replacePayloadKeepingAge({ ...prev, [key]: ordered, offline: false });
 }
 
 function invalidateListCache() {
@@ -585,6 +651,15 @@ function setPayloadCache(payload) {
     return;
   }
   payloadCache = { at: Date.now(), payload };
+}
+
+/** Replace cached payload contents without extending its freshness window. */
+function replacePayloadKeepingAge(payload) {
+  if (!payloadCache) {
+    setPayloadCache(payload);
+    return;
+  }
+  payloadCache = { at: payloadCache.at, payload };
 }
 
 function patchPayloadCache(listKind, taskId, patch, append = null) {
@@ -619,7 +694,7 @@ function patchPayloadCache(listKind, taskId, patch, append = null) {
       list = [...open, ...done];
     }
   }
-  setPayloadCache({ ...prev, [key]: list, offline: false });
+  replacePayloadKeepingAge({ ...prev, [key]: list, offline: false });
 }
 
 async function getListMap(tasksApi) {
@@ -627,9 +702,9 @@ async function getListMap(tasksApi) {
   if (listCache && now - listCache.at < LIST_CACHE_TTL_MS) {
     return listCache.byTitle;
   }
-  const res = await tasksApi.tasklists.list({ maxResults: 100 });
+  const lists = await listAllPages((p) => tasksApi.tasklists.list(p), {});
   const byTitle = new Map();
-  for (const list of res.data.items || []) {
+  for (const list of lists) {
     const title = (list.title || '').trim();
     if (title && list.id) byTitle.set(title, list.id);
   }
@@ -642,16 +717,15 @@ async function resolveListId(tasksApi, name) {
   return map.get(String(name || '').trim()) || null;
 }
 
-async function listTasks(tasksApi, listId) {
+/** Every visible item of a list (open + completed, all pages), mapped to widget shape. */
+async function fetchListItems(tasksApi, listId) {
   if (!listId) return [];
-  const res = await tasksApi.tasks.list({
+  const items = await listAllPages((p) => tasksApi.tasks.list(p), {
     tasklist: listId,
     showCompleted: true,
     showHidden: false,
-    maxResults: 50,
   });
-  const items = res.data.items || [];
-  return decorateTasks(items.map(mapTask));
+  return items.map(mapTask);
 }
 
 /**
@@ -683,19 +757,30 @@ function withHabits(habitsRaw) {
   return [...open, ...done];
 }
 
-/** List habits without the tasks "open + 5 done" truncation. */
-async function listHabitTasks(tasksApi, listId) {
-  if (!listId) return [];
-  const res = await tasksApi.tasks.list({
-    tasklist: listId,
-    showCompleted: true,
-    showHidden: false,
-    maxResults: 50,
-  });
-  return (res.data.items || []).map(mapTask);
+async function fetchLivePayload(config) {
+  // A fetch that overlaps a mutation may return pre-edit state: retry after edits settle.
+  for (let attempt = 0; ; attempt += 1) {
+    const genStart = mutationGeneration;
+    const busyStart = mutationsActive;
+    const payload = await fetchLivePayloadOnce(config);
+    if (payload.mode !== 'google') return payload;
+    const consistent =
+      busyStart === 0 && mutationsActive === 0 && genStart === mutationGeneration;
+    if (consistent) {
+      saveOfflineCache(payload);
+      setPayloadCache(payload);
+      return payload;
+    }
+    if (attempt >= 2) {
+      // Still racing edits: prefer the cache those edits patched over this snapshot.
+      const patched = payloadCache && payloadCache.payload;
+      return patched && patched.mode === 'google' ? patched : payload;
+    }
+    await Promise.allSettled([...mutationInFlight.values()]);
+  }
 }
 
-async function fetchLivePayload(config) {
+async function fetchLivePayloadOnce(config) {
   const auth = await getAuthorizedClient({ interactive: false });
   if (!auth) {
     return {
@@ -715,14 +800,16 @@ async function fetchLivePayload(config) {
   const tasksListId = listMap.get(String(config.tasksListName || '').trim()) || null;
   const habitsListId = listMap.get(String(config.habitsListName || '').trim()) || null;
 
-  const [tasks, habitsRawBase] = await Promise.all([
-    listTasks(tasksApi, tasksListId),
-    listHabitTasks(tasksApi, habitsListId),
+  const [tasksRaw, habitsRaw] = await Promise.all([
+    fetchListItems(tasksApi, tasksListId),
+    fetchListItems(tasksApi, habitsListId),
   ]);
 
-  const habits = withHabits(habitsRawBase);
+  const tasks = decorateTasks(tasksRaw);
+  // Habits skip the tasks "open + 5 done" truncation.
+  const habits = withHabits(habitsRaw);
 
-  const payload = {
+  return {
     mode: 'google',
     tasksListName: config.tasksListName,
     habitsListName: config.habitsListName,
@@ -733,10 +820,6 @@ async function fetchLivePayload(config) {
     habits,
     offline: false,
   };
-
-  saveOfflineCache(payload);
-  setPayloadCache(payload);
-  return payload;
 }
 
 function offlineFromCache(config, errMessage) {
@@ -784,7 +867,7 @@ function fromPayloadCache() {
     }))
   );
   const next = { ...p, tasks, habits, offline: false };
-  setPayloadCache(next);
+  replacePayloadKeepingAge(next);
   return next;
 }
 
@@ -836,15 +919,12 @@ async function resetCompletedHabitsForNewDay() {
         return { ok: true, reset: false, reason: 'no_list' };
       }
 
-      const res = await tasksApi.tasks.list({
+      const all = await listAllPages((p) => tasksApi.tasks.list(p), {
         tasklist: listId,
         showCompleted: true,
         showHidden: true,
-        maxResults: 100,
       });
-      const items = (res.data.items || []).filter(
-        (i) => i && i.id && i.status === 'completed'
-      );
+      const items = all.filter((i) => i && i.id && i.status === 'completed');
 
       for (const item of items) {
         await tasksApi.tasks.patch({
@@ -865,6 +945,7 @@ async function resetCompletedHabitsForNewDay() {
     } catch (err) {
       const mapped = normalizeGoogleAuthError(err);
       console.warn('[habits-reset]', mapped.message);
+      if (!isInvalidGrantError(err)) habitsResetRetryAt = Date.now() + HABITS_RESET_RETRY_MS;
       return {
         ok: false,
         reset: false,
@@ -873,21 +954,27 @@ async function resetCompletedHabitsForNewDay() {
       };
     }
   })().finally(() => {
+    mutationsActive -= 1;
+    mutationGeneration += 1;
     habitsResetInFlight = null;
   });
+  mutationsActive += 1;
 
   return habitsResetInFlight;
 }
 
 async function getWidgetDataUncached(force) {
   // Day rollover before serving data so habits aren't stuck completed in Google.
-  try {
-    await resetCompletedHabitsForNewDay();
-  } catch (err) {
-    console.warn(
-      '[habits-reset]',
-      err && err.message ? err.message : err
-    );
+  // Skipped briefly after a network failure so offline loads aren't delayed twice.
+  if (Date.now() >= habitsResetRetryAt) {
+    try {
+      await resetCompletedHabitsForNewDay();
+    } catch (err) {
+      console.warn(
+        '[habits-reset]',
+        err && err.message ? err.message : err
+      );
+    }
   }
 
   if (!force) {
@@ -948,18 +1035,34 @@ async function getWidgetDataUncached(force) {
 async function getWidgetData(opts = {}) {
   const force = Boolean(opts && opts.force);
   if (dataInFlight && !force) return dataInFlight;
-  if (force && dataInFlight) {
-    // Wait for in-flight then force-refresh so callers don't race
-    try {
-      await dataInFlight;
-    } catch {
-      /* ignore */
-    }
+  if (force) {
+    // Forced refreshes queued behind the same in-flight load share one round-trip.
+    // Once a forced load has started fetching it is not reused: a caller that just
+    // logged out / saved credentials must see a load that began after that.
+    if (forcedDataInFlight) return forcedDataInFlight;
+    const prior = dataInFlight;
+    const run = (async () => {
+      try {
+        // Always yields once, so `run` is assigned before it is read below.
+        await prior;
+      } catch {
+        /* ignore */
+      }
+      if (forcedDataInFlight === run) forcedDataInFlight = null;
+      return getWidgetDataUncached(true);
+    })().finally(() => {
+      if (forcedDataInFlight === run) forcedDataInFlight = null;
+      if (dataInFlight === run) dataInFlight = null;
+    });
+    forcedDataInFlight = run;
+    dataInFlight = run;
+    return run;
   }
-  dataInFlight = getWidgetDataUncached(force).finally(() => {
-    dataInFlight = null;
+  const run = getWidgetDataUncached(false).finally(() => {
+    if (dataInFlight === run) dataInFlight = null;
   });
-  return dataInFlight;
+  dataInFlight = run;
+  return run;
 }
 
 async function loginGoogle() {
@@ -1065,10 +1168,7 @@ async function setTaskCompleted(listKind, taskId, completed) {
     throw new Error('Некорректный id задачи');
   }
 
-  const flightKey = `set:${listKind}:${taskId}`;
-  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
-
-  const run = (async () => {
+  return runMutation(`set:${listKind}:${taskId}:${completed}`, `${listKind}:${taskId}`, async () => {
     const config = loadConfig();
     let cached = lookupCachedItem(listKind, taskId);
     // Recurring tasks: stay open and roll due forward (keeps id / reminders / nesting).
@@ -1191,14 +1291,7 @@ async function setTaskCompleted(listKind, taskId, completed) {
       rescheduled: reschedule,
       item: { id: taskId, ...itemPatch },
     };
-  })()
-    .catch(rejectGoogleAuth)
-    .finally(() => {
-    mutationInFlight.delete(flightKey);
   });
-
-  mutationInFlight.set(flightKey, run);
-  return run;
 }
 
 async function createItem(listKind, title, opts = {}) {
@@ -1214,9 +1307,7 @@ async function createItem(listKind, title, opts = {}) {
       : null;
 
   const flightKey = `create:${listKind}:${parentId || ''}:${trimmed.toLowerCase()}`;
-  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
-
-  const run = (async () => {
+  return runMutation(flightKey, `${listKind}:create`, async () => {
     const config = loadConfig();
 
     if (!hasGoogleCredentials()) {
@@ -1272,14 +1363,7 @@ async function createItem(listKind, title, opts = {}) {
     }
 
     return { ok: true, mode: 'google', item: mapped };
-  })()
-    .catch(rejectGoogleAuth)
-    .finally(() => {
-    mutationInFlight.delete(flightKey);
   });
-
-  mutationInFlight.set(flightKey, run);
-  return run;
 }
 
 /**
@@ -1303,90 +1387,83 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     patch = { ...patchOrTitle };
   }
 
-  /** @type {string | null | undefined} undefined = no dueTime change */
-  let pendingDueTime;
-  /** @type {'daily' | 'weekdays' | 'weekly' | null | undefined} */
-  let pendingRecurrence;
+  // Notes-derived fields are computed inside the queued task so back-to-back edits
+  // (time, then repeat) each start from the notes the previous edit wrote.
+  return runMutation(`update:${listKind}:${taskId}:${JSON.stringify(patch)}`, `${listKind}:${taskId}`, async () => {
+    /** @type {string | null | undefined} undefined = no dueTime change */
+    let pendingDueTime;
+    /** @type {'daily' | 'weekdays' | 'weekly' | null | undefined} */
+    let pendingRecurrence;
 
-  // Google Tasks due is date-only UTC — persist clock time via notes marker.
-  if (Object.prototype.hasOwnProperty.call(patch, 'dueTime')) {
-    const hm = normalizeDueTimeInput(patch.dueTime);
-    delete patch.dueTime;
-    let currentNotes = typeof patch.notes === 'string' ? patch.notes : null;
-    if (currentNotes === null) {
-      if (!hasGoogleCredentials()) {
-        const mockItem = getMockItem(listKind, taskId);
-        if (!mockItem) throw new Error('Элемент не найден');
-        currentNotes = mockItem.notes || '';
+    // Google Tasks due is date-only UTC — persist clock time via notes marker.
+    if (Object.prototype.hasOwnProperty.call(patch, 'dueTime')) {
+      const hm = normalizeDueTimeInput(patch.dueTime);
+      delete patch.dueTime;
+      let currentNotes = typeof patch.notes === 'string' ? patch.notes : null;
+      if (currentNotes === null) {
+        if (!hasGoogleCredentials()) {
+          const mockItem = getMockItem(listKind, taskId);
+          if (!mockItem) throw new Error('Элемент не найден');
+          currentNotes = mockItem.notes || '';
+        } else {
+          const cached = lookupCachedItem(listKind, taskId);
+          if (cached && typeof cached.notes === 'string') currentNotes = cached.notes;
+        }
+      }
+      if (currentNotes !== null) {
+        patch.notes = applyDueTimeToNotes(currentNotes, hm);
       } else {
-        const cached = lookupCachedItem(listKind, taskId);
-        if (cached && typeof cached.notes === 'string') currentNotes = cached.notes;
+        pendingDueTime = hm;
       }
     }
-    if (currentNotes !== null) {
-      patch.notes = applyDueTimeToNotes(currentNotes, hm);
-    } else {
-      pendingDueTime = hm;
-    }
-  }
 
-  if (Object.prototype.hasOwnProperty.call(patch, 'recurrence')) {
-    const rule = normalizeRecurrenceInput(patch.recurrence);
-    delete patch.recurrence;
-    let currentNotes = typeof patch.notes === 'string' ? patch.notes : null;
-    if (currentNotes === null) {
-      if (!hasGoogleCredentials()) {
-        const mockItem = getMockItem(listKind, taskId);
-        if (!mockItem) throw new Error('Элемент не найден');
-        currentNotes = mockItem.notes || '';
+    if (Object.prototype.hasOwnProperty.call(patch, 'recurrence')) {
+      const rule = normalizeRecurrenceInput(patch.recurrence);
+      delete patch.recurrence;
+      let currentNotes = typeof patch.notes === 'string' ? patch.notes : null;
+      if (currentNotes === null) {
+        if (!hasGoogleCredentials()) {
+          const mockItem = getMockItem(listKind, taskId);
+          if (!mockItem) throw new Error('Элемент не найден');
+          currentNotes = mockItem.notes || '';
+        } else {
+          const cached = lookupCachedItem(listKind, taskId);
+          if (cached && typeof cached.notes === 'string') currentNotes = cached.notes;
+        }
+      }
+      if (currentNotes !== null) {
+        patch.notes = applyRecurrenceToNotes(currentNotes, rule);
       } else {
-        const cached = lookupCachedItem(listKind, taskId);
-        if (cached && typeof cached.notes === 'string') currentNotes = cached.notes;
+        pendingRecurrence = rule;
       }
     }
-    if (currentNotes !== null) {
-      patch.notes = applyRecurrenceToNotes(currentNotes, rule);
-    } else {
-      pendingRecurrence = rule;
+
+    /** @type {Record<string, string>} */
+    const body = {};
+    /** @type {Record<string, any>} */
+    const itemPatch = {};
+
+    if (typeof patch.title === 'string') {
+      let trimmed = patch.title.trim();
+      if (!trimmed) throw new Error('Введите название');
+      if (trimmed.length > MAX_TITLE_LEN) trimmed = trimmed.slice(0, MAX_TITLE_LEN);
+      body.title = trimmed;
+      itemPatch.title = trimmed;
     }
-  }
+    if (typeof patch.notes === 'string') {
+      let notes = patch.notes;
+      if (notes.length > MAX_NOTES_LEN) notes = notes.slice(0, MAX_NOTES_LEN);
+      body.notes = notes;
+      itemPatch.notes = notes;
+    }
+    if (
+      !Object.keys(body).length &&
+      pendingDueTime === undefined &&
+      pendingRecurrence === undefined
+    ) {
+      throw new Error('Нечего обновлять');
+    }
 
-  /** @type {Record<string, string>} */
-  const body = {};
-  /** @type {Record<string, any>} */
-  const itemPatch = {};
-
-  if (typeof patch.title === 'string') {
-    let trimmed = patch.title.trim();
-    if (!trimmed) throw new Error('Введите название');
-    if (trimmed.length > MAX_TITLE_LEN) trimmed = trimmed.slice(0, MAX_TITLE_LEN);
-    body.title = trimmed;
-    itemPatch.title = trimmed;
-  }
-  if (typeof patch.notes === 'string') {
-    let notes = patch.notes;
-    if (notes.length > MAX_NOTES_LEN) notes = notes.slice(0, MAX_NOTES_LEN);
-    body.notes = notes;
-    itemPatch.notes = notes;
-  }
-  if (
-    !Object.keys(body).length &&
-    pendingDueTime === undefined &&
-    pendingRecurrence === undefined
-  ) {
-    throw new Error('Нечего обновлять');
-  }
-
-  const flightKey = `update:${listKind}:${taskId}:${[
-    ...Object.keys(body).sort(),
-    pendingDueTime !== undefined ? 'dueTime' : '',
-    pendingRecurrence !== undefined ? 'recurrence' : '',
-  ]
-    .filter(Boolean)
-    .join(',')}`;
-  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
-
-  const run = (async () => {
     const config = loadConfig();
 
     if (!hasGoogleCredentials()) {
@@ -1472,14 +1549,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     patchPayloadCache(listKind, taskId, itemPatch);
 
     return { ok: true, mode: 'google', item: { id: taskId, ...itemPatch } };
-  })()
-    .catch(rejectGoogleAuth)
-    .finally(() => {
-    mutationInFlight.delete(flightKey);
   });
-
-  mutationInFlight.set(flightKey, run);
-  return run;
 }
 
 async function deleteItem(listKind, taskId) {
@@ -1490,10 +1560,7 @@ async function deleteItem(listKind, taskId) {
     throw new Error('Некорректный id задачи');
   }
 
-  const flightKey = `delete:${listKind}:${taskId}`;
-  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
-
-  const run = (async () => {
+  return runMutation(`delete:${listKind}:${taskId}`, `${listKind}:${taskId}`, async () => {
     const config = loadConfig();
 
     if (!hasGoogleCredentials()) {
@@ -1521,14 +1588,7 @@ async function deleteItem(listKind, taskId) {
     patchPayloadCache(listKind, taskId, null);
 
     return { ok: true, mode: 'google' };
-  })()
-    .catch(rejectGoogleAuth)
-    .finally(() => {
-    mutationInFlight.delete(flightKey);
   });
-
-  mutationInFlight.set(flightKey, run);
-  return run;
 }
 
 /**
@@ -1593,10 +1653,8 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
     throw new Error('Некорректная позиция');
   }
 
-  const flightKey = `move:${listKind}:${taskId}`;
-  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
-
-  const run = (async () => {
+  // Moves share one queue per list: each relies on the order the previous one produced.
+  return runMutation(`move:${listKind}:${taskId}:${ids.join(',')}`, `${listKind}:move`, async () => {
     const config = loadConfig();
 
     if (!hasGoogleCredentials()) {
@@ -1640,8 +1698,6 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
 
     reorderOfflineCache(listKind, ids, movedPatch);
     reorderPayloadCache(listKind, ids, movedPatch);
-    // Drop soft TTL so next getData picks up moved order if cache was stale-shaped
-    if (payloadCache) payloadCache.at = Date.now();
 
     return {
       ok: true,
@@ -1649,14 +1705,7 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
       orderedIds: ids,
       item: movedPatch,
     };
-  })()
-    .catch(rejectGoogleAuth)
-    .finally(() => {
-    mutationInFlight.delete(flightKey);
   });
-
-  mutationInFlight.set(flightKey, run);
-  return run;
 }
 
 module.exports = {
@@ -1678,4 +1727,6 @@ module.exports = {
   applyRecurrenceToNotes,
   nextOccurrenceDue,
   resetCompletedHabitsForNewDay,
+  /** Exposed for unit tests only. */
+  _test: { listAllPages, runMutation },
 };
