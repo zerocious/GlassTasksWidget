@@ -820,8 +820,8 @@ function taskHasNotes(task) {
     .some(
       (l) =>
         l &&
-        !/^(?:время|Время|time)\s*[:\-]?\s*\d{1,2}[:.]\d{2}$/i.test(l) &&
-        !/^(?:повтор|Повтор|repeat)\s*[:\-]?\s*(ежедневно|будни|еженедельно|daily|weekdays|weekly)\s*$/i.test(
+        !/^(?:время|Время|time)\s*[:-]?\s*\d{1,2}[:.]\d{2}$/i.test(l) &&
+        !/^(?:повтор|Повтор|repeat)\s*[:-]?\s*(ежедневно|будни|еженедельно|daily|weekdays|weekly)\s*$/i.test(
           l
         )
     );
@@ -1373,6 +1373,22 @@ function renderAll() {
   btnAuth.textContent = state.mode === 'google' || state.offline ? 'Выйти' : 'Google';
 }
 
+/**
+ * A refresh can land while an edit is in flight. Keep the optimistic local object for
+ * pending ids (and keep locally deleted ones gone) so the UI doesn't flicker back.
+ */
+function carryPendingItems(prev, next) {
+  if (!pendingIds.size || !prev || !next) return;
+  for (const key of ['tasks', 'habits']) {
+    if (!Array.isArray(next[key]) || !Array.isArray(prev[key])) continue;
+    const prevById = new Map(prev[key].filter(Boolean).map((i) => [i.id, i]));
+    const deleted = new Set([...pendingIds].filter((id) => !prevById.has(id)));
+    next[key] = next[key]
+      .filter((i) => i && !deleted.has(i.id) && !deleted.has(i.parent))
+      .map((i) => (pendingIds.has(i.id) ? prevById.get(i.id) : i));
+  }
+}
+
 async function loadData(force) {
   if (!window.widgetApi) {
     setBanner('Запустите через Electron (npm start), не открывайте HTML напрямую.');
@@ -1381,7 +1397,9 @@ async function loadData(force) {
   if (loadInFlight) return loadInFlight;
   loadInFlight = (async () => {
     try {
-      state = await window.widgetApi.getData(force ? { force: true } : {});
+      const next = await window.widgetApi.getData(force ? { force: true } : {});
+      carryPendingItems(state, next);
+      state = next;
       if (state.defaultAccent) configAccent = state.defaultAccent;
       renderAll();
     } catch (err) {
