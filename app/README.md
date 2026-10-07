@@ -5,9 +5,11 @@
 ```powershell
 npm install
 npm start
+npm test        # юнит-тесты
+npm run lint    # ESLint
 ```
 
-**Первый запуск:** без Client ID/Secret — онбординг или «Продолжить в демо». Ключи → `%APPDATA%\glass-tasks-widget\.env` (ручной `.env` не обязателен). Позже: Настройки → Google API ключи.
+**Первый запуск:** без Client ID/Secret — онбординг или «Продолжить в демо». Ключи → `data\credentials.json` (зашифрованы через `safeStorage`; ручной `.env` не обязателен). Позже: Настройки → Google API ключи.
 
 ## Сборка
 
