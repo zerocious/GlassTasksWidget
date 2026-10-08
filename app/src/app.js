@@ -2216,22 +2216,36 @@ async function clearCompletedTasks() {
     setBanner('Дождитесь завершения текущих изменений.');
     return;
   }
-  if (!window.confirm('Удалить все выполненные задачи из списка?')) return;
+  if (
+    !window.confirm(
+      'Удалить все выполненные задачи из списка? Они будут удалены и в Google Tasks — восстановить нельзя.'
+    )
+  ) {
+    return;
+  }
 
   clearCompletedBusy = true;
   if (btnClearCompleted) btnClearCompleted.disabled = true;
-  const prevList = state.tasks.slice();
   state.tasks = state.tasks.filter((t) => t && !t.completed);
   renderTasks();
 
+  /** @type {string} */
+  let message = '';
   try {
-    await window.widgetApi.clearCompleted();
-    setBanner('');
+    const result = await window.widgetApi.clearCompleted();
+    const removed = (result && Array.isArray(result.removedIds) && result.removedIds.length) || 0;
+    const skipped = (result && result.skipped) || 0;
+    if (skipped) {
+      message = `Удалено: ${removed}. Оставлено: ${skipped} — у них есть невыполненные подзадачи.`;
+    }
   } catch (err) {
-    state.tasks = prevList;
-    renderTasks();
-    setBanner(`Не удалось удалить выполненные: ${err.message || err}`);
+    message = `Не удалось удалить выполненные: ${err.message || err}`;
   } finally {
+    // Re-read the list: a failure part-way or skipped parents mean the
+    // optimistic removal above may not match what's actually left. Set the
+    // message afterwards — renderAll() rewrites the banner.
+    await loadData(true);
+    if (message) setBanner(message);
     clearCompletedBusy = false;
     if (btnClearCompleted) btnClearCompleted.disabled = false;
   }
