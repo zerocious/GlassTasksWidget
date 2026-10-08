@@ -1,6 +1,6 @@
 {
   "name": "glass-tasks-widget",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Glass Tasks ↔ Habits desktop widget powered by Google Tasks",
   "main": "electron/main.js",
   "author": "Glass Tasks",
@@ -56,7 +56,8 @@
       {
         "provider": "github",
         "owner": "zerocious",
-        "repo": "GlassTasksWidget"
+        "repo": "GlassTasksWidget-releases",
+        "releaseType": "release"
       }
     ],
     "win": {

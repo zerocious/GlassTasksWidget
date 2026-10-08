@@ -22,7 +22,7 @@ npm start
 cd C:\Users\User\Desktop\GlassTasksWidget\app
 npm install
 $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
-npm run dist    # NSIS → app\dist\Glass Tasks Widget-Setup-1.0.0.exe + ярлык
+npm run dist    # NSIS → app\dist\Glass Tasks Widget-Setup-<версия>.exe + ярлык
 # или
 npm run pack    # app\dist\win-unpacked\ + ярлык
 ```
@@ -93,8 +93,12 @@ npm run pack    # app\dist\win-unpacked\ + ярлык
 ### Автообновления
 
 - Только **упакованная** сборка (`app.isPackaged`); `npm start` проверки пропускает.
-- Провайдер: GitHub Releases (`zerocious/GlassTasksWidget`). NSIS `dist` пишет `latest.yml` + blockmap.
-- Публикация: создайте GitHub Release с артефактами из `npm run dist` (Setup.exe, `.blockmap`, `latest.yml`). Без опубликованного релиза проверка ничего не найдёт.
+- Провайдер: GitHub Releases в **публичном** репозитории [`zerocious/GlassTasksWidget-releases`](https://github.com/zerocious/GlassTasksWidget-releases). Код остаётся приватным; приватный репозиторий без токена отвечает приложению 404, поэтому установщики лежат отдельно.
+- Новый релиз:
+  1. Поднять `version` в `app/package.json` (и lock: `npm install --package-lock-only`) — одинаковая версия не обновится.
+  2. `$env:GH_TOKEN = gh auth token` (токен с правом записи в `GlassTasksWidget-releases`; в приложение не попадает).
+  3. `cd app; npx electron-builder --win nsis --publish always` — соберёт и опубликует Setup.exe, `.blockmap`, `latest.yml` (`releaseType: release`, не черновик).
+- Версии ≤ 1.0.0 смотрели в приватный репозиторий — их нужно один раз обновить вручную установщиком ≥ 1.0.1.
 - Сборка **без подписи** (`signAndEditExecutable: false`): SmartScreen может ругаться; updater отключает проверку publisher signature, иначе обновления не встанут. Для продакшена лучше code signing.
 
 ### Горячие клавиши
