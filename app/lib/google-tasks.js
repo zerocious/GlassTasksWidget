@@ -48,6 +48,9 @@ let dataInFlight = null;
 let payloadCache = null;
 /** @type {Map<string, Promise<any>>} */
 const mutationInFlight = new Map();
+/** Per-item completion toggles: key → latest queued { completed, run }. */
+/** @type {Map<string, { completed: boolean, run: Promise<any> }>} */
+const completionInFlight = new Map();
 /** @type {Promise<any> | null} */
 let habitsResetInFlight = null;
 
@@ -1097,9 +1100,14 @@ async function setTaskCompleted(listKind, taskId, completed) {
   }
 
   const flightKey = `set:${listKind}:${taskId}`;
-  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
+  const queued = completionInFlight.get(flightKey);
+  // Same target state already in flight → share it. The opposite state (quick
+  // check → uncheck) used to get the pending result back and was silently
+  // dropped; now it runs after the pending one so Google sees clicks in order.
+  if (queued && queued.completed === completed) return queued.run;
+  const after = queued ? queued.run.catch(() => {}) : Promise.resolve();
 
-  const run = (async () => {
+  const run = after.then(async () => {
     const config = loadConfig();
     let cached = lookupCachedItem(listKind, taskId);
     // Recurring tasks: stay open and roll due forward (keeps id / reminders / nesting).
@@ -1222,13 +1230,14 @@ async function setTaskCompleted(listKind, taskId, completed) {
       rescheduled: reschedule,
       item: { id: taskId, ...itemPatch },
     };
-  })()
+  })
     .catch(rejectGoogleAuth)
     .finally(() => {
-    mutationInFlight.delete(flightKey);
-  });
+      const current = completionInFlight.get(flightKey);
+      if (current && current.run === run) completionInFlight.delete(flightKey);
+    });
 
-  mutationInFlight.set(flightKey, run);
+  completionInFlight.set(flightKey, { completed, run });
   return run;
 }
 
