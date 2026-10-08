@@ -57,6 +57,7 @@ const {
   cleanupWorkHoursOnQuit,
   getWorkHoursStatus,
 } = require('../lib/work-hours-blocker');
+const { setLnkRunAsAdmin } = require('../lib/windows-shortcut');
 
 function credentialsPayload() {
   const status = getGoogleCredentialsStatus();
@@ -533,7 +534,19 @@ function ensureWindowsNotificationShortcut() {
     for (const lnk of [startMenuLnk, desktopLnk]) {
       const op = fs.existsSync(lnk) ? 'update' : 'create';
       const ok = shell.writeShortcutLink(lnk, op, details);
-      if (!ok) console.warn('[reminders] shortcut write failed', lnk);
+      if (!ok) {
+        console.warn('[reminders] shortcut write failed', lnk);
+        continue;
+      }
+      try {
+        setLnkRunAsAdmin(lnk);
+      } catch (flagErr) {
+        console.warn(
+          '[reminders] run-as-admin flag',
+          lnk,
+          flagErr && flagErr.message ? flagErr.message : flagErr
+        );
+      }
     }
   } catch (err) {
     console.warn('[reminders] shortcut', err && err.message ? err.message : err);

@@ -10,6 +10,7 @@
 const { app, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { setLnkRunAsAdmin } = require('../lib/windows-shortcut');
 
 const APP_USER_MODEL_ID = 'com.glasstasks.widget';
 const SHORTCUT_NAME = 'Glass Tasks Widget.lnk';
@@ -68,6 +69,7 @@ function writeLnk(lnkPath, target, cwd) {
     iconIndex: 0,
   });
   if (!ok) throw new Error(`writeShortcutLink failed: ${lnkPath}`);
+  setLnkRunAsAdmin(lnkPath);
 }
 
 app.whenReady().then(() => {
@@ -97,6 +99,7 @@ app.whenReady().then(() => {
     console.log(`Start Menu shortcut: ${startMenu}`);
     console.log(`Target: ${target}`);
     console.log(`AppUserModelID: ${APP_USER_MODEL_ID}`);
+    console.log('Run as administrator: yes');
     app.exit(0);
   } catch (err) {
     console.error(err && err.message ? err.message : err);
