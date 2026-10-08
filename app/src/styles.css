@@ -64,8 +64,8 @@
   --row-hover: rgba(255, 255, 255, 0.05);
   --pill-idle: rgba(255, 255, 255, 0.1);
   --check-done-mark: #fff;
-  /* Near-opaque fill for the sticky add field so list text can't show through */
-  --sticky-fill: rgba(24, 13, 18, 0.96);
+  /* Opaque fill for the sticky add field — even 4% transparency let list text show through */
+  --sticky-fill: rgb(24, 13, 18);
 }
 
 /* Light frosted glass — same layout, brighter fill */
@@ -89,7 +89,7 @@
   --row-hover: rgba(40, 20, 30, 0.05);
   --pill-idle: rgba(40, 20, 30, 0.08);
   --check-done-mark: #fff;
-  --sticky-fill: rgba(255, 249, 251, 0.96);
+  --sticky-fill: rgb(255, 249, 251);
 }
 
 /* Settings → «Шрифт». html[...] outranks the theme blocks that define --font. */
@@ -791,8 +791,6 @@ body.is-dnd .row {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 4px;
-  padding: 2px 2px 4px;
   /* Stay reachable on long lists instead of scrolling away under the list */
   position: sticky;
   bottom: 0;
@@ -2507,6 +2505,11 @@ body.is-dnd .row {
   background: rgba(255, 255, 255, 0.22);
   cursor: pointer;
   transition: transform 0.22s var(--ease-out), background 0.22s var(--ease);
+}
+
+/* White 22% dot vanished on the light glass */
+[data-theme="light"] .dot {
+  background: rgba(40, 20, 30, 0.2);
 }
 
 .dot[aria-current="true"] {
