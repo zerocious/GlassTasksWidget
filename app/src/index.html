@@ -217,7 +217,7 @@
             </div>
             <ul class="list" id="list-tasks"></ul>
             <form class="add-row" id="form-add-tasks" autocomplete="off">
-              <input class="add-input" id="input-add-tasks" type="text" maxlength="200" placeholder="Новая задача…" aria-label="Новая задача" />
+              <input class="add-input" id="input-add-tasks" type="text" maxlength="200" placeholder="Новая задача… (завтра 18:30)" aria-label="Новая задача" title="Можно указать срок: сегодня, завтра, в пятницу, 12.10, 18:30, каждый день" />
               <button class="add-btn" type="submit" title="Добавить">+</button>
             </form>
           </section>
@@ -307,6 +307,30 @@
     </div>
   </div>
 
+  <div class="notes-overlay" id="dateOverlay" hidden>
+    <div class="notes-panel date-panel" role="dialog" aria-modal="true" aria-labelledby="datePanelTitle">
+      <div class="notes-panel-head">
+        <div class="notes-panel-title" id="datePanelTitle">Срок</div>
+        <button type="button" class="notes-panel-close" id="btnDateClose" title="Закрыть" aria-label="Закрыть">×</button>
+      </div>
+      <div class="notes-panel-task" id="datePanelTask"></div>
+      <div class="repeat-options date-quick" id="dateQuick" role="group" aria-label="Быстрый выбор срока">
+        <button type="button" class="repeat-opt" data-days="0">Сегодня</button>
+        <button type="button" class="repeat-opt" data-days="1">Завтра</button>
+        <button type="button" class="repeat-opt" data-days="7">Через неделю</button>
+        <button type="button" class="repeat-opt" data-days="none">Без срока</button>
+      </div>
+      <label class="time-field date-field">
+        <span class="time-field-label">Дата</span>
+        <input type="date" class="time-input" id="dateInput" aria-label="Дата срока" />
+      </label>
+      <div class="notes-panel-actions time-panel-actions">
+        <button type="button" class="notes-btn notes-btn-secondary" id="btnDateCancel">Отмена</button>
+        <button type="button" class="notes-btn notes-btn-primary" id="btnDateSave">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
   <div class="notes-overlay" id="repeatOverlay" hidden>
     <div class="notes-panel repeat-panel" role="dialog" aria-modal="true" aria-labelledby="repeatPanelTitle">
       <div class="notes-panel-head">
@@ -350,6 +374,11 @@
   <div class="in-app-toast" id="inAppToast" hidden role="status" aria-live="polite">
     <div class="in-app-toast-title" id="inAppToastTitle"></div>
     <div class="in-app-toast-body" id="inAppToastBody"></div>
+  </div>
+
+  <div class="undo-toast" id="undoToast" hidden role="status" aria-live="polite">
+    <span class="undo-toast-text" id="undoToastText"></span>
+    <button type="button" class="undo-toast-btn" id="undoToastBtn">Отменить</button>
   </div>
 
   <script src="app.js"></script>

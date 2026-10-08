@@ -56,6 +56,16 @@ const btnTimeSave = document.getElementById('btnTimeSave');
 const btnTimeCancel = document.getElementById('btnTimeCancel');
 const btnTimeClose = document.getElementById('btnTimeClose');
 const btnTimeClear = document.getElementById('btnTimeClear');
+const dateOverlay = document.getElementById('dateOverlay');
+const datePanelTask = document.getElementById('datePanelTask');
+const dateInput = document.getElementById('dateInput');
+const dateQuick = document.getElementById('dateQuick');
+const btnDateSave = document.getElementById('btnDateSave');
+const btnDateCancel = document.getElementById('btnDateCancel');
+const btnDateClose = document.getElementById('btnDateClose');
+const undoToast = document.getElementById('undoToast');
+const undoToastText = document.getElementById('undoToastText');
+const undoToastBtn = document.getElementById('undoToastBtn');
 const repeatOverlay = document.getElementById('repeatOverlay');
 const repeatPanelTask = document.getElementById('repeatPanelTask');
 const repeatOptions = document.getElementById('repeatOptions');
@@ -99,6 +109,9 @@ let notesTarget = null;
 let notesSaving = false;
 /** @type {{ listKind: 'tasks' | 'habits', itemId: string, original: string | null } | null} */
 let timeTarget = null;
+/** @type {{ itemId: string, original: string | null } | null} */
+let dateTarget = null;
+let dateSaving = false;
 /** @type {boolean} */
 let timeSaving = false;
 /** @type {{ listKind: 'tasks' | 'habits', itemId: string, original: string | null } | null} */
@@ -349,13 +362,14 @@ let ctxOpenGen = 0;
 /**
  * Per-overlay animation state: pending close timer and an open generation
  * (bumped to cancel a pending afterPaint open when a close races it).
- * @type {Record<'notes' | 'time' | 'repeat' | 'streak', { timer: ReturnType<typeof setTimeout> | null, gen: number }>}
+ * @type {Record<'notes' | 'time' | 'repeat' | 'streak' | 'date', { timer: ReturnType<typeof setTimeout> | null, gen: number }>}
  */
 const overlayAnim = {
   notes: { timer: null, gen: 0 },
   time: { timer: null, gen: 0 },
   repeat: { timer: null, gen: 0 },
   streak: { timer: null, gen: 0 },
+  date: { timer: null, gen: 0 },
 };
 
 function motionMs(cssVar, fallback) {
@@ -411,7 +425,7 @@ function setSettingsOpen(open) {
 /**
  * @param {HTMLElement | null} overlay
  * @param {boolean} open
- * @param {{ timerRef: 'notes' | 'time' | 'repeat' | 'streak', onClosed?: () => void, focusEl?: HTMLElement | null }} opts
+ * @param {{ timerRef: 'notes' | 'time' | 'repeat' | 'streak' | 'date', onClosed?: () => void, focusEl?: HTMLElement | null }} opts
  */
 function setOverlayOpen(overlay, open, opts) {
   if (!overlay) return;
@@ -458,7 +472,7 @@ function isOverlayShown(overlay) {
 /**
  * Close an overlay, animated or immediately (when another panel replaces it).
  * @param {HTMLElement} overlay
- * @param {'notes' | 'time' | 'repeat' | 'streak'} key
+ * @param {'notes' | 'time' | 'repeat' | 'streak' | 'date'} key
  * @param {boolean} [instant]
  */
 function closeOverlay(overlay, key, instant) {
@@ -1398,6 +1412,63 @@ function carryPendingItems(prev, next) {
   }
 }
 
+/** Last successful load; drives focus / visibility refreshes. */
+let lastLoadAt = 0;
+const BG_SYNC_MS = 3 * 60 * 1000;
+const BG_STALE_MS = 60 * 1000;
+
+/** What the user can see; a background refresh with the same signature skips re-rendering. */
+function dataSignature(data) {
+  if (!data) return '';
+  return JSON.stringify([
+    data.mode,
+    Boolean(data.offline),
+    data.warning || '',
+    (data.tasks || []).map((t) => t && [t.id, t.title, t.notes, t.due, t.completed, t.parent, t.position]),
+    (data.habits || []).map((h) => h && [h.id, h.title, h.notes, h.completed, h.streak, h.position]),
+  ]);
+}
+
+/** Never refresh under the user's hands: edits, open panels, drags or pending undo. */
+function canBackgroundSync() {
+  if (!window.widgetApi || document.hidden || loadInFlight || addBusy || dndActive) return false;
+  if (pendingIds.size || undoState) return false;
+  if ([notesOverlay, timeOverlay, repeatOverlay, streakOverlay, dateOverlay].some(isOverlayShown)) return false;
+  if (ctxMenuEl && !ctxMenuEl.hidden) return false;
+  if (document.querySelector('.row.is-editing, .row-sub-edit')) return false;
+  const active = document.activeElement;
+  return !(active && active.matches && active.matches('.add-input') && active.value);
+}
+
+/** Pick up changes made elsewhere (phone, web) without the ↻ button. */
+async function backgroundSync() {
+  if (!canBackgroundSync()) return;
+  let next;
+  try {
+    next = await window.widgetApi.getData({ force: true });
+  } catch {
+    return;
+  }
+  lastLoadAt = Date.now();
+  if (!next || !canBackgroundSync()) return;
+  if (dataSignature(next) === dataSignature(state)) return;
+  carryPendingItems(state, next);
+  state = next;
+  if (state.defaultAccent) configAccent = state.defaultAccent;
+  renderAll();
+}
+
+function syncIfStale() {
+  if (Date.now() - lastLoadAt > BG_STALE_MS) backgroundSync();
+}
+
+setInterval(() => backgroundSync(), BG_SYNC_MS);
+window.addEventListener('focus', syncIfStale);
+window.addEventListener('online', () => backgroundSync());
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) syncIfStale();
+});
+
 async function loadData(force) {
   if (!window.widgetApi) {
     setBanner('Запустите через Electron (npm start), не открывайте HTML напрямую.');
@@ -1409,6 +1480,7 @@ async function loadData(force) {
       const next = await window.widgetApi.getData(force ? { force: true } : {});
       carryPendingItems(state, next);
       state = next;
+      lastLoadAt = Date.now();
       if (state.defaultAccent) configAccent = state.defaultAccent;
       renderAll();
     } catch (err) {
@@ -1502,6 +1574,12 @@ async function toggleItem(listKind, item) {
     if (listKind === 'habits' && result && result.stats) {
       applyHabitStats(item, result.stats);
     }
+    if (listKind === 'tasks' && result && result.rescheduled) {
+      const prevKey = dueKeyOf(prevSnapshot.due);
+      showUndoToast(`«${item.title}»: следующий раз ${formatDayLabel(dueKeyOf(item.due))}`, {
+        onUndo: () => undoReschedule(item, prevKey),
+      });
+    }
     if (listKind === 'habits') {
       resortHabitsLocal();
       patchHabitRow(item);
@@ -1521,6 +1599,22 @@ async function toggleItem(listKind, item) {
       patchTaskRow(item);
     }
     setBanner(`Не удалось обновить: ${err.message || err}`);
+  } finally {
+    pendingIds.delete(item.id);
+  }
+}
+
+/** Move a just-rescheduled recurring task back to its previous date. */
+async function undoReschedule(item, prevKey) {
+  if (!guardMutate('отменить')) return;
+  pendingIds.add(item.id);
+  try {
+    const result = await window.widgetApi.updateItem('tasks', item.id, { due: prevKey });
+    if (result && result.item) Object.assign(item, result.item);
+    resortTasksLocal();
+    patchTaskRow(item);
+  } catch (err) {
+    setBanner(`Не удалось отменить: ${err.message || err}`);
   } finally {
     pendingIds.delete(item.id);
   }
@@ -1561,7 +1655,7 @@ async function onAddSubmit(listKind, input) {
   }
   addBusy = true;
   try {
-    const result = await window.widgetApi.createItem(listKind, title);
+    const result = await window.widgetApi.createItem(listKind, title, { parse: listKind === 'tasks' });
     input.value = '';
     if (result && result.item) {
       insertCreatedItem(listKind, result.item);
@@ -1902,49 +1996,130 @@ async function renameItem(listKind, item, nextTitle) {
   }
 }
 
+const RU_PLURAL = new Intl.PluralRules('ru-RU');
+
+/** «1 подзадача», «3 подзадачи», «5 подзадач». */
+function pluralRu(n, one, few, many) {
+  const form = RU_PLURAL.select(n);
+  return `${n} ${form === 'one' ? one : form === 'few' ? few : many}`;
+}
+
+/** @type {{ timer: ReturnType<typeof setTimeout>, commit: () => void, undo: () => void } | null} */
+let undoState = null;
+const UNDO_MS = 5000;
+
+function hideUndoToast() {
+  if (undoToast) undoToast.hidden = true;
+}
+
+/** Run the pending action now (another undoable action started, or the window is closing). */
+function commitPendingUndo() {
+  const entry = undoState;
+  if (!entry) return;
+  undoState = null;
+  clearTimeout(entry.timer);
+  hideUndoToast();
+  entry.commit();
+}
+
+/**
+ * Show «… · Отменить» for UNDO_MS; `onCommit` runs when the toast expires.
+ * @param {string} text
+ * @param {{ onUndo: () => void, onCommit?: () => void }} handlers
+ */
+function showUndoToast(text, { onUndo, onCommit }) {
+  commitPendingUndo();
+  if (!undoToast || !undoToastText) {
+    onCommit?.();
+    return;
+  }
+  const entry = {
+    timer: setTimeout(() => {
+      if (undoState !== entry) return;
+      undoState = null;
+      hideUndoToast();
+      entry.commit();
+    }, UNDO_MS),
+    commit: onCommit || (() => {}),
+    undo: onUndo,
+  };
+  undoState = entry;
+  undoToastText.textContent = text;
+  undoToast.hidden = false;
+}
+
+undoToastBtn?.addEventListener('click', (e) => {
+  e.preventDefault();
+  const entry = undoState;
+  if (!entry) return;
+  undoState = null;
+  clearTimeout(entry.timer);
+  hideUndoToast();
+  entry.undo();
+});
+window.addEventListener('beforeunload', () => commitPendingUndo());
+
 async function removeItem(listKind, item) {
   if (!guardMutate('удалить задачу')) return;
   if (pendingIds.has(item.id)) return;
-  const label = listKind === 'habits' ? 'привычку' : 'задачу';
-  const childCount =
-    listKind === 'tasks'
-      ? state.tasks.filter((t) => t && t.parent === item.id).length
-      : 0;
-  const confirmMsg =
-    childCount > 0
-      ? `Удалить задачу «${item.title}» и ${childCount} подзадач${childCount === 1 ? 'у' : childCount < 5 ? 'и' : ''}?`
-      : `Удалить ${label} «${item.title}»?`;
-  if (!window.confirm(confirmMsg)) return;
+  commitPendingUndo();
 
-  pendingIds.add(item.id);
   const listKey = listKind === 'habits' ? 'habits' : 'tasks';
-  const prevList = state[listKey].slice();
+  const listEl = listKind === 'habits' ? listHabits : listTasks;
   const removedIds = new Set([item.id]);
   if (listKind === 'tasks') {
-    for (const t of prevList) {
+    for (const t of state.tasks) {
       if (t && t.parent === item.id) removedIds.add(t.id);
     }
   }
-  state[listKey] = prevList.filter((i) => i && !removedIds.has(i.id));
+  const before = state[listKey].slice();
 
-  const listEl = listKind === 'habits' ? listHabits : listTasks;
-  for (const id of removedIds) {
-    const row = rowById(listEl, id);
-    if (row) row.remove();
-  }
-  const visible = filterVisibleItems(state[listKey]);
-  ensureListEmpty(listEl, listKind, state[listKey], visible);
+  // Optimistic: hide now, delete in Google only once the undo window passes.
+  // pendingIds keeps refreshes from bringing the row back meanwhile.
+  pendingIds.add(item.id);
+  state[listKey] = before.filter((i) => i && !removedIds.has(i.id));
+  for (const id of removedIds) rowById(listEl, id)?.remove();
+  ensureListEmpty(listEl, listKind, state[listKey], filterVisibleItems(state[listKey]));
 
-  try {
-    await window.widgetApi.deleteItem(listKind, item.id);
-  } catch (err) {
-    state[listKey] = prevList;
-    if (listKind === 'habits') renderHabits();
-    else renderTasks();
-    setBanner(`Не удалось удалить: ${err.message || err}`);
-  } finally {
-    pendingIds.delete(item.id);
-  }
+  const restore = () => {
+    // Put the removed items back at their old positions; keep anything added meanwhile.
+    const current = new Set(state[listKey].map((i) => i && i.id));
+    const kept = before.filter((i) => i && (removedIds.has(i.id) || current.has(i.id)));
+    const keptIds = new Set(kept.map((i) => i.id));
+    state[listKey] = [...state[listKey].filter((i) => i && !keptIds.has(i.id)), ...kept];
+    if (listKind === 'habits') {
+      resortHabitsLocal();
+      renderHabits();
+    } else {
+      resortTasksLocal();
+      renderTasks();
+    }
+  };
+
+  const children = removedIds.size - 1;
+  const text =
+    listKind === 'habits'
+      ? `Привычка «${item.title}» удалена`
+      : children > 0
+        ? `Задача и ${pluralRu(children, 'подзадача', 'подзадачи', 'подзадач')} удалены`
+        : `Задача «${item.title}» удалена`;
+
+  showUndoToast(text, {
+    onUndo: () => {
+      pendingIds.delete(item.id);
+      restore();
+    },
+    onCommit: async () => {
+      try {
+        await window.widgetApi.deleteItem(listKind, item.id);
+      } catch (err) {
+        restore();
+        setBanner(`Не удалось удалить: ${err.message || err}`);
+      } finally {
+        pendingIds.delete(item.id);
+      }
+    },
+  });
 }
 
 function beginInlineEdit(listKind, item, row) {
@@ -2059,6 +2234,7 @@ function openNotesPanel(listKind, item) {
   if (!notesOverlay || !notesTextarea || !item) return;
   if (!guardMutate('изменить заметки')) return;
   hideCtxMenu({ instant: true });
+  closeDatePanel({ instant: true });
   closeTimePanel({ instant: true });
   closeRepeatPanel({ instant: true });
   closeStreakPanel({ instant: true });
@@ -2153,6 +2329,7 @@ function openTimePanel(listKind, item) {
   if (!timeOverlay || !timeInput || !item) return;
   if (!guardMutate('изменить время')) return;
   hideCtxMenu({ instant: true });
+  closeDatePanel({ instant: true });
   closeNotesPanel({ instant: true });
   closeRepeatPanel({ instant: true });
   closeStreakPanel({ instant: true });
@@ -2169,6 +2346,82 @@ function openTimePanel(listKind, item) {
     timerRef: 'time',
     focusEl: timeInput,
   });
+}
+
+/** Local YYYY-MM-DD, `offset` days from today. */
+function localDayKey(offset = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return localIsoFromParts(d.getFullYear(), d.getMonth() + 1, d.getDate());
+}
+
+/** Google stores `due` as UTC midnight of the chosen calendar day. */
+function dueKeyOf(due) {
+  return typeof due === 'string' && /^\d{4}-\d{2}-\d{2}/.test(due) ? due.slice(0, 10) : null;
+}
+
+function formatDayLabel(key) {
+  if (!key) return 'без срока';
+  if (key === localDayKey(0)) return 'сегодня';
+  if (key === localDayKey(1)) return 'завтра';
+  const [y, m, d] = key.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+}
+
+function closeDatePanel({ instant } = {}) {
+  if (!isOverlayShown(dateOverlay)) return;
+  dateTarget = null;
+  if (dateInput) dateInput.value = '';
+  closeOverlay(dateOverlay, 'date', instant);
+}
+
+/**
+ * @param {string | null} value  YYYY-MM-DD or null to clear
+ */
+async function saveDatePanel(value) {
+  if (!dateTarget || !window.widgetApi || dateSaving) return false;
+  if (!guardMutate('изменить срок')) return false;
+  const { itemId, original } = dateTarget;
+  const item = state.tasks.find((t) => t && t.id === itemId);
+  if (!item) {
+    closeDatePanel();
+    return false;
+  }
+  if (value === original) {
+    closeDatePanel();
+    return true;
+  }
+  dateSaving = true;
+  if (btnDateSave) btnDateSave.disabled = true;
+  try {
+    const result = await window.widgetApi.updateItem('tasks', itemId, { due: value });
+    if (result && result.item) Object.assign(item, result.item);
+    resortTasksLocal();
+    patchTaskRow(item);
+    closeDatePanel();
+    return true;
+  } catch (err) {
+    setBanner(`Не удалось сохранить срок: ${err.message || err}`);
+    return false;
+  } finally {
+    dateSaving = false;
+    if (btnDateSave) btnDateSave.disabled = false;
+  }
+}
+
+function openDatePanel(item) {
+  if (!dateOverlay || !dateInput || !item) return;
+  if (!guardMutate('изменить срок')) return;
+  hideCtxMenu({ instant: true });
+  closeNotesPanel({ instant: true });
+  closeTimePanel({ instant: true });
+  closeRepeatPanel({ instant: true });
+  closeStreakPanel({ instant: true });
+  const original = dueKeyOf(item.due);
+  dateTarget = { itemId: item.id, original };
+  if (datePanelTask) datePanelTask.textContent = item.title || '';
+  dateInput.value = original || '';
+  setOverlayOpen(dateOverlay, true, { timerRef: 'date', focusEl: dateInput });
 }
 
 function closeRepeatPanel({ instant } = {}) {
@@ -2232,6 +2485,7 @@ function openRepeatPanel(listKind, item) {
   if (!repeatOverlay || !item) return;
   if (!guardMutate('изменить повтор')) return;
   hideCtxMenu({ instant: true });
+  closeDatePanel({ instant: true });
   closeNotesPanel({ instant: true });
   closeTimePanel({ instant: true });
   closeStreakPanel({ instant: true });
@@ -2342,6 +2596,7 @@ function shiftStreakMonth(delta) {
 function openStreakPanel(habit) {
   if (!streakOverlay || !habit) return;
   hideCtxMenu({ instant: true });
+  closeDatePanel({ instant: true });
   closeNotesPanel({ instant: true });
   closeTimePanel({ instant: true });
   closeRepeatPanel({ instant: true });
@@ -2439,6 +2694,10 @@ function ensureCtxMenu() {
       '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h9l3 3v13H6z"/><path d="M14 4v4h4"/><path d="M8 12h8M8 16h6"/></svg>' +
       '<span>Заметки</span>' +
     '</button>' +
+    '<button type="button" class="ctx-menu-item" role="menuitem" data-action="date">' +
+      '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>' +
+      '<span>Срок</span>' +
+    '</button>' +
     '<button type="button" class="ctx-menu-item" role="menuitem" data-action="time">' +
       '<svg class="ctx-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v5l3 2"/></svg>' +
       '<span>Время</span>' +
@@ -2472,6 +2731,7 @@ function ensureCtxMenu() {
     if (!item) return;
     if (action === 'edit') beginInlineEdit(listKind, item, row);
     else if (action === 'notes') openNotesPanel(listKind, item);
+    else if (action === 'date' && listKind === 'tasks') openDatePanel(item);
     else if (action === 'time') openTimePanel(listKind, item);
     else if (action === 'repeat' && listKind === 'tasks') openRepeatPanel(listKind, item);
     else if (action === 'subtask' && listKind === 'tasks') beginAddSubtask(item, row);
@@ -2519,6 +2779,8 @@ function showCtxMenu(listKind, item, e) {
   const repeatBtn = menu.querySelector('[data-action="repeat"]');
   // Habits already reset daily via streak store — recurrence is for tasks.
   if (repeatBtn) repeatBtn.hidden = listKind !== 'tasks';
+  const dateBtn = menu.querySelector('[data-action="date"]');
+  if (dateBtn) dateBtn.hidden = listKind !== 'tasks';
 
   menu.classList.remove('is-open');
   menu.hidden = false;
@@ -2783,6 +3045,11 @@ document.addEventListener('pointerdown', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  if (dateOverlay && !dateOverlay.hidden) {
+    e.preventDefault();
+    closeDatePanel();
+    return;
+  }
   if (streakOverlay && !streakOverlay.hidden) {
     e.preventDefault();
     closeStreakPanel();
@@ -2918,6 +3185,45 @@ if (timeInput) {
     }
   });
 }
+if (dateQuick) {
+  dateQuick.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-days]');
+    if (!btn || dateSaving) return;
+    e.preventDefault();
+    const days = btn.getAttribute('data-days');
+    saveDatePanel(days === 'none' ? null : localDayKey(Number(days)));
+  });
+}
+if (btnDateSave) {
+  btnDateSave.addEventListener('click', (e) => {
+    e.preventDefault();
+    saveDatePanel(dateInput && dateInput.value ? dateInput.value : null);
+  });
+}
+for (const btn of [btnDateCancel, btnDateClose]) {
+  btn?.addEventListener('click', (e) => {
+    e.preventDefault();
+    closeDatePanel();
+  });
+}
+if (dateOverlay) {
+  dateOverlay.addEventListener('click', (e) => {
+    if (e.target === dateOverlay) closeDatePanel();
+  });
+}
+if (dateInput) {
+  dateInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeDatePanel();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      saveDatePanel(dateInput.value || null);
+    }
+  });
+}
+
 if (repeatOptions) {
   repeatOptions.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-repeat]');
