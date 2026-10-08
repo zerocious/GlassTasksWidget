@@ -228,6 +228,9 @@ function buildHostsBlock(sites) {
   for (const site of sites) {
     lines.push(`127.0.0.1 ${site}`);
     lines.push(`127.0.0.1 www.${site}`);
+    // IPv6 — some browsers prefer AAAA and would bypass IPv4-only blocks
+    lines.push(`::1 ${site}`);
+    lines.push(`::1 www.${site}`);
   }
   lines.push(END_MARKER);
   return lines.join(os.EOL);

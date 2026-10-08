@@ -60,6 +60,7 @@ const {
   cleanupWorkHoursOnQuit,
   getWorkHoursStatus,
 } = require('../lib/work-hours-blocker');
+const { setLnkRunAsAdmin } = require('../lib/windows-shortcut');
 
 function credentialsPayload() {
   const status = getGoogleCredentialsStatus();
@@ -586,8 +587,20 @@ function ensureWindowsNotificationShortcut(opts = {}) {
       const exists = fs.existsSync(lnk);
       if (!exists && lnk === desktopLnk) continue;
       const ok = shell.writeShortcutLink(lnk, exists ? 'update' : 'create', details);
-      if (!ok) console.warn('[reminders] shortcut write failed', lnk);
       if (lnk === startMenuLnk) startMenuOk = ok;
+      if (!ok) {
+        console.warn('[reminders] shortcut write failed', lnk);
+        continue;
+      }
+      try {
+        setLnkRunAsAdmin(lnk);
+      } catch (flagErr) {
+        console.warn(
+          '[reminders] run-as-admin flag',
+          lnk,
+          flagErr && flagErr.message ? flagErr.message : flagErr
+        );
+      }
     }
     // Only skip later calls once the AUMID link (Start Menu) is really in place.
     notificationShortcutWritten = startMenuOk;
