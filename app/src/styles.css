@@ -207,6 +207,16 @@ body {
   font-size: 17px;
   font-weight: 600;
   letter-spacing: -0.01em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Compact (300px): the title ran 14px under the Tasks/Habits pill. The pill
+   already names the view, so drop the duplicate while the tabs are shown. */
+[data-size="compact"] .widget:not(.is-settings) .title {
+  display: none;
 }
 
 .offline-pill {
@@ -232,6 +242,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .tabs {
@@ -2347,7 +2358,8 @@ body.is-dnd .row {
 }
 
 [data-size="compact"] .panel {
-  padding: 2px 12px 6px;
+  /* Bottom 0 for the same reason as .panel — sticky add row owns that space */
+  padding: 2px 12px 0;
   gap: 6px;
 }
 
