@@ -362,6 +362,24 @@ function reorderMockItems(listKind, orderedIds) {
 }
 
 /**
+ * Remove every completed task (mirrors Google tasks.clear for demo mode).
+ * @returns {{ ok: true, mode: 'mock', removedIds: string[] }}
+ */
+function clearMockCompletedTasks() {
+  const store = loadMockStore();
+  const removedIds = [];
+  store.tasks = (store.tasks || []).filter((t) => {
+    if (t && (t.completed || t.status === 'completed')) {
+      removedIds.push(t.id);
+      return false;
+    }
+    return true;
+  });
+  if (removedIds.length) saveMockStore(store);
+  return { ok: true, mode: 'mock', removedIds };
+}
+
+/**
  * Clear Google-style completed flags on habits for a new day.
  * Does not touch the streak store (completedToday / history stay intact).
  * @returns {number} how many habits were flipped
@@ -387,6 +405,7 @@ module.exports = {
   addMockItem,
   setMockCompleted,
   resetMockHabitsCompleted,
+  clearMockCompletedTasks,
   updateMockItem,
   deleteMockItem,
   reorderMockItems,

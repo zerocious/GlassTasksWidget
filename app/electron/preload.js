@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('widgetApi', {
     ipcRenderer.invoke('widget:update-item', { listKind, taskId, patch }),
   deleteItem: (listKind, taskId) =>
     ipcRenderer.invoke('widget:delete-item', { listKind, taskId }),
+  clearCompleted: () => ipcRenderer.invoke('widget:clear-completed'),
   moveItem: (listKind, taskId, previousId, orderedIds) =>
     ipcRenderer.invoke('widget:move-item', {
       listKind,

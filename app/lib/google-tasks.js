@@ -21,6 +21,7 @@ const {
   deleteMockItem,
   reorderMockItems,
   resetMockHabitsCompleted,
+  clearMockCompletedTasks,
 } = require('./mock-data');
 const { loadConfig, hasGoogleCredentials } = require('./config');
 const { loadSettings, saveSettings } = require('./settings-store');
@@ -642,15 +643,37 @@ async function resolveListId(tasksApi, name) {
   return map.get(String(name || '').trim()) || null;
 }
 
+/** Hard cap on pages per list fetch (100 items each) — guards against runaway loops. */
+const MAX_LIST_PAGES = 10;
+
+/**
+ * Fetch every task in a list, following nextPageToken. A single 50-item page
+ * used to drop open tasks once enough completed ones accumulated.
+ * @param {any} tasksApi
+ * @param {string} listId
+ * @param {{ showHidden?: boolean }} [opts]
+ */
+async function listAllTaskItems(tasksApi, listId, opts = {}) {
+  const items = [];
+  let pageToken;
+  for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
+    const res = await tasksApi.tasks.list({
+      tasklist: listId,
+      showCompleted: true,
+      showHidden: Boolean(opts.showHidden),
+      maxResults: 100,
+      pageToken,
+    });
+    items.push(...((res.data && res.data.items) || []));
+    pageToken = res.data && res.data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return items;
+}
+
 async function listTasks(tasksApi, listId) {
   if (!listId) return [];
-  const res = await tasksApi.tasks.list({
-    tasklist: listId,
-    showCompleted: true,
-    showHidden: false,
-    maxResults: 50,
-  });
-  const items = res.data.items || [];
+  const items = await listAllTaskItems(tasksApi, listId);
   return decorateTasks(items.map(mapTask));
 }
 
@@ -686,13 +709,8 @@ function withHabits(habitsRaw) {
 /** List habits without the tasks "open + 5 done" truncation. */
 async function listHabitTasks(tasksApi, listId) {
   if (!listId) return [];
-  const res = await tasksApi.tasks.list({
-    tasklist: listId,
-    showCompleted: true,
-    showHidden: false,
-    maxResults: 50,
-  });
-  return (res.data.items || []).map(mapTask);
+  const items = await listAllTaskItems(tasksApi, listId);
+  return items.map(mapTask);
 }
 
 async function fetchLivePayload(config) {
@@ -784,8 +802,18 @@ function fromPayloadCache() {
     }))
   );
   const next = { ...p, tasks, habits, offline: false };
-  setPayloadCache(next);
+  // Keep the original fetch time — refreshing `at` here made the soft TTL
+  // slide forever under frequent reads, so Google was never re-fetched.
+  payloadCache = { at: payloadCache.at, payload: next };
   return next;
+}
+
+/**
+ * Last known payload without triggering a fetch (for reminder rescheduling
+ * after local mutations). Null when nothing is cached yet.
+ */
+function peekWidgetData() {
+  return payloadCache ? payloadCache.payload : null;
 }
 
 /**
@@ -836,25 +864,28 @@ async function resetCompletedHabitsForNewDay() {
         return { ok: true, reset: false, reason: 'no_list' };
       }
 
-      const res = await tasksApi.tasks.list({
-        tasklist: listId,
-        showCompleted: true,
-        showHidden: true,
-        maxResults: 100,
-      });
-      const items = (res.data.items || []).filter(
-        (i) => i && i.id && i.status === 'completed'
-      );
+      const all = await listAllTaskItems(tasksApi, listId, { showHidden: true });
+      const items = all.filter((i) => i && i.id && i.status === 'completed');
 
-      for (const item of items) {
-        await tasksApi.tasks.patch({
-          tasklist: listId,
-          task: item.id,
-          requestBody: { status: 'needsAction', completed: null },
-        });
-        patchOfflineCache('habits', item.id, {
-          status: 'needsAction',
-          completed: false,
+      await Promise.all(
+        items.map((item) =>
+          tasksApi.tasks.patch({
+            tasklist: listId,
+            task: item.id,
+            requestBody: { status: 'needsAction', completed: null },
+          })
+        )
+      );
+      const resetIds = new Set(items.map((item) => item.id));
+      const cached = resetIds.size ? loadOfflineCache() : null;
+      if (cached) {
+        // One write for the whole batch instead of one per habit.
+        saveOfflineCache({
+          ...cached,
+          mode: 'google',
+          habits: (cached.habits || []).map((h) =>
+            h && resetIds.has(h.id) ? { ...h, status: 'needsAction', completed: false } : h
+          ),
         });
       }
 
@@ -1532,6 +1563,67 @@ async function deleteItem(listKind, taskId) {
 }
 
 /**
+ * Drop completed tasks from in-memory + offline caches after a clear.
+ * @param {(t: any) => boolean} isCleared
+ */
+function dropClearedFromCaches(isCleared) {
+  if (payloadCache && payloadCache.payload && Array.isArray(payloadCache.payload.tasks)) {
+    const prev = payloadCache.payload;
+    payloadCache = {
+      at: payloadCache.at,
+      payload: { ...prev, tasks: prev.tasks.filter((t) => !(t && isCleared(t))) },
+    };
+  }
+  const cached = loadOfflineCache();
+  if (cached) {
+    saveOfflineCache({
+      ...cached,
+      mode: 'google',
+      tasks: (cached.tasks || []).filter((t) => !(t && isCleared(t))),
+    });
+  }
+}
+
+/**
+ * Remove all completed tasks from the Tasks list. Google: tasks.clear (same as
+ * «Удалить выполненные» in Google Tasks — one request, items become hidden).
+ * @returns {Promise<{ ok: boolean, mode: string, removedIds?: string[] }>}
+ */
+async function clearCompletedTasks() {
+  const flightKey = 'clear:tasks';
+  if (mutationInFlight.has(flightKey)) return mutationInFlight.get(flightKey);
+
+  const run = (async () => {
+    const config = loadConfig();
+
+    if (!hasGoogleCredentials()) {
+      const result = clearMockCompletedTasks();
+      const removed = new Set(result.removedIds);
+      dropClearedFromCaches((t) => removed.has(t.id));
+      return result;
+    }
+
+    const auth = await getAuthorizedClient({ interactive: false });
+    if (!auth) throw new Error('Не авторизован');
+
+    const tasksApi = getGoogle().tasks({ version: 'v1', auth });
+    const listId = await resolveListId(tasksApi, config.tasksListName);
+    if (!listId) throw new Error(`Список «${config.tasksListName}» не найден`);
+
+    await tasksApi.tasks.clear({ tasklist: listId });
+    dropClearedFromCaches((t) => Boolean(t.completed) || t.status === 'completed');
+    return { ok: true, mode: 'google' };
+  })()
+    .catch(rejectGoogleAuth)
+    .finally(() => {
+      mutationInFlight.delete(flightKey);
+    });
+
+  mutationInFlight.set(flightKey, run);
+  return run;
+}
+
+/**
  * Previous sibling for tasks.move — never the parent row, and only an item
  * that shares the same parent (roots share parent=null).
  * @param {'tasks' | 'habits'} listKind
@@ -1661,11 +1753,13 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
 
 module.exports = {
   getWidgetData,
+  peekWidgetData,
   loginGoogle,
   setTaskCompleted,
   createItem,
   updateItem,
   deleteItem,
+  clearCompletedTasks,
   moveItem,
   invalidateListCache,
   invalidatePayloadCache,

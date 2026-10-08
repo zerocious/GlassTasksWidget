@@ -15,16 +15,18 @@ const {
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const { loadConfig, getGoogleCredentialsStatus, saveGoogleCredentials } = require('../lib/config');
 const {
   getWidgetData,
+  peekWidgetData,
   loginGoogle,
   setTaskCompleted,
   createItem,
   updateItem,
   deleteItem,
+  clearCompletedTasks,
   moveItem,
   invalidateListCache,
   invalidatePayloadCache,
@@ -39,6 +41,7 @@ const {
   getSizePreset,
   DEFAULT_TOGGLE_HOTKEY,
   DEFAULT_SWITCH_HOTKEY,
+  FONT_FAMILIES,
 } = require('../lib/settings-store');
 const { sampleWallpaperPalette } = require('../lib/wallpaper-palette');
 const {
@@ -106,24 +109,66 @@ if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID);
 }
 
+/** reg.exe spawn — cache so settings IPC doesn't spawn a process per call. */
+const TOAST_ENABLED_CACHE_MS = 30 * 1000;
+const TOAST_ENABLED_REG_ARGS = [
+  'query',
+  'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications',
+  '/v',
+  'ToastEnabled',
+];
+/** @type {{ at: number, value: boolean } | null} */
+let toastEnabledCache = null;
+let toastEnabledRefreshing = false;
+
+/** @param {string} out reg.exe stdout */
+function parseToastEnabled(out) {
+  const m = String(out || '').match(/ToastEnabled\s+REG_DWORD\s+0x([0-9a-fA-F]+)/i);
+  return m ? parseInt(m[1], 16) !== 0 : true;
+}
+
 /**
  * HKCU PushNotifications\ToastEnabled — master switch in
  * Settings → System → Notifications. 0 blocks all Electron toasts.
+ * Stale cache is returned immediately and refreshed in the background
+ * (stale-while-revalidate); only the first call or `fresh` blocks on reg.exe.
+ * @param {{ fresh?: boolean }} [opts]
  * @returns {boolean}
  */
-function windowsToastsGloballyEnabled() {
+function windowsToastsGloballyEnabled(opts = {}) {
   if (process.platform !== 'win32') return true;
-  try {
-    const out = execSync(
-      'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\PushNotifications" /v ToastEnabled',
-      { encoding: 'utf8', windowsHide: true }
-    );
-    const m = out.match(/ToastEnabled\s+REG_DWORD\s+0x([0-9a-fA-F]+)/i);
-    if (!m) return true;
-    return parseInt(m[1], 16) !== 0;
-  } catch {
-    return true;
+  if (!opts.fresh && toastEnabledCache) {
+    if (
+      Date.now() - toastEnabledCache.at >= TOAST_ENABLED_CACHE_MS &&
+      !toastEnabledRefreshing
+    ) {
+      toastEnabledRefreshing = true;
+      execFile(
+        'reg',
+        TOAST_ENABLED_REG_ARGS,
+        { encoding: 'utf8', windowsHide: true, timeout: 3000 },
+        (err, stdout) => {
+          toastEnabledRefreshing = false;
+          toastEnabledCache = { at: Date.now(), value: err ? true : parseToastEnabled(stdout) };
+        }
+      );
+    }
+    return toastEnabledCache.value;
   }
+  let value = true;
+  try {
+    value = parseToastEnabled(
+      execFileSync('reg', TOAST_ENABLED_REG_ARGS, {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 3000,
+      })
+    );
+  } catch {
+    value = true;
+  }
+  toastEnabledCache = { at: Date.now(), value };
+  return value;
 }
 
 // Minimal 16×16 accent PNG (glass-tasks red square with check hint)
@@ -495,13 +540,19 @@ function createWindow() {
   }
 }
 
+let notificationShortcutWritten = false;
+
 /**
  * Ensure Start Menu + Desktop shortcuts carry AppUserModelID matching
  * app.setAppUserModelId — required for Windows Action Center toasts.
- * Always rewrite both so pack scripts / stale .lnk files cannot strip AUMID.
+ * Rewrites the Start Menu link so pack scripts / stale .lnk files cannot strip
+ * AUMID; the Desktop link is only updated if present (deleting it sticks).
+ * Runs once per session unless forced (manual «Проверить»).
+ * @param {{ force?: boolean }} [opts]
  */
-function ensureWindowsNotificationShortcut() {
+function ensureWindowsNotificationShortcut(opts = {}) {
   if (process.platform !== 'win32') return;
+  if (notificationShortcutWritten && !opts.force) return;
   try {
     const startMenuDir = path.join(
       app.getPath('appData'),
@@ -530,11 +581,16 @@ function ensureWindowsNotificationShortcut() {
 
     const startMenuLnk = path.join(startMenuDir, 'Glass Tasks Widget.lnk');
     const desktopLnk = path.join(app.getPath('desktop'), 'Glass Tasks Widget.lnk');
+    let startMenuOk = false;
     for (const lnk of [startMenuLnk, desktopLnk]) {
-      const op = fs.existsSync(lnk) ? 'update' : 'create';
-      const ok = shell.writeShortcutLink(lnk, op, details);
+      const exists = fs.existsSync(lnk);
+      if (!exists && lnk === desktopLnk) continue;
+      const ok = shell.writeShortcutLink(lnk, exists ? 'update' : 'create', details);
       if (!ok) console.warn('[reminders] shortcut write failed', lnk);
+      if (lnk === startMenuLnk) startMenuOk = ok;
     }
+    // Only skip later calls once the AUMID link (Start Menu) is really in place.
+    notificationShortcutWritten = startMenuOk;
   } catch (err) {
     console.warn('[reminders] shortcut', err && err.message ? err.message : err);
   }
@@ -745,8 +801,11 @@ function refreshExactReminders(data) {
     clearExactReminderTimers();
     return;
   }
-  if (data) {
-    scheduleExactReminders(data);
+  // Mutations patch the in-memory payload, so reuse it instead of a full
+  // Google refetch after every toggle / edit once the soft TTL has lapsed.
+  const known = data || peekWidgetData();
+  if (known) {
+    scheduleExactReminders(known);
     return;
   }
   getWidgetData()
@@ -785,12 +844,14 @@ function reminderToastIcon() {
  * Native WinRT toast via PowerShell — fallback when Electron Notification fails.
  * Uses the same AppUserModelID so the toast lands under "Glass Tasks Widget"
  * in Action Center (requires Start Menu .lnk with matching AUMID).
+ * Runs PowerShell asynchronously — a sync spawn froze the main process (and
+ * the widget) for up to the 8 s timeout.
  * @param {string} title
  * @param {string} body
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
 function showNativeWinRtToast(title, body) {
-  if (process.platform !== 'win32') return false;
+  if (process.platform !== 'win32') return Promise.resolve(false);
   try {
     const esc = (s) =>
       String(s || '')
@@ -817,14 +878,24 @@ $n = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('$
 $n.Show($toast)
 `;
     const encoded = Buffer.from(ps, 'utf16le').toString('base64');
-    execSync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`, {
-      windowsHide: true,
-      timeout: 8000,
+    return new Promise((resolve) => {
+      execFile(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+        { windowsHide: true, timeout: 8000 },
+        (err) => {
+          if (err) {
+            console.warn('[reminders] winrt', err.message || err);
+            resolve(false);
+            return;
+          }
+          resolve(true);
+        }
+      );
     });
-    return true;
   } catch (err) {
     console.warn('[reminders] winrt', err && err.message ? err.message : err);
-    return false;
+    return Promise.resolve(false);
   }
 }
 
@@ -955,7 +1026,7 @@ async function showReminderToast(title, body, ids, opts = {}) {
   if (shown) {
     channel = 'electron';
   } else {
-    winrt = showNativeWinRtToast(title, body);
+    winrt = await showNativeWinRtToast(title, body);
     if (winrt) {
       shown = true;
       channel = 'winrt';
@@ -1026,7 +1097,7 @@ async function runReminderCheck(opts = {}) {
         'Система не поддерживает уведомления. Проверьте Параметры Windows → Система → Уведомления.',
     };
   }
-  if (!windowsToastsGloballyEnabled()) {
+  if (!windowsToastsGloballyEnabled({ fresh: Boolean(opts.force) })) {
     return {
       ...empty,
       reason: 'os-disabled',
@@ -1347,6 +1418,9 @@ function applySettingsPatch(patch) {
   if (typeof patch.simpleAnimations === 'boolean') {
     allowed.simpleAnimations = patch.simpleAnimations;
   }
+  if (FONT_FAMILIES.includes(patch.fontFamily)) {
+    allowed.fontFamily = patch.fontFamily;
+  }
   if (typeof patch.toggleHotkey === 'string') allowed.toggleHotkey = patch.toggleHotkey;
   if (typeof patch.switchViewHotkey === 'string') allowed.switchViewHotkey = patch.switchViewHotkey;
   if (typeof patch.onboardingSkipped === 'boolean') allowed.onboardingSkipped = patch.onboardingSkipped;
@@ -1601,6 +1675,13 @@ function registerIpc() {
     return result;
   });
 
+  ipcMain.handle('widget:clear-completed', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    const result = await clearCompletedTasks();
+    refreshExactReminders();
+    return result;
+  });
+
   ipcMain.handle('widget:move-item', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
     const { listKind, taskId, previousId, orderedIds } = payload || {};
@@ -1620,7 +1701,7 @@ function registerIpc() {
 
   ipcMain.handle('widget:check-reminders', async (event) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    ensureWindowsNotificationShortcut();
+    ensureWindowsNotificationShortcut({ force: true });
     return runReminderCheck({ force: true });
   });
 

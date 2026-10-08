@@ -107,6 +107,16 @@
               </div>
             </div>
 
+            <div class="settings-row font-row">
+              <span class="settings-label">Шрифт</span>
+              <div class="seg-toggle font-toggle" role="group" aria-label="Шрифт">
+                <button type="button" class="seg-btn" data-setting="fontFamily" data-value="geist" aria-pressed="true" title="Geist Mono (по умолчанию)">Geist</button>
+                <button type="button" class="seg-btn" data-setting="fontFamily" data-value="system" aria-pressed="false" title="Segoe UI — системный">Segoe</button>
+                <button type="button" class="seg-btn" data-setting="fontFamily" data-value="mono" aria-pressed="false" title="Cascadia Mono / Consolas">Mono</button>
+                <button type="button" class="seg-btn" data-setting="fontFamily" data-value="serif" aria-pressed="false" title="Georgia — с засечками">Serif</button>
+              </div>
+            </div>
+
             <div class="settings-row opacity-row">
               <div class="opacity-row-head">
                 <label class="settings-label" for="optBgOpacity">Прозрачность фона</label>
@@ -305,7 +315,10 @@
         </div>
       </div>
 
-      <div class="status-banner" id="statusBanner" role="status"></div>
+      <div class="status-banner" id="statusBanner" role="status">
+        <span class="status-banner-text" id="statusBannerText"></span>
+        <button type="button" class="status-banner-close" id="btnBannerClose" title="Скрыть сообщение" aria-label="Скрыть сообщение">×</button>
+      </div>
 
       <div class="viewport" id="viewport">
         <div class="panels" id="panels" data-view="tasks">
@@ -325,6 +338,7 @@
                   Без даты
                 </button>
               </div>
+              <div class="section-head-actions">
               <button
                 type="button"
                 class="hide-done-btn"
@@ -344,6 +358,20 @@
                   <path d="M3 3l18 18"/>
                 </svg>
               </button>
+              <button
+                type="button"
+                class="hide-done-btn clear-done-btn"
+                id="btnClearCompleted"
+                title="Удалить все выполненные"
+                aria-label="Удалить все выполненные"
+                hidden
+              >
+                <svg class="hide-done-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 7h16M9 7V5h6v2M6 7l1 12h10l1-12"/>
+                  <path d="M9.5 13l2 2 3.5-3.5"/>
+                </svg>
+              </button>
+              </div>
             </div>
             <ul class="list" id="list-tasks"></ul>
             <form class="add-row" id="form-add-tasks" autocomplete="off">

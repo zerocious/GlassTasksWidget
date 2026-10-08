@@ -9,6 +9,8 @@ const panelHabits = document.getElementById('panel-habits');
 const listTasks = document.getElementById('list-tasks');
 const listHabits = document.getElementById('list-habits');
 const statusBanner = document.getElementById('statusBanner');
+const statusBannerText = document.getElementById('statusBannerText');
+const btnBannerClose = document.getElementById('btnBannerClose');
 const offlinePill = document.getElementById('offlinePill');
 const btnAuth = document.getElementById('btnAuth');
 const btnSettings = document.getElementById('btnSettings');
@@ -47,6 +49,7 @@ const workHoursSitesHint = document.getElementById('workHoursSitesHint');
 const workHoursStatusHint = document.getElementById('workHoursStatusHint');
 const btnHideCompleted = document.getElementById('btnHideCompleted');
 const btnHideCompletedHabits = document.getElementById('btnHideCompletedHabits');
+const btnClearCompleted = document.getElementById('btnClearCompleted');
 const taskFilterChips = document.getElementById('taskFilterChips');
 const btnCheckReminders = document.getElementById('btnCheckReminders');
 const btnCheckUpdates = document.getElementById('btnCheckUpdates');
@@ -82,6 +85,10 @@ const streakMonthStreak = document.getElementById('streakMonthStreak');
 const btnStreakPrev = document.getElementById('btnStreakPrev');
 const btnStreakNext = document.getElementById('btnStreakNext');
 const btnStreakClose = document.getElementById('btnStreakClose');
+
+/** Hover/focus «⋯» — makes the row actions (otherwise right-click only) discoverable. */
+const ROW_MORE_HTML =
+  '<button type="button" class="row-more" aria-label="Действия" title="Действия"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button>';
 
 const NOTES_IND_SVG =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h9l3 3v13H6z"/><path d="M14 4v4h4"/><path d="M8 12h8M8 16h6"/></svg>';
@@ -247,6 +254,7 @@ let settings = {
   dailyHabitsReset: true,
   hideCompleted: false,
   simpleAnimations: false,
+  fontFamily: 'geist',
   onboardingSkipped: false,
   workHoursEnabled: false,
   workHoursStart: '09:00',
@@ -275,6 +283,7 @@ const pendingIds = new Set();
 let addBusy = false;
 /** @type {Promise<void> | null} */
 let loadInFlight = null;
+let loadInFlightBackground = false;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let settingsWriteTimer = null;
 /** @type {Record<string, any>} */
@@ -300,6 +309,22 @@ function applySize(size) {
 
 function applySimpleAnimations(on) {
   document.documentElement.setAttribute('data-simple-anim', on ? 'true' : 'false');
+}
+
+const FONT_FAMILIES = ['geist', 'system', 'mono', 'serif'];
+
+function applyFont(font) {
+  document.documentElement.setAttribute(
+    'data-font',
+    FONT_FAMILIES.includes(font) ? font : 'geist'
+  );
+}
+
+/** aria-pressed for every segmented setting (theme / size / font). */
+function syncSegButtons() {
+  document.querySelectorAll('.seg-btn[data-setting]').forEach((el) => {
+    el.setAttribute('aria-pressed', String(el.dataset.value === settings[el.dataset.setting]));
+  });
 }
 
 function prefersReducedMotion() {
@@ -351,13 +376,8 @@ function syncSettingsUi() {
   applySize(settings.size);
   applyBgOpacity(settings.bgOpacity);
   applySimpleAnimations(Boolean(settings.simpleAnimations));
-
-  document.querySelectorAll('.seg-btn[data-setting="theme"]').forEach((el) => {
-    el.setAttribute('aria-pressed', String(el.dataset.value === settings.theme));
-  });
-  document.querySelectorAll('.seg-btn[data-setting="size"]').forEach((el) => {
-    el.setAttribute('aria-pressed', String(el.dataset.value === settings.size));
-  });
+  applyFont(settings.fontFamily);
+  syncSegButtons();
 
   optAutostart.checked = Boolean(settings.autostart);
   optSnap.checked = Boolean(settings.snapToEdge);
@@ -880,12 +900,8 @@ function patchSettings(patch) {
     renderHabits();
   }
 
-  document.querySelectorAll('.seg-btn[data-setting="theme"]').forEach((el) => {
-    el.setAttribute('aria-pressed', String(el.dataset.value === settings.theme));
-  });
-  document.querySelectorAll('.seg-btn[data-setting="size"]').forEach((el) => {
-    el.setAttribute('aria-pressed', String(el.dataset.value === settings.size));
-  });
+  if (typeof patch.fontFamily === 'string') applyFont(patch.fontFamily);
+  syncSegButtons();
 
   Object.assign(settingsWritePending, patch);
   if (settingsWriteTimer) clearTimeout(settingsWriteTimer);
@@ -1018,14 +1034,24 @@ function focusAddInput() {
   input?.focus();
 }
 
+/** Text the user closed with × — that exact message stays hidden this session
+ *  (renderAll re-sets the demo/offline text on every refresh). */
+let dismissedBannerText = '';
+
 function setBanner(text) {
-  if (!text) {
+  if (!text || text === dismissedBannerText) {
     statusBanner.classList.remove('visible');
-    statusBanner.textContent = '';
+    if (statusBannerText) statusBannerText.textContent = '';
     return;
   }
-  statusBanner.textContent = text;
+  if (statusBannerText) statusBannerText.textContent = text;
+  else statusBanner.textContent = text;
   statusBanner.classList.add('visible');
+}
+
+function dismissBanner() {
+  dismissedBannerText = statusBannerText ? statusBannerText.textContent : '';
+  setBanner('');
 }
 
 function taskDueClass(task) {
@@ -1113,10 +1139,28 @@ function syncRowRepeatBadge(li, task) {
         : 'Повтор: еженедельно';
 }
 
+/** id → task index; null = rebuild. Reset at the start of each task render pass. */
+/** @type {Map<string, any> | null} */
+let taskIndex = null;
+
+function invalidateTaskIndex() {
+  taskIndex = null;
+}
+
+function taskById(id) {
+  if (!taskIndex) {
+    taskIndex = new Map();
+    for (const t of state.tasks) {
+      if (t && t.id) taskIndex.set(t.id, t);
+    }
+  }
+  return taskIndex.get(id);
+}
+
 /** Indent only when parent is present in the same open/done bucket. */
 function taskShowsAsSubtask(task) {
   if (!task || !task.parent) return false;
-  const parent = state.tasks.find((t) => t && t.id === task.parent);
+  const parent = taskById(task.parent);
   if (!parent) return false;
   if (Boolean(parent.completed) !== Boolean(task.completed)) return false;
   if (settings.hideCompleted && parent.completed) return false;
@@ -1131,6 +1175,7 @@ function buildTaskRow(task) {
   const li = document.createElement('li');
   li.className = taskRowClassName(task);
   li.dataset.id = task.id;
+  li.tabIndex = 0;
   if (task.parent) li.dataset.parent = task.parent;
   li.innerHTML = `
     <button type="button" class="drag-handle" aria-label="Перетащить" tabindex="-1" title="Перетащить">
@@ -1146,6 +1191,7 @@ function buildTaskRow(task) {
         <div class="row-meta"></div>
       </div>
     </div>
+    ${ROW_MORE_HTML}
   `;
   li.querySelector('.row-title').textContent = task.title;
   li.querySelector('.row-meta').textContent = task.meta || '';
@@ -1164,6 +1210,7 @@ function buildHabitRow(habit) {
   const li = document.createElement('li');
   li.className = `row${done ? ' done' : ''}`;
   li.dataset.id = habit.id;
+  li.tabIndex = 0;
 
   const pills = week
     .map(
@@ -1187,6 +1234,7 @@ function buildHabitRow(habit) {
       <div class="week-strip" aria-hidden="true">${pills}</div>
       <span class="streak-badge">${streak} <span class="unit">дн.</span></span>
     </div>
+    ${ROW_MORE_HTML}
   `;
   li.querySelector('.row-title').textContent = habit.title;
   li.querySelector('.row-meta').textContent = habit.meta || 'Daily';
@@ -1273,6 +1321,9 @@ function syncTaskFilterUi() {
     overdueEl.textContent = overdueN ? String(overdueN) : '';
     overdueEl.hidden = !overdueN;
   }
+  if (btnClearCompleted) {
+    btnClearCompleted.hidden = !state.tasks.some((t) => t && t.completed);
+  }
 }
 
 function setTaskDueFilter(next) {
@@ -1299,6 +1350,7 @@ function ensureListEmpty(listEl, kind, allItems, visibleItems) {
 }
 
 function renderTasks() {
+  invalidateTaskIndex();
   syncTaskFilterUi();
   const visible = visibleTasks();
   if (!visible.length) {
@@ -1373,16 +1425,24 @@ function removeRowAnimated(li, done) {
 }
 
 function syncListOrder(listEl, items) {
-  for (const item of items) {
-    const row = rowById(listEl, item.id);
-    if (row) listEl.appendChild(row);
+  const rows = new Map();
+  for (const row of listEl.querySelectorAll('li.row[data-id]')) {
+    rows.set(row.dataset.id, row);
   }
-  for (const row of [...listEl.querySelectorAll('li.row')]) {
-    if (!items.some((it) => it.id === row.dataset.id)) row.remove();
+  const keep = new Set();
+  for (const item of items) {
+    const row = rows.get(item.id);
+    if (!row) continue;
+    keep.add(item.id);
+    listEl.appendChild(row);
+  }
+  for (const [id, row] of rows) {
+    if (!keep.has(id)) row.remove();
   }
 }
 
 function patchTaskRow(task) {
+  invalidateTaskIndex();
   syncTaskFilterUi();
   const visible = visibleTasks();
   const inView = visible.some((t) => t.id === task.id);
@@ -1599,15 +1659,32 @@ function renderAll() {
   btnAuth.textContent = state.mode === 'google' || state.offline ? 'Выйти' : 'Google';
 }
 
-async function loadData(force) {
+/**
+ * @param {boolean} [force]
+ * @param {{ background?: boolean }} [opts] background: drop the result if the
+ *   user started editing / toggling while it was in flight.
+ */
+async function loadData(force, opts = {}) {
   if (!window.widgetApi) {
     setBanner('Запустите через Electron (npm start), не открывайте HTML напрямую.');
     return;
   }
-  if (loadInFlight) return loadInFlight;
+  // A background load is non-forced and may drop its result — callers that need
+  // fresh data must not piggyback on it; wait and start their own.
+  while (loadInFlight) {
+    if (!force && (opts.background || !loadInFlightBackground)) return loadInFlight;
+    try {
+      await loadInFlight;
+    } catch {
+      /* ignore */
+    }
+  }
+  loadInFlightBackground = Boolean(opts.background);
   loadInFlight = (async () => {
     try {
-      state = await window.widgetApi.getData(force ? { force: true } : {});
+      const next = await window.widgetApi.getData(force ? { force: true } : {});
+      if (opts.background && !canAutoRefresh()) return;
+      state = next;
       if (state.defaultAccent) configAccent = state.defaultAccent;
       renderAll();
     } catch (err) {
@@ -2123,6 +2200,38 @@ async function removeItem(listKind, item) {
     setBanner(`Не удалось удалить: ${err.message || err}`);
   } finally {
     pendingIds.delete(item.id);
+  }
+}
+
+let clearCompletedBusy = false;
+
+async function clearCompletedTasks() {
+  if (clearCompletedBusy || !window.widgetApi?.clearCompleted) return;
+  if (!guardMutate('удалить выполненные')) return;
+  const done = state.tasks.filter((t) => t && t.completed);
+  if (!done.length) return;
+  if (pendingIds.size) {
+    setBanner('Дождитесь завершения текущих изменений.');
+    return;
+  }
+  if (!window.confirm('Удалить все выполненные задачи из списка?')) return;
+
+  clearCompletedBusy = true;
+  if (btnClearCompleted) btnClearCompleted.disabled = true;
+  const prevList = state.tasks.slice();
+  state.tasks = state.tasks.filter((t) => t && !t.completed);
+  renderTasks();
+
+  try {
+    await window.widgetApi.clearCompleted();
+    setBanner('');
+  } catch (err) {
+    state.tasks = prevList;
+    renderTasks();
+    setBanner(`Не удалось удалить выполненные: ${err.message || err}`);
+  } finally {
+    clearCompletedBusy = false;
+    if (btnClearCompleted) btnClearCompleted.disabled = false;
   }
 }
 
@@ -2680,6 +2789,17 @@ function ensureCtxMenu() {
     '</button>';
   document.body.appendChild(ctxMenuEl);
 
+  ctxMenuEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Tab') return;
+    const btns = [...ctxMenuEl.querySelectorAll('.ctx-menu-item:not([hidden])')];
+    if (!btns.length) return;
+    e.preventDefault();
+    const back = e.key === 'ArrowUp' || (e.key === 'Tab' && e.shiftKey);
+    const idx = btns.indexOf(document.activeElement);
+    const next = idx < 0 ? 0 : (idx + (back ? -1 : 1) + btns.length) % btns.length;
+    btns[next].focus();
+  });
+
   ctxMenuEl.addEventListener('click', (e) => {
     const btn = e.target.closest('.ctx-menu-item[data-action]');
     if (!btn || !ctxMenuTarget) return;
@@ -2956,8 +3076,76 @@ async function bootstrap() {
   }
 }
 
+/**
+ * Open the row action menu anchored to an element (⋯ button or the row itself).
+ * @param {'tasks' | 'habits'} listKind
+ * @param {HTMLElement} li
+ * @param {HTMLElement} anchor
+ * @param {{ focusFirst?: boolean }} [opts]
+ */
+function openRowMenuAt(listKind, li, anchor, opts = {}) {
+  const items = listKind === 'habits' ? state.habits : state.tasks;
+  const item = items.find((i) => i.id === li.dataset.id);
+  if (!item || li.classList.contains('is-editing')) return;
+  if (ctxMenuEl && !ctxMenuEl.hidden && ctxMenuTarget && ctxMenuTarget.itemId === item.id) {
+    hideCtxMenu();
+    return;
+  }
+  const rect = anchor.getBoundingClientRect();
+  ctxReturnFocus = li;
+  showCtxMenu(listKind, item, { clientX: rect.right - 4, clientY: rect.bottom + 2 });
+  if (opts.focusFirst && ctxMenuEl) {
+    const first = ctxMenuEl.querySelector('.ctx-menu-item:not([hidden])');
+    if (first) first.focus();
+  }
+}
+
+/** Row focused for keyboard use — restored when the menu closes via Escape. */
+/** @type {HTMLElement | null} */
+let ctxReturnFocus = null;
+
+/**
+ * Keyboard on focused rows: Enter/Space toggle, Menu / Shift+F10 open actions.
+ * @param {'tasks' | 'habits'} listKind
+ * @param {HTMLElement} listEl
+ */
+function bindRowKeyboard(listKind, listEl) {
+  listEl.addEventListener('keydown', (e) => {
+    const li = e.target;
+    if (!(li instanceof HTMLElement) || !li.matches('li.row[data-id]')) return;
+    if (li.classList.contains('is-editing')) return;
+    if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      e.preventDefault();
+      openRowMenuAt(listKind, li, li.querySelector('.row-more') || li, { focusFirst: true });
+      return;
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const rows = [...listEl.querySelectorAll('li.row[data-id]')];
+      const next = rows[rows.indexOf(li) + (e.key === 'ArrowDown' ? 1 : -1)];
+      if (next) next.focus();
+      return;
+    }
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    const items = listKind === 'habits' ? state.habits : state.tasks;
+    const item = items.find((i) => i.id === li.dataset.id);
+    if (item) toggleItem(listKind, item);
+  });
+}
+
+bindRowKeyboard('tasks', listTasks);
+bindRowKeyboard('habits', listHabits);
+
 // Event delegation — one listener per list instead of N per-row handlers
 listTasks.addEventListener('click', (e) => {
+  const more = e.target.closest('.row-more');
+  if (more && listTasks.contains(more)) {
+    e.stopPropagation();
+    const li = more.closest('li.row[data-id]');
+    if (li) openRowMenuAt('tasks', li, more);
+    return;
+  }
   hideCtxMenu();
   if (e.target.closest('.row-title-edit, .drag-handle')) return;
   if (dndActive || dndClickBlockTimer) return;
@@ -2968,6 +3156,13 @@ listTasks.addEventListener('click', (e) => {
 });
 
 listHabits.addEventListener('click', (e) => {
+  const more = e.target.closest('.row-more');
+  if (more && listHabits.contains(more)) {
+    e.stopPropagation();
+    const li = more.closest('li.row[data-id]');
+    if (li) openRowMenuAt('habits', li, more);
+    return;
+  }
   hideCtxMenu();
   if (e.target.closest('.row-title-edit, .drag-handle')) return;
   if (dndActive || dndClickBlockTimer) return;
@@ -3002,7 +3197,10 @@ listTasks.addEventListener('contextmenu', (e) => handleRowContextMenu('tasks', e
 listHabits.addEventListener('contextmenu', (e) => handleRowContextMenu('habits', e));
 
 document.addEventListener('pointerdown', (e) => {
-  if (ctxMenuEl && !ctxMenuEl.hidden && !ctxMenuEl.contains(e.target)) hideCtxMenu();
+  if (!ctxMenuEl || ctxMenuEl.hidden || ctxMenuEl.contains(e.target)) return;
+  // ⋯ toggles the menu itself on click — closing here would just reopen it.
+  if (e.target.closest && e.target.closest('.row-more')) return;
+  hideCtxMenu();
 });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
@@ -3026,6 +3224,14 @@ document.addEventListener('keydown', (e) => {
     closeNotesPanel({ revert: true });
     return;
   }
+  // Innermost first: an open row menu closes before settings / onboarding.
+  if (ctxMenuEl && !ctxMenuEl.hidden) {
+    e.preventDefault();
+    hideCtxMenu({ instant: true });
+    if (ctxReturnFocus && ctxReturnFocus.isConnected) ctxReturnFocus.focus();
+    ctxReturnFocus = null;
+    return;
+  }
   if (onboardingPanel && !onboardingPanel.hidden && credentialsFromSettings) {
     e.preventDefault();
     syncCredentialsForm({ open: false });
@@ -3041,6 +3247,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   hideCtxMenu({ instant: true });
+  ctxReturnFocus = null;
 });
 window.addEventListener('blur', () => hideCtxMenu({ instant: true }));
 window.addEventListener('resize', () => hideCtxMenu({ instant: true }));
@@ -3282,6 +3489,13 @@ if (btnHideCompleted) {
 if (btnHideCompletedHabits) {
   btnHideCompletedHabits.addEventListener('click', onHideCompletedToggle);
 }
+if (btnClearCompleted) {
+  btnClearCompleted.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    clearCompletedTasks();
+  });
+}
 if (taskFilterChips) {
   taskFilterChips.addEventListener('click', (e) => {
     const btn = e.target.closest('[data-filter]');
@@ -3409,6 +3623,13 @@ document.querySelectorAll('.settings-nav-btn[data-settings-section]').forEach((b
 document.getElementById('btnMin').addEventListener('click', () => window.widgetApi?.minimize());
 document.getElementById('btnClose').addEventListener('click', () => window.widgetApi?.close());
 document.getElementById('btnRefresh').addEventListener('click', () => loadData(true));
+if (btnBannerClose) {
+  btnBannerClose.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dismissBanner();
+  });
+}
 btnAuth.addEventListener('click', onAuthClick);
 
 if (btnGoogleKeys) {
@@ -3491,6 +3712,37 @@ if (window.widgetApi?.onHabitsReset) {
     loadData(true).catch(() => {});
   });
 }
+
+/**
+ * Background refresh: data used to load only at startup / manual ↻, so Google
+ * edits from phone never showed up and «Сегодня/Просрочено» went stale after
+ * midnight. Non-forced reads reuse main's soft cache, so this stays cheap.
+ */
+const AUTO_REFRESH_MS = 5 * 60 * 1000;
+const AUTO_REFRESH_MIN_GAP_MS = 60 * 1000;
+let lastAutoRefreshAt = Date.now();
+
+/** Skip while the user is mid-interaction — a full re-render would drop it. */
+function canAutoRefresh() {
+  if (document.hidden || dndActive || pendingIds.size || addBusy) return false;
+  if (document.querySelector('.row.is-editing, .row-sub-edit')) return false;
+  if (notesTarget || timeTarget || repeatTarget) return false;
+  if (ctxMenuEl && !ctxMenuEl.hidden) return false;
+  return true;
+}
+
+function autoRefresh({ minGap = AUTO_REFRESH_MIN_GAP_MS } = {}) {
+  if (!window.widgetApi || !canAutoRefresh()) return;
+  if (Date.now() - lastAutoRefreshAt < minGap) return;
+  lastAutoRefreshAt = Date.now();
+  loadData(false, { background: true }).catch(() => {});
+}
+
+setInterval(() => autoRefresh({ minGap: AUTO_REFRESH_MS - 1000 }), AUTO_REFRESH_MS);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) autoRefresh();
+});
+window.addEventListener('focus', () => autoRefresh());
 
 /** @type {ReturnType<typeof setTimeout> | null} */
 let inAppToastTimer = null;
