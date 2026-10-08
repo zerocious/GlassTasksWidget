@@ -676,7 +676,9 @@ async function listAllTaskItems(tasksApi, listId, opts = {}) {
 
 async function listTasks(tasksApi, listId) {
   if (!listId) return [];
-  const items = await listAllTaskItems(tasksApi, listId);
+  // Include hidden (cleared) completed tasks — the Google Tasks app still shows
+  // them under «Выполненные», and the widget's «Удалить выполненные» must see them.
+  const items = await listAllTaskItems(tasksApi, listId, { showHidden: true });
   return decorateTasks(items.map(mapTask));
 }
 
@@ -1594,9 +1596,43 @@ function dropClearedFromCaches(isCleared) {
 }
 
 /**
- * Remove all completed tasks from the Tasks list. Google: tasks.clear (same as
- * «Удалить выполненные» in Google Tasks — one request, items become hidden).
- * @returns {Promise<{ ok: boolean, mode: string, removedIds?: string[] }>}
+ * Completed tasks that are safe to delete, subtasks first. A completed parent
+ * with open subtasks is skipped: Google deletes children with their parent.
+ * @param {Array<{ id?: string, parent?: string | null, status?: string, completed?: boolean }>} items
+ * @returns {{ toDelete: any[], skipped: any[] }}
+ */
+function pickDeletableCompleted(items) {
+  const isDone = (t) => t.status === 'completed' || t.completed === true;
+  const list = (items || []).filter((t) => t && t.id);
+  const parentsWithOpenKids = new Set(
+    list.filter((t) => t.parent && !isDone(t)).map((t) => t.parent)
+  );
+  const done = list.filter(isDone);
+  const skipped = done.filter((t) => parentsWithOpenKids.has(t.id));
+  const deletable = done.filter((t) => !parentsWithOpenKids.has(t.id));
+  // Children before parents so a parent delete never races its own subtasks.
+  const toDelete = [...deletable.filter((t) => t.parent), ...deletable.filter((t) => !t.parent)];
+  return { toDelete, skipped };
+}
+
+/** Run async jobs with a small concurrency cap (Google Tasks rate limits). */
+async function runLimited(items, limit, job) {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const item = items[next];
+      next += 1;
+      await job(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
+/**
+ * Delete all completed tasks from the Tasks list (incl. ones already hidden).
+ * tasks.clear only marks them hidden — the Google Tasks app still lists them
+ * under «Выполненные», so the button looked like it did nothing there.
+ * @returns {Promise<{ ok: boolean, mode: string, removedIds: string[], skipped: number }>}
  */
 async function clearCompletedTasks() {
   const flightKey = 'clear:tasks';
@@ -1606,10 +1642,12 @@ async function clearCompletedTasks() {
     const config = loadConfig();
 
     if (!hasGoogleCredentials()) {
-      const result = clearMockCompletedTasks();
+      const store = getMockPayload(config).tasks;
+      const { toDelete, skipped } = pickDeletableCompleted(store);
+      const result = clearMockCompletedTasks(toDelete.map((t) => t.id));
       const removed = new Set(result.removedIds);
       dropClearedFromCaches((t) => removed.has(t.id));
-      return result;
+      return { ...result, skipped: skipped.length };
     }
 
     const auth = await getAuthorizedClient({ interactive: false });
@@ -1619,9 +1657,28 @@ async function clearCompletedTasks() {
     const listId = await resolveListId(tasksApi, config.tasksListName);
     if (!listId) throw new Error(`Список «${config.tasksListName}» не найден`);
 
-    await tasksApi.tasks.clear({ tasklist: listId });
-    dropClearedFromCaches((t) => Boolean(t.completed) || t.status === 'completed');
-    return { ok: true, mode: 'google' };
+    const all = await listAllTaskItems(tasksApi, listId, { showHidden: true });
+    const { toDelete, skipped } = pickDeletableCompleted(all);
+
+    // Subtasks first (they're ordered first), then their parents.
+    const removed = new Set();
+    const children = toDelete.filter((t) => t.parent);
+    const roots = toDelete.filter((t) => !t.parent);
+    for (const group of [children, roots]) {
+      await runLimited(group, 5, async (t) => {
+        try {
+          await tasksApi.tasks.delete({ tasklist: listId, task: t.id });
+        } catch (err) {
+          // Already gone (deleted elsewhere / with its parent) counts as removed.
+          const code = err && (err.code || (err.response && err.response.status));
+          if (code !== 404 && code !== 410) throw err;
+        }
+        removed.add(t.id);
+      });
+    }
+
+    dropClearedFromCaches((t) => removed.has(t.id));
+    return { ok: true, mode: 'google', removedIds: [...removed], skipped: skipped.length };
   })()
     .catch(rejectGoogleAuth)
     .finally(() => {

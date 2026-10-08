@@ -366,14 +366,17 @@ function reorderMockItems(listKind, orderedIds) {
 }
 
 /**
- * Remove every completed task (mirrors Google tasks.clear for demo mode).
+ * Delete the given completed tasks (caller decides which — see
+ * pickDeletableCompleted in google-tasks, which skips parents of open subtasks).
+ * @param {string[]} ids
  * @returns {{ ok: true, mode: 'mock', removedIds: string[] }}
  */
-function clearMockCompletedTasks() {
+function clearMockCompletedTasks(ids) {
   const store = loadMockStore();
+  const wanted = new Set(ids || []);
   const removedIds = [];
   store.tasks = (store.tasks || []).filter((t) => {
-    if (t && (t.completed || t.status === 'completed')) {
+    if (t && wanted.has(t.id) && (t.completed || t.status === 'completed')) {
       removedIds.push(t.id);
       return false;
     }
