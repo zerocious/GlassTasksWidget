@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('widgetApi', {
       listKind,
       title,
       parentId: opts && opts.parentId ? opts.parentId : undefined,
+      parse: Boolean(opts && opts.parse),
     }),
   updateItem: (listKind, taskId, patch) =>
     ipcRenderer.invoke('widget:update-item', { listKind, taskId, patch }),

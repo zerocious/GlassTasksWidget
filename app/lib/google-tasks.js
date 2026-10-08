@@ -44,6 +44,8 @@ const {
   reorderOfflineCache,
 } = require('./offline-cache');
 const { applyItemPatch, reorderList } = require('./list-ops');
+const { retryingTasksClient } = require('./retry');
+const { parseQuickAdd } = require('./quick-add');
 
 const MAX_TITLE_LEN = 200;
 const MAX_NOTES_LEN = 8000;
@@ -144,6 +146,33 @@ async function listAllPages(listFn, params) {
 /** Lazy-load heavy googleapis only on first Google API use. */
 function getGoogle() {
   return require('googleapis').google;
+}
+
+/** Tasks API client whose calls retry rate limits / transient server errors. */
+function tasksClient(auth) {
+  return retryingTasksClient(getGoogle().tasks({ version: 'v1', auth }));
+}
+
+/** Google Tasks `due` for a local YYYY-MM-DD (the API keeps only the date). */
+function dueIsoFromKey(key) {
+  return `${key}T00:00:00.000Z`;
+}
+
+/**
+ * @param {unknown} value  'YYYY-MM-DD', or null / '' to clear
+ * @returns {string | null}
+ */
+function normalizeDueKeyInput(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error('Дата в формате ГГГГ-ММ-ДД');
+  }
+  const [y, m, d] = value.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) {
+    throw new Error('Некорректная дата');
+  }
+  return value;
 }
 
 function mapTask(item) {
@@ -364,7 +393,7 @@ async function resolveListId(tasksApi, name) {
 async function openList(config, listKind) {
   const auth = await getAuthorizedClient({ interactive: false });
   if (!auth) throw new Error('Не авторизован');
-  const tasksApi = getGoogle().tasks({ version: 'v1', auth });
+  const tasksApi = tasksClient(auth);
   const listName = listKind === 'habits' ? config.habitsListName : config.tasksListName;
   const listId = await resolveListId(tasksApi, listName);
   if (!listId) throw new Error(`Список «${listName}» не найден`);
@@ -449,7 +478,7 @@ async function fetchLivePayloadOnce(config) {
     };
   }
 
-  const tasksApi = getGoogle().tasks({ version: 'v1', auth });
+  const tasksApi = tasksClient(auth);
   const listMap = await getListMap(tasksApi);
   const tasksListId = listMap.get(String(config.tasksListName || '').trim()) || null;
   const habitsListId = listMap.get(String(config.habitsListName || '').trim()) || null;
@@ -565,7 +594,7 @@ async function resetCompletedHabitsForNewDay() {
         return { ok: false, reset: false, reason: 'auth' };
       }
 
-      const tasksApi = getGoogle().tasks({ version: 'v1', auth });
+      const tasksApi = tasksClient(auth);
       const listId = await resolveListId(tasksApi, config.habitsListName);
       if (!listId) {
         // Persist so we don't hammer the API when the Habits list is missing.
@@ -954,12 +983,25 @@ async function createItem(listKind, title, opts = {}) {
       ? opts.parentId.trim()
       : null;
 
-  const flightKey = `create:${listKind}:${parentId || ''}:${trimmed.toLowerCase()}`;
+  // «Позвонить завтра в 18:30» → title + due + time / repeat lines in notes.
+  /** @type {{ due?: string, notes?: string }} */
+  const extra = {};
+  if (opts && opts.parse && listKind === 'tasks') {
+    const parsed = parseQuickAdd(trimmed);
+    trimmed = parsed.title;
+    if (parsed.dueKey) extra.due = dueIsoFromKey(parsed.dueKey);
+    let notes = '';
+    if (parsed.time) notes = applyDueTimeToNotes(notes, parsed.time);
+    if (parsed.recurrence) notes = applyRecurrenceToNotes(notes, parsed.recurrence);
+    if (notes) extra.notes = notes;
+  }
+
+  const flightKey = `create:${listKind}:${parentId || ''}:${trimmed.toLowerCase()}:${extra.due || ''}:${extra.notes || ''}`;
   return runMutation(flightKey, `${listKind}:create`, async () => {
     const config = loadConfig();
 
     if (!hasGoogleCredentials()) {
-      const result = addMockItem(listKind, trimmed, { parentId });
+      const result = addMockItem(listKind, trimmed, { parentId, ...extra });
       if (result.item) {
         const item =
           listKind === 'habits'
@@ -981,6 +1023,7 @@ async function createItem(listKind, title, opts = {}) {
     const body = {
       title: trimmed,
       status: 'needsAction',
+      ...extra,
     };
     // `parent` is a query param only (Task.parent is output-only on the resource).
 
@@ -1011,7 +1054,8 @@ async function createItem(listKind, title, opts = {}) {
 /**
  * @param {'tasks' | 'habits'} listKind
  * @param {string} taskId
- * @param {string | { title?: string, notes?: string, dueTime?: string | null, recurrence?: string | null }} patchOrTitle
+ * @param {string | { title?: string, notes?: string, due?: string | null, dueTime?: string | null, recurrence?: string | null }} patchOrTitle
+ *   `due` is a local 'YYYY-MM-DD' (null clears it).
  */
 async function updateItem(listKind, taskId, patchOrTitle) {
   if (listKind !== 'tasks' && listKind !== 'habits') {
@@ -1021,7 +1065,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     throw new Error('Некорректный id задачи');
   }
 
-  /** @type {{ title?: string, notes?: string, dueTime?: string | null, recurrence?: string | null }} */
+  /** @type {{ title?: string, notes?: string, due?: string | null, dueTime?: string | null, recurrence?: string | null }} */
   let patch = {};
   if (typeof patchOrTitle === 'string') {
     patch.title = patchOrTitle;
@@ -1080,10 +1124,16 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       }
     }
 
-    /** @type {Record<string, string>} */
+    /** @type {Record<string, string | null>} */
     const body = {};
     /** @type {Record<string, any>} */
     const itemPatch = {};
+
+    if (Object.prototype.hasOwnProperty.call(patch, 'due')) {
+      const key = normalizeDueKeyInput(patch.due);
+      body.due = key ? dueIsoFromKey(key) : null;
+      itemPatch.due = body.due;
+    }
 
     if (typeof patch.title === 'string') {
       let trimmed = patch.title.trim();
@@ -1112,6 +1162,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       const result = updateMockItem(listKind, taskId, {
         ...(typeof patch.title === 'string' ? { title: patch.title } : {}),
         ...(typeof patch.notes === 'string' ? { notes: patch.notes } : {}),
+        ...(Object.prototype.hasOwnProperty.call(body, 'due') ? { due: body.due } : {}),
       });
       if (result.item) {
         const item =
@@ -1123,6 +1174,8 @@ async function updateItem(listKind, taskId, patchOrTitle) {
         patchPayloadCache(listKind, taskId, {
           title: item.title,
           notes: item.notes || '',
+          due: item.due || null,
+          dueKind: item.dueKind || null,
           meta: item.meta,
           dueTime,
           recurrence: item.recurrence || null,
@@ -1166,8 +1219,11 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       requestBody: body,
     });
 
-    // Refresh meta/dueTime/recurrence when notes change.
-    if (Object.prototype.hasOwnProperty.call(itemPatch, 'notes')) {
+    // Refresh meta/dueTime/recurrence when notes or the date change.
+    if (
+      Object.prototype.hasOwnProperty.call(itemPatch, 'notes') ||
+      Object.prototype.hasOwnProperty.call(itemPatch, 'due')
+    ) {
       const cached = lookupCachedItem(listKind, taskId);
       const merged = {
         ...(cached || {}),
@@ -1176,6 +1232,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       };
       itemPatch.dueTime = resolveTaskTime(merged);
       itemPatch.recurrence = parseRecurrence(merged.notes);
+      itemPatch.dueKind = dueKindFor(merged.due, Boolean(merged.completed));
       itemPatch.meta =
         formatMeta(merged) ||
         (merged.completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
