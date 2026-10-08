@@ -13,11 +13,15 @@ function mockFile() {
   return dataPath('mock-items.json');
 }
 
+/**
+ * Date-only due like Google Tasks: local calendar day at 00:00 UTC. Local noon
+ * (the old value) read back as a real clock time, so every dated demo task got
+ * a fake «12:00» chip and a noon reminder.
+ */
 function dueIsoDaysFromNow(delta) {
   const d = new Date();
-  d.setHours(12, 0, 0, 0);
   d.setDate(d.getDate() + delta);
-  return d.toISOString();
+  return `${todayIso(d)}T00:00:00.000Z`;
 }
 
 const DEFAULT_TASKS = [

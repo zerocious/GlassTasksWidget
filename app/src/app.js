@@ -517,8 +517,10 @@ function syncHideCompletedUi() {
     btn.setAttribute('aria-label', label);
     const showIcon = btn.querySelector('.hide-done-icon-show');
     const hideIcon = btn.querySelector('.hide-done-icon-hide');
-    if (showIcon) showIcon.hidden = on;
-    if (hideIcon) hideIcon.hidden = !on;
+    // SVGElement has no `hidden` property in Electron's Chromium — assigning it
+    // only made an expando, so the crossed-eye icon never appeared.
+    if (showIcon) showIcon.toggleAttribute('hidden', on);
+    if (hideIcon) hideIcon.toggleAttribute('hidden', !on);
   }
 }
 
