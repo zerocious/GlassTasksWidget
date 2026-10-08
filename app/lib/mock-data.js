@@ -226,8 +226,8 @@ function addMockItem(listKind, title, opts = {}) {
   const item = {
     id,
     title: trimmed,
-    notes: '',
-    due: null,
+    notes: typeof opts.notes === 'string' ? opts.notes : '',
+    due: typeof opts.due === 'string' ? opts.due : null,
     status: 'needsAction',
     completed: false,
     parent: parentId,
@@ -273,7 +273,7 @@ function setMockCompleted(listKind, taskId, completed, opts = {}) {
  * @param {string | { title?: string, notes?: string }} patchOrTitle
  */
 function updateMockItem(listKind, taskId, patchOrTitle) {
-  /** @type {{ title?: string, notes?: string }} */
+  /** @type {{ title?: string, notes?: string, due?: string | null }} */
   let patch = {};
   if (typeof patchOrTitle === 'string') {
     patch.title = patchOrTitle;
@@ -295,6 +295,10 @@ function updateMockItem(listKind, taskId, patchOrTitle) {
   }
   if (typeof patch.notes === 'string') {
     item.notes = patch.notes;
+    changed = true;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'due')) {
+    item.due = typeof patch.due === 'string' ? patch.due : null;
     changed = true;
   }
   if (!changed) throw new Error('Нечего обновлять');

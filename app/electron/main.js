@@ -766,8 +766,11 @@ function registerIpc() {
 
   ipcMain.handle('widget:create-item', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const { listKind, title, parentId } = payload || {};
-    const result = await createItem(listKind, title, parentId ? { parentId } : {});
+    const { listKind, title, parentId, parse } = payload || {};
+    const result = await createItem(listKind, title, {
+      ...(parentId ? { parentId } : {}),
+      parse: parse === true,
+    });
     refreshExactReminders();
     return result;
   });
