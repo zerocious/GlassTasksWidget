@@ -8,20 +8,20 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <article class="widget" aria-label="Tasks and Habits widget">
+  <article class="widget" aria-label="Виджет задач и привычек">
     <div class="widget-inner">
       <header class="header">
         <div class="title-row">
           <div class="icon" id="viewIcon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><path d="M5 12l4 4L19 6"/></svg>
           </div>
-          <h1 class="title" id="viewTitle">Tasks</h1>
+          <h1 class="title" id="viewTitle">Задачи</h1>
           <span class="offline-pill" id="offlinePill" hidden>офлайн</span>
         </div>
         <div class="header-right">
           <div class="tabs" role="tablist" aria-label="Вид">
-            <button class="tab" role="tab" id="tab-tasks" aria-selected="true" data-view="tasks" type="button">Tasks</button>
-            <button class="tab" role="tab" id="tab-habits" aria-selected="false" data-view="habits" type="button">Habits</button>
+            <button class="tab" role="tab" id="tab-tasks" aria-selected="true" data-view="tasks" type="button">Задачи</button>
+            <button class="tab" role="tab" id="tab-habits" aria-selected="false" data-view="habits" type="button">Привычки</button>
           </div>
           <div class="win-controls">
             <button class="win-btn" type="button" id="btnSettings" title="Настройки" aria-label="Настройки" aria-expanded="false" aria-controls="settingsPanel">
@@ -136,7 +136,16 @@
           <div class="settings-label">Горячие клавиши</div>
           <ul>
             <li><kbd id="hkToggle">Ctrl+Alt+W</kbd> — показать / скрыть</li>
-            <li><kbd id="hkSwitch">Ctrl+Tab</kbd> — Tasks ↔ Habits</li>
+            <li><kbd id="hkSwitch">Ctrl+Tab</kbd> — задачи ↔ привычки</li>
+          </ul>
+          <div class="settings-label">В окне виджета</div>
+          <ul>
+            <li><kbd>Ctrl+N</kbd> / <kbd>N</kbd> — новая задача</li>
+            <li><kbd>Ctrl+F</kbd> / <kbd>/</kbd> — поиск</li>
+            <li><kbd>R</kbd> / <kbd>F5</kbd> — обновить</li>
+            <li><kbd>1</kbd>–<kbd>4</kbd> — фильтры задач</li>
+            <li><kbd>↑</kbd> <kbd>↓</kbd>, <kbd>Пробел</kbd> — выбор и отметка строки</li>
+            <li><kbd>F2</kbd> — переименовать, <kbd>Del</kbd> — удалить, <kbd>Shift+F10</kbd> — меню</li>
           </ul>
         </div>
       </div>
@@ -176,6 +185,11 @@
       </div>
 
       <div class="status-banner" id="statusBanner" role="status"></div>
+
+      <div class="search-row" id="searchRow" hidden>
+        <input class="search-input" id="searchInput" type="search" placeholder="Поиск по названию и заметкам" aria-label="Поиск" autocomplete="off" spellcheck="false" />
+        <button class="search-close" id="btnSearchClose" type="button" title="Закрыть поиск (Esc)" aria-label="Закрыть поиск">×</button>
+      </div>
 
       <div class="viewport" id="viewport">
         <div class="panels" id="panels" data-view="tasks">
@@ -218,12 +232,12 @@
             <ul class="list" id="list-tasks"></ul>
             <form class="add-row" id="form-add-tasks" autocomplete="off">
               <input class="add-input" id="input-add-tasks" type="text" maxlength="200" placeholder="Новая задача… (завтра 18:30)" aria-label="Новая задача" title="Можно указать срок: сегодня, завтра, в пятницу, 12.10, 18:30, каждый день" />
-              <button class="add-btn" type="submit" title="Добавить">+</button>
+              <button class="add-btn" type="submit" title="Добавить задачу" aria-label="Добавить задачу">+</button>
             </form>
           </section>
           <section class="panel" id="panel-habits" role="tabpanel" aria-labelledby="tab-habits" aria-hidden="true">
             <div class="section-head">
-              <div class="section-label">Today</div>
+              <div class="section-label">Сегодня</div>
               <button
                 type="button"
                 class="hide-done-btn"
@@ -247,7 +261,7 @@
             <ul class="list" id="list-habits"></ul>
             <form class="add-row" id="form-add-habits" autocomplete="off">
               <input class="add-input" id="input-add-habits" type="text" maxlength="200" placeholder="Новая привычка…" aria-label="Новая привычка" />
-              <button class="add-btn" type="submit" title="Добавить">+</button>
+              <button class="add-btn" type="submit" title="Добавить привычку" aria-label="Добавить привычку">+</button>
             </form>
           </section>
         </div>
@@ -256,11 +270,11 @@
       <footer class="footer">
         <span id="sourceLabel">Google Tasks · Tasks list</span>
         <div class="footer-actions">
-          <button class="footer-btn" type="button" id="btnRefresh" title="Обновить">↻</button>
-          <button class="footer-btn" type="button" id="btnAuth" title="Google">Google</button>
-          <div class="dots" aria-label="Страницы">
-            <button class="dot" type="button" data-view="tasks" aria-current="true" aria-label="Tasks"></button>
-            <button class="dot" type="button" data-view="habits" aria-current="false" aria-label="Habits"></button>
+          <button class="footer-btn" type="button" id="btnRefresh" title="Обновить (R)" aria-label="Обновить">↻</button>
+          <button class="footer-btn" type="button" id="btnAuth" title="Войти в Google или выйти">Google</button>
+          <div class="dots" role="group" aria-label="Страницы">
+            <button class="dot" type="button" data-view="tasks" aria-current="true" aria-label="Задачи"></button>
+            <button class="dot" type="button" data-view="habits" aria-current="false" aria-label="Привычки"></button>
           </div>
         </div>
       </footer>

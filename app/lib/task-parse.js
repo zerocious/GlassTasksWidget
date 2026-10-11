@@ -8,6 +8,23 @@
 
 const { todayIso, addDaysIso } = require('./dates');
 
+/** Row subtitles when an item has no date and no notes preview. */
+const META_TASK = 'Задача';
+const META_DONE = 'Готово';
+const META_HABIT = 'Ежедневно';
+/** Caches written by older versions hold the English placeholders. */
+const LEGACY_META = { Task: META_TASK, Done: META_DONE, Daily: META_HABIT };
+
+/** Translate a legacy English placeholder; other text is returned unchanged. */
+function localizeMeta(meta) {
+  return (meta && LEGACY_META[meta]) || meta || '';
+}
+
+/** Empty or the generic «task» placeholder (old or new spelling). */
+function isPlaceholderMeta(meta) {
+  return !meta || meta === META_TASK || meta === 'Task';
+}
+
 /** True for Google's date-only dues (exact UTC midnight). */
 function isUtcMidnight(d) {
   return (
@@ -347,6 +364,11 @@ function resolveTaskDueAt(task) {
 }
 
 module.exports = {
+  META_TASK,
+  META_DONE,
+  META_HABIT,
+  localizeMeta,
+  isPlaceholderMeta,
   dueDateKey,
   dueKindFor,
   isManagedNotesLine,
