@@ -1,5 +1,7 @@
 'use strict';
 
+const { META_TASK, META_DONE, META_HABIT, localizeMeta } = require('./task-parse');
+
 const {
   enrichHabits,
   markCompleted,
@@ -78,13 +80,13 @@ const DEFAULT_TASKS = [
 ];
 
 const DEFAULT_HABITS = [
-  { id: 'mock-h1', title: 'Meditate', meta: 'Daily', status: 'needsAction', completed: false, notes: 'время 07:00', due: null },
-  { id: 'mock-h2', title: 'Exercise', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
-  { id: 'mock-h3', title: 'Read', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
-  { id: 'mock-h4', title: 'Drink Water', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
+  { id: 'mock-h1', title: 'Meditate', meta: 'Ежедневно', status: 'needsAction', completed: false, notes: 'время 07:00', due: null },
+  { id: 'mock-h2', title: 'Exercise', meta: 'Ежедневно', status: 'needsAction', completed: false, notes: '', due: null },
+  { id: 'mock-h3', title: 'Read', meta: 'Ежедневно', status: 'needsAction', completed: false, notes: '', due: null },
+  { id: 'mock-h4', title: 'Drink Water', meta: 'Ежедневно', status: 'needsAction', completed: false, notes: '', due: null },
   { id: 'mock-h5', title: 'No Sugar', meta: 'Weekdays', status: 'needsAction', completed: false, notes: '', due: null },
-  { id: 'mock-h6', title: 'Sleep 8h', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
-  { id: 'mock-h7', title: 'Stretch', meta: 'Daily', status: 'needsAction', completed: false, notes: '', due: null },
+  { id: 'mock-h6', title: 'Sleep 8h', meta: 'Ежедневно', status: 'needsAction', completed: false, notes: '', due: null },
+  { id: 'mock-h7', title: 'Stretch', meta: 'Ежедневно', status: 'needsAction', completed: false, notes: '', due: null },
 ];
 
 function loadMockStore() {
@@ -137,7 +139,7 @@ function formatMockMeta(task) {
       return 'Due';
     }
   }
-  return task.meta || (task.completed ? 'Done' : 'Task');
+  return localizeMeta(task.meta) || (task.completed ? META_DONE : META_TASK);
 }
 
 /**
@@ -175,7 +177,7 @@ function getMockPayload(config) {
       ...h,
       notes: h.notes || '',
       due: h.due || null,
-      meta: h.meta || 'Daily',
+      meta: localizeMeta(h.meta) || META_HABIT,
     }))
   ).map((h) => ({
     ...h,
@@ -211,7 +213,7 @@ function addMockItem(listKind, title, opts = {}) {
     const item = {
       id,
       title: trimmed,
-      meta: 'Daily',
+      meta: META_HABIT,
       status: 'needsAction',
       completed: false,
       notes: '',
