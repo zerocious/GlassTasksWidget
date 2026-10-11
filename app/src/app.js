@@ -371,6 +371,7 @@ const overlayAnim = {
   streak: { timer: null, gen: 0 },
   date: { timer: null, gen: 0 },
 };
+for (const anim of Object.values(overlayAnim)) anim.returnFocus = null;
 
 function motionMs(cssVar, fallback) {
   if (motionQuiet()) return 0;
@@ -436,6 +437,11 @@ function setOverlayOpen(overlay, open, opts) {
   }
   if (open) {
     const gen = ++anim.gen;
+    const active = document.activeElement;
+    anim.returnFocus =
+      active && active !== document.body && !(ctxMenuEl && ctxMenuEl.contains(active))
+        ? active
+        : ctxReturnFocus;
     overlay.hidden = false;
     if (motionQuiet()) {
       overlay.classList.add('is-open');
@@ -456,6 +462,7 @@ function setOverlayOpen(overlay, open, opts) {
     overlay.hidden = true;
     opts.onClosed?.();
     anim.timer = null;
+    restoreOverlayFocus(overlay, anim);
   };
   if (motionQuiet()) {
     finish();
@@ -488,7 +495,40 @@ function closeOverlay(overlay, key, instant) {
   anim.gen += 1;
   overlay.classList.remove('is-open');
   overlay.hidden = true;
+  restoreOverlayFocus(overlay, anim);
 }
+
+/** Give focus back to whatever opened the panel (unless focus already moved elsewhere). */
+function restoreOverlayFocus(overlay, anim) {
+  const target = anim.returnFocus;
+  anim.returnFocus = null;
+  const active = document.activeElement;
+  const lost = !active || active === document.body || overlay.contains(active);
+  if (lost && target && target.isConnected) target.focus();
+}
+
+const OVERLAYS = () => [notesOverlay, timeOverlay, repeatOverlay, streakOverlay, dateOverlay];
+
+/** Keep Tab inside the open panel (aria-modal dialogs). */
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab') return;
+  const overlay = OVERLAYS().find((o) => o && !o.hidden);
+  if (!overlay) return;
+  const focusables = [...overlay.querySelectorAll('button, input, textarea, [tabindex="0"]')].filter(
+    (el) => !el.disabled && !el.hidden && el.offsetParent !== null
+  );
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const inside = overlay.contains(document.activeElement);
+  if (e.shiftKey && (document.activeElement === first || !inside)) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && (document.activeElement === last || !inside)) {
+    e.preventDefault();
+    first.focus();
+  }
+});
 
 function syncHideCompletedUi() {
   const on = Boolean(settings.hideCompleted);
@@ -708,7 +748,7 @@ function updateSourceLabel() {
   const listName = view === 'tasks' ? state.tasksListName : state.habitsListName;
   const prefix =
     state.mode === 'mock'
-      ? 'Demo'
+      ? 'Демо'
       : state.mode === 'needs_auth'
         ? 'Google · вход'
         : state.offline
@@ -777,8 +817,11 @@ function setView(next, force) {
 
   panelTasks.setAttribute('aria-hidden', String(view !== 'tasks'));
   panelHabits.setAttribute('aria-hidden', String(view !== 'habits'));
+  // Off-screen panel must not be reachable with Tab.
+  panelTasks.inert = view !== 'tasks';
+  panelHabits.inert = view !== 'habits';
 
-  viewTitle.textContent = view === 'tasks' ? 'Tasks' : 'Habits';
+  viewTitle.textContent = view === 'tasks' ? 'Задачи' : 'Привычки';
   updateSourceLabel();
   if (lastIconView !== view) {
     lastIconView = view;
@@ -920,6 +963,32 @@ function taskRowClassName(task) {
   return `row${task.completed ? ' done' : ''}${taskDueClass(task)}${taskShowsAsSubtask(task) ? ' row--sub' : ''}`;
 }
 
+const LEGACY_META_RU = { Task: 'Задача', Done: 'Готово', Daily: 'Ежедневно' };
+
+/** Row subtitle; caches from older versions may still hold English placeholders. */
+function displayMeta(meta) {
+  return (meta && LEGACY_META_RU[meta]) || meta || '';
+}
+
+/** Keyboard focus + screen-reader state for a list row. */
+function syncRowA11y(li, item) {
+  li.tabIndex = 0;
+  const done = Boolean(item.completed);
+  const check = li.querySelector('.check');
+  if (check) {
+    check.setAttribute('role', 'img');
+    check.setAttribute('aria-label', done ? 'Выполнено' : 'Не выполнено');
+    check.removeAttribute('aria-hidden');
+  }
+  let state = li.querySelector('.row-state');
+  if (!check && !state) {
+    state = document.createElement('span');
+    state.className = 'sr-only row-state';
+    li.appendChild(state);
+  }
+  if (state) state.textContent = done ? 'выполнено сегодня' : 'не выполнено сегодня';
+}
+
 function buildTaskRow(task) {
   const li = document.createElement('li');
   li.className = taskRowClassName(task);
@@ -941,7 +1010,8 @@ function buildTaskRow(task) {
     </div>
   `;
   li.querySelector('.row-title').textContent = task.title;
-  li.querySelector('.row-meta').textContent = task.meta || '';
+  li.querySelector('.row-meta').textContent = displayMeta(task.meta);
+  syncRowA11y(li, task);
   const notesInd = li.querySelector('.row-notes-ind');
   if (notesInd) notesInd.hidden = !taskHasNotes(task);
   syncRowTimeChip(li, task);
@@ -976,21 +1046,30 @@ function buildHabitRow(habit) {
         <div class="row-meta"></div>
       </div>
     </div>
-    <div class="streak" aria-label="Стрик ${streak} дней" title="История стрика" role="button" tabindex="0" data-streak-open="1">
+    <div class="streak" aria-label="Стрик: ${pluralRu(streak, 'день', 'дня', 'дней')}" title="История стрика" role="button" tabindex="0" data-streak-open="1">
       <div class="week-strip" aria-hidden="true">${pills}</div>
       <span class="streak-badge">${streak} <span class="unit">дн.</span></span>
     </div>
   `;
   li.querySelector('.row-title').textContent = habit.title;
-  li.querySelector('.row-meta').textContent = habit.meta || 'Daily';
+  li.querySelector('.row-meta').textContent = displayMeta(habit.meta) || 'Ежедневно';
   syncRowTimeChip(li, habit);
+  syncRowA11y(li, habit);
   return li;
+}
+
+let searchQuery = '';
+
+function matchesSearch(item) {
+  if (!searchQuery) return true;
+  const hay = `${item.title || ''}\n${item.notes || ''}`.toLowerCase();
+  return hay.includes(searchQuery);
 }
 
 /** @param {any[]} items */
 function filterVisibleItems(items) {
-  if (!settings.hideCompleted) return items;
-  return items.filter((it) => !it.completed);
+  if (!settings.hideCompleted && !searchQuery) return items;
+  return items.filter((it) => (!settings.hideCompleted || !it.completed) && matchesSearch(it));
 }
 
 /**
@@ -1078,6 +1157,10 @@ function setTaskDueFilter(next) {
 
 function ensureListEmpty(listEl, kind, allItems, visibleItems) {
   if (visibleItems.length) return;
+  if (searchQuery) {
+    listEl.innerHTML = '<li class="empty">Ничего не найдено.</li>';
+    return;
+  }
   const empty =
     kind === 'habits'
       ? allItems.length
@@ -1224,7 +1307,8 @@ function patchTaskRow(task) {
       meta.className = 'row-meta';
       metaLine.prepend(meta);
     }
-    if (meta) meta.textContent = task.meta || '';
+    if (meta) meta.textContent = displayMeta(task.meta);
+    syncRowA11y(li, task);
     syncRowTimeChip(li, task);
     syncRowRepeatBadge(li, task);
     let notesInd = li.querySelector('.row-notes-ind');
@@ -1289,12 +1373,13 @@ function patchHabitRow(habit) {
       meta.className = 'row-meta';
       metaLine.prepend(meta);
     }
-    if (meta) meta.textContent = habit.meta || 'Daily';
+    if (meta) meta.textContent = displayMeta(habit.meta) || 'Ежедневно';
+    syncRowA11y(li, habit);
     syncRowTimeChip(li, habit);
     const streakEl = li.querySelector('.streak');
     if (streakEl) {
       const streak = habit.streak || 0;
-      streakEl.setAttribute('aria-label', `Стрик ${streak} дней`);
+      streakEl.setAttribute('aria-label', `Стрик: ${pluralRu(streak, 'день', 'дня', 'дней')}`);
       streakEl.setAttribute('title', 'История стрика');
       streakEl.setAttribute('role', 'button');
       streakEl.setAttribute('tabindex', '0');
@@ -1546,7 +1631,7 @@ async function toggleItem(listKind, item) {
   } else if (listKind === 'tasks') {
     item.completed = next;
     item.status = next ? 'completed' : 'needsAction';
-    item.meta = next ? 'Done' : item.meta === 'Done' ? 'Task' : item.meta;
+    item.meta = next ? 'Готово' : item.meta === 'Готово' || item.meta === 'Done' ? 'Задача' : item.meta;
     item.dueKind = next ? null : item.dueKind;
     resortTasksLocal();
     patchTaskRow(item);
@@ -2716,6 +2801,24 @@ function ensureCtxMenu() {
     '</button>';
   document.body.appendChild(ctxMenuEl);
 
+  ctxMenuEl.addEventListener('keydown', (e) => {
+    const items = [...ctxMenuEl.querySelectorAll('.ctx-menu-item:not([hidden])')];
+    const idx = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      items[(idx + step + items.length) % items.length]?.focus();
+    } else if (e.key === 'Home' || e.key === 'End') {
+      e.preventDefault();
+      (e.key === 'Home' ? items[0] : items[items.length - 1])?.focus();
+    } else if (e.key === 'Escape' || e.key === 'Tab') {
+      e.preventDefault();
+      e.stopPropagation();
+      hideCtxMenu({ instant: true });
+      ctxReturnFocus?.focus();
+    }
+  });
+
   ctxMenuEl.addEventListener('click', (e) => {
     const btn = e.target.closest('.ctx-menu-item[data-action]');
     if (!btn || !ctxMenuTarget) return;
@@ -2765,8 +2868,13 @@ function hideCtxMenu({ instant } = {}) {
   ctxCloseTimer = setTimeout(finish, motionMs('--ctx-ms', 120) + 30);
 }
 
-function showCtxMenu(listKind, item, e) {
+/** Row to refocus after the context menu or a panel it opened closes. */
+let ctxReturnFocus = null;
+
+function showCtxMenu(listKind, item, e, opts = {}) {
   const menu = ensureCtxMenu();
+  const listEl = listKind === 'habits' ? listHabits : listTasks;
+  ctxReturnFocus = rowById(listEl, item.id);
   if (ctxCloseTimer) {
     clearTimeout(ctxCloseTimer);
     ctxCloseTimer = null;
@@ -2802,15 +2910,29 @@ function showCtxMenu(listKind, item, e) {
   const originY = e.clientY > top + height * 0.55 ? '100%' : '0%';
   menu.style.transformOrigin = `${originX} ${originY}`;
 
+  const focusFirst = () => {
+    if (opts.focus) menu.querySelector('.ctx-menu-item:not([hidden])')?.focus();
+  };
   if (motionQuiet()) {
     menu.classList.add('is-open');
+    focusFirst();
     return;
   }
   // Double-rAF so the browser paints the closed state before opening.
   afterPaint(() => {
     if (gen !== ctxOpenGen || menu.hidden || !ctxMenuTarget) return;
     menu.classList.add('is-open');
+    focusFirst();
   });
+}
+
+/** Open the row menu from the keyboard (Shift+F10 / Menu key), anchored to the row. */
+function openCtxMenuForRow(listKind, li) {
+  const items = listKind === 'habits' ? state.habits : state.tasks;
+  const item = items.find((i) => i.id === li.dataset.id);
+  if (!item) return;
+  const r = li.getBoundingClientRect();
+  showCtxMenu(listKind, item, { clientX: r.left + 28, clientY: r.top + r.height - 4 }, { focus: true });
 }
 
 function handleRowContextMenu(listKind, e) {
@@ -2832,7 +2954,8 @@ function handleRowContextMenu(listKind, e) {
     hideCtxMenu();
     return;
   }
-  showCtxMenu(listKind, item, e);
+  if (!e.clientX && !e.clientY) openCtxMenuForRow(listKind, li);
+  else showCtxMenu(listKind, item, e);
 }
 
 async function applyWallpaperPalette({ persistAuto } = {}) {
@@ -2888,7 +3011,7 @@ async function onAuthClick() {
     renderAll();
   } catch (err) {
     const msg = err && err.message ? String(err.message) : String(err);
-    setBanner(msg.indexOf('Сессия Google') === 0 ? msg : `OAuth: ${msg}`);
+    setBanner(msg.indexOf('Сессия Google') === 0 ? msg : `Вход в Google: ${msg}`);
   } finally {
     addBusy = false;
   }
@@ -3037,6 +3160,42 @@ listHabits.addEventListener('keydown', (e) => {
   if (item) openStreakPanel(item);
 });
 
+/**
+ * Keyboard on a focused row: ↑/↓/Home/End move, Space/Enter toggle, F2 rename,
+ * Delete removes, Shift+F10 / Menu opens the row menu.
+ */
+function onRowKeydown(listKind, e) {
+  const listEl = listKind === 'habits' ? listHabits : listTasks;
+  const li = e.target;
+  if (!(li instanceof HTMLElement) || !li.matches('li.row[data-id]') || li.classList.contains('is-editing')) return;
+  const rows = [...listEl.querySelectorAll('li.row[data-id]')];
+  const idx = rows.indexOf(li);
+  const items = listKind === 'habits' ? state.habits : state.tasks;
+  const item = items.find((i) => i.id === li.dataset.id);
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    rows[Math.min(rows.length - 1, Math.max(0, idx + (e.key === 'ArrowDown' ? 1 : -1)))]?.focus();
+  } else if (e.key === 'Home' || e.key === 'End') {
+    e.preventDefault();
+    (e.key === 'Home' ? rows[0] : rows[rows.length - 1])?.focus();
+  } else if (e.key === ' ' || e.key === 'Enter') {
+    e.preventDefault();
+    if (item) toggleItem(listKind, item);
+  } else if (e.key === 'F2') {
+    e.preventDefault();
+    if (item) beginInlineEdit(listKind, item, li);
+  } else if (e.key === 'Delete') {
+    e.preventDefault();
+    const next = rows[idx + 1] || rows[idx - 1];
+    if (item) removeItem(listKind, item).then(() => next?.isConnected && next.focus());
+  } else if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+    e.preventDefault();
+    openCtxMenuForRow(listKind, li);
+  }
+}
+listTasks.addEventListener('keydown', (e) => onRowKeydown('tasks', e));
+listHabits.addEventListener('keydown', (e) => onRowKeydown('habits', e));
+
 listTasks.addEventListener('contextmenu', (e) => handleRowContextMenu('tasks', e));
 listHabits.addEventListener('contextmenu', (e) => handleRowContextMenu('habits', e));
 
@@ -3068,6 +3227,17 @@ document.addEventListener('keydown', (e) => {
   if (notesOverlay && !notesOverlay.hidden) {
     e.preventDefault();
     closeNotesPanel({ revert: true });
+    return;
+  }
+  if (btnSettings.getAttribute('aria-expanded') === 'true') {
+    e.preventDefault();
+    setSettingsOpen(false);
+    btnSettings.focus();
+    return;
+  }
+  if (searchRow && !searchRow.hidden) {
+    e.preventDefault();
+    closeSearch();
     return;
   }
   hideCtxMenu({ instant: true });
@@ -3465,6 +3635,83 @@ document.getElementById('form-add-tasks').addEventListener('submit', (e) => {
 document.getElementById('form-add-habits').addEventListener('submit', (e) => {
   e.preventDefault();
   onAddSubmit('habits', inputAddHabits);
+});
+
+const searchRow = document.getElementById('searchRow');
+const searchInput = document.getElementById('searchInput');
+const btnSearchClose = document.getElementById('btnSearchClose');
+
+function openSearch() {
+  if (!searchRow || !searchInput) return;
+  searchRow.hidden = false;
+  searchInput.focus();
+  searchInput.select();
+}
+
+function closeSearch() {
+  if (!searchRow || !searchInput) return;
+  searchRow.hidden = true;
+  if (searchInput.value || searchQuery) {
+    searchInput.value = '';
+    searchQuery = '';
+    renderTasks();
+    renderHabits();
+  }
+}
+
+searchInput?.addEventListener('input', () => {
+  searchQuery = searchInput.value.trim().toLowerCase();
+  renderTasks();
+  renderHabits();
+});
+searchInput?.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    closeSearch();
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    (view === 'habits' ? listHabits : listTasks).querySelector('li.row[data-id]')?.focus();
+  }
+});
+btnSearchClose?.addEventListener('click', (e) => {
+  e.preventDefault();
+  closeSearch();
+});
+
+const FILTER_KEYS = { 1: 'all', 2: 'today', 3: 'overdue', 4: 'undated' };
+
+/** Widget-local shortcuts (the global ones live in the main process). */
+document.addEventListener('keydown', (e) => {
+  if (e.defaultPrevented || e.altKey || e.metaKey) return;
+  const t = e.target;
+  const typing = t instanceof HTMLElement && (t.matches('input, textarea, select') || t.isContentEditable);
+  if (OVERLAYS().some((o) => o && !o.hidden) || (ctxMenuEl && !ctxMenuEl.hidden)) return;
+  const key = e.key.toLowerCase();
+  if (e.ctrlKey && (key === 'n' || key === 'т')) {
+    e.preventDefault();
+    focusAddInput();
+  } else if (e.ctrlKey && (key === 'f' || key === 'а')) {
+    e.preventDefault();
+    openSearch();
+  } else if (e.key === 'F5' && !e.ctrlKey) {
+    e.preventDefault();
+    loadData(true);
+  } else if (!typing && !e.ctrlKey && !e.shiftKey) {
+    if (key === 'n' || key === 'т') {
+      e.preventDefault();
+      focusAddInput();
+    } else if (key === '/' || key === '.') {
+      e.preventDefault();
+      openSearch();
+    } else if (key === 'r' || key === 'к') {
+      e.preventDefault();
+      loadData(true);
+    } else if (view === 'tasks' && FILTER_KEYS[key]) {
+      e.preventDefault();
+      setTaskDueFilter(FILTER_KEYS[key]);
+    }
+  }
 });
 
 const viewport = document.getElementById('viewport');

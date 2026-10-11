@@ -34,6 +34,11 @@ const {
   applyDueTimeToNotes,
   resolveTaskTime,
   resolveTaskDueAt,
+  META_TASK,
+  META_DONE,
+  META_HABIT,
+  localizeMeta,
+  isPlaceholderMeta,
 } = require('./task-parse');
 const { loadSettings, saveSettings } = require('./settings-store');
 const {
@@ -193,7 +198,7 @@ function mapTask(item) {
     completed,
     position: item.position || '',
     parent: item.parent || null,
-    meta: formatMeta(item) || (completed ? 'Done' : 'Task'),
+    meta: formatMeta(item) || (completed ? META_DONE : META_TASK),
   };
 }
 
@@ -284,7 +289,7 @@ function decorateTasks(tasks) {
       const meta =
         t.due || dueTime || !t.meta
           ? formatMeta({ ...t, status: t.completed ? 'completed' : 'needsAction' }) ||
-            (t.completed ? 'Done' : 'Task')
+            (t.completed ? META_DONE : META_TASK)
           : t.meta;
       return { ...t, dueKind, dueTime, recurrence, meta };
     })
@@ -422,11 +427,11 @@ function withHabits(habitsRaw) {
       const dueTime = resolveTaskTime(h);
       const formatted = formatMeta({ ...h, status });
       const meta =
-        formatted && formatted !== 'Task'
+        !isPlaceholderMeta(formatted)
           ? formatted
-          : h.meta && h.meta !== 'Task'
-            ? h.meta
-            : 'Daily';
+          : !isPlaceholderMeta(h.meta)
+            ? localizeMeta(h.meta)
+            : META_HABIT;
       return { ...h, dueTime, meta };
     })
   ).map((h) => ({
@@ -539,7 +544,7 @@ function fromPayloadCache() {
       due: h.due || null,
       status: h.status || 'needsAction',
       completed: false,
-      meta: h.meta && h.meta !== 'Task' ? h.meta : 'Daily',
+      meta: !isPlaceholderMeta(h.meta) ? localizeMeta(h.meta) : META_HABIT,
     }))
   );
   // Recompute dueKind/meta so midnight rollover is correct within the soft TTL.
@@ -807,7 +812,7 @@ function buildCompletedItemPatch(listKind, cached, completed, overrides = {}, st
   const recurrence = parseRecurrence(notes);
   const meta =
     formatMeta({ due, notes, status }) ||
-    (completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
+    (completed ? META_DONE : listKind === 'habits' ? META_HABIT : META_TASK);
   return {
     status,
     completed,
@@ -816,7 +821,7 @@ function buildCompletedItemPatch(listKind, cached, completed, overrides = {}, st
     dueTime,
     recurrence,
     notes,
-    meta: listKind === 'habits' ? (cached && cached.meta) || 'Daily' : meta,
+    meta: listKind === 'habits' ? localizeMeta(cached && cached.meta) || META_HABIT : meta,
     ...(stats
       ? {
           streak: stats.streak,
@@ -1235,7 +1240,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       itemPatch.dueKind = dueKindFor(merged.due, Boolean(merged.completed));
       itemPatch.meta =
         formatMeta(merged) ||
-        (merged.completed ? 'Done' : listKind === 'habits' ? 'Daily' : 'Task');
+        (merged.completed ? META_DONE : listKind === 'habits' ? META_HABIT : META_TASK);
     }
 
     patchOfflineCache(listKind, taskId, itemPatch);
