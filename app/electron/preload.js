@@ -6,6 +6,11 @@ contextBridge.exposeInMainWorld('widgetApi', {
   bootstrap: () => ipcRenderer.invoke('widget:bootstrap'),
   getData: (opts) => ipcRenderer.invoke('widget:get-data', opts || {}),
   login: () => ipcRenderer.invoke('widget:login'),
+  loginReopen: () => ipcRenderer.invoke('widget:login-reopen'),
+  loginCopyLink: () => ipcRenderer.invoke('widget:login-copy'),
+  loginCancel: () => ipcRenderer.invoke('widget:login-cancel'),
+  importClientJson: (text) =>
+    ipcRenderer.invoke('widget:import-client-json', typeof text === 'string' ? { text } : {}),
   logout: () => ipcRenderer.invoke('widget:logout'),
   setCompleted: (listKind, taskId, completed) =>
     ipcRenderer.invoke('widget:set-completed', { listKind, taskId, completed }),

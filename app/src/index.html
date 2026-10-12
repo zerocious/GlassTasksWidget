@@ -153,34 +153,55 @@
       <div class="onboarding-panel" id="onboardingPanel" hidden>
         <div class="onboarding-title" id="onboardingTitle">Подключение Google</div>
         <p class="onboarding-text">
-          Нужен OAuth-клиент типа <strong>Desktop</strong> из Google Cloud:
-          Client ID и Client Secret. После сохранения можно войти кнопкой Google.
+          Виджету нужен ваш OAuth-клиент Google — это бесплатно и занимает около 5 минут.
+          Пройдите шаги, ссылки откроются в браузере:
         </p>
-        <button type="button" class="onboarding-link" id="btnOpenConsole">
-          Открыть Google Cloud Console
-        </button>
-        <label class="onboarding-field">
-          <span>Client ID</span>
-          <input type="text" id="inputClientId" autocomplete="off" spellcheck="false"
-            placeholder="….apps.googleusercontent.com" />
-        </label>
-        <label class="onboarding-field">
-          <span>Client Secret</span>
-          <input type="password" id="inputClientSecret" autocomplete="off" spellcheck="false"
-            placeholder="Секрет клиента" />
-        </label>
-        <label class="onboarding-field">
-          <span>Redirect port (необязательно)</span>
-          <input type="number" id="inputRedirectPort" min="1024" max="65535" value="42813" />
-        </label>
-        <p class="onboarding-error" id="onboardingError" hidden></p>
+        <ol class="onboarding-steps">
+          <li><button type="button" class="onboarding-link" data-console="enableApi">Включить Google Tasks API</button> — создайте проект, если Google попросит.</li>
+          <li><button type="button" class="onboarding-link" data-console="branding">Заполнить экран согласия</button> — тип «Внешний» (External).</li>
+          <li><button type="button" class="onboarding-link" data-console="audience">Опубликовать приложение</button> — «Publish app», иначе вход слетает каждые 7 дней.</li>
+          <li><button type="button" class="onboarding-link" data-console="clients">Создать клиент «Приложение для ПК»</button> и сразу нажать «Download JSON».</li>
+        </ol>
+        <div class="onboarding-drop" id="onboardingDrop" role="button" tabindex="0" aria-describedby="onboardingDropHint">
+          <strong>Загрузить client_secret….json</strong>
+          <span id="onboardingDropHint">Перетащите файл сюда или нажмите, чтобы выбрать</span>
+        </div>
+        <details class="onboarding-manual" id="onboardingManual">
+          <summary>Ввести ключи вручную</summary>
+          <label class="onboarding-field">
+            <span>Client ID</span>
+            <input type="text" id="inputClientId" autocomplete="off" spellcheck="false"
+              placeholder="….apps.googleusercontent.com" />
+          </label>
+          <label class="onboarding-field">
+            <span>Client Secret</span>
+            <input type="password" id="inputClientSecret" autocomplete="off" spellcheck="false"
+              placeholder="Секрет клиента" />
+          </label>
+          <label class="onboarding-field">
+            <span>Порт для входа (необязательно)</span>
+            <input type="number" id="inputRedirectPort" min="1024" max="65535" placeholder="авто" />
+          </label>
+          <button type="button" class="onboarding-primary" id="btnSaveCredentials">Сохранить и войти</button>
+        </details>
+        <p class="onboarding-error" id="onboardingError" role="alert" hidden></p>
         <div class="onboarding-actions">
-          <button type="button" class="onboarding-primary" id="btnSaveCredentials">
-            Сохранить и продолжить
-          </button>
           <button type="button" class="onboarding-secondary" id="btnSkipCredentials">
             Продолжить в демо
           </button>
+        </div>
+      </div>
+
+      <div class="login-pending" id="loginPending" role="status" aria-live="polite" hidden>
+        <div class="login-pending-text">Подтвердите доступ в открывшемся браузере…</div>
+        <p class="login-pending-hint" id="loginPendingHint" hidden>
+          Ошибка в браузере? «Access blocked» или «access_denied» — добавьте себя в Test users
+          или опубликуйте приложение. «redirect_uri_mismatch» — нужен клиент типа «Приложение для ПК».
+        </p>
+        <div class="login-pending-actions">
+          <button type="button" class="login-pending-btn" id="btnLoginReopen">Открыть снова</button>
+          <button type="button" class="login-pending-btn" id="btnLoginCopy">Скопировать ссылку</button>
+          <button type="button" class="login-pending-btn" id="btnLoginCancel">Отмена</button>
         </div>
       </div>
 

@@ -1880,6 +1880,135 @@ html[data-simple-anim="true"] .undo-toast {
   text-underline-offset: 2px;
 }
 
+.onboarding-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.onboarding-steps .onboarding-link {
+  display: inline;
+  text-align: left;
+}
+
+.onboarding-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 10px;
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 55%, var(--glass-border));
+  border-radius: 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+
+.onboarding-drop strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.onboarding-drop:hover,
+.onboarding-drop:focus-visible,
+.onboarding-drop.is-dragover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: var(--accent);
+  outline: none;
+}
+
+.onboarding-drop[aria-busy="true"] {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.onboarding-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.onboarding-manual summary {
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+
+.onboarding-manual[open] > :not(summary) {
+  margin-top: 6px;
+}
+
+.onboarding-manual .onboarding-primary {
+  width: 100%;
+}
+
+.login-pending {
+  margin: 0 16px 4px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--panel-bg);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--glass-border));
+  font-size: 12px;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.login-pending[hidden] {
+  display: none;
+}
+
+.login-pending-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.login-pending-hint[hidden] {
+  display: none;
+}
+
+.login-pending-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.login-pending-btn,
+.banner-action {
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background: var(--control-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.login-pending-btn:hover,
+.banner-action:hover,
+.login-pending-btn:focus-visible,
+.banner-action:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.banner-action {
+  margin-left: 6px;
+}
+
 .onboarding-field {
   display: flex;
   flex-direction: column;
