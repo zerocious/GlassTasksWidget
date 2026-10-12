@@ -21,7 +21,21 @@ const inputClientSecret = document.getElementById('inputClientSecret');
 const inputRedirectPort = document.getElementById('inputRedirectPort');
 const btnSaveCredentials = document.getElementById('btnSaveCredentials');
 const btnSkipCredentials = document.getElementById('btnSkipCredentials');
-const btnOpenConsole = document.getElementById('btnOpenConsole');
+const onboardingDrop = document.getElementById('onboardingDrop');
+const onboardingManual = document.getElementById('onboardingManual');
+const loginPending = document.getElementById('loginPending');
+const loginPendingHint = document.getElementById('loginPendingHint');
+const btnLoginReopen = document.getElementById('btnLoginReopen');
+const btnLoginCopy = document.getElementById('btnLoginCopy');
+const btnLoginCancel = document.getElementById('btnLoginCancel');
+
+/** Google Cloud console pages for the setup steps (main process allowlists this host). */
+const CONSOLE_LINKS = {
+  enableApi: 'https://console.cloud.google.com/flows/enableapi?apiid=tasks.googleapis.com',
+  branding: 'https://console.cloud.google.com/auth/branding',
+  audience: 'https://console.cloud.google.com/auth/audience',
+  clients: 'https://console.cloud.google.com/auth/clients',
+};
 const btnGoogleKeys = document.getElementById('btnGoogleKeys');
 const optAutostart = document.getElementById('optAutostart');
 const optSnap = document.getElementById('optSnap');
@@ -630,8 +644,9 @@ function syncCredentialsForm(opts = {}) {
       : 'Секрет клиента';
   }
   if (inputRedirectPort) {
-    inputRedirectPort.value = String(credentials?.redirectPort || 42813);
+    inputRedirectPort.value = credentials?.redirectPort ? String(credentials.redirectPort) : '';
   }
+  if (onboardingManual) onboardingManual.open = Boolean(credentials?.configured);
   setOnboardingError('');
   onboardingPanel.hidden = !open;
   if (open) setSettingsOpen(false);
@@ -657,7 +672,7 @@ async function flushSettingsWrites() {
     settings = await window.widgetApi.setSettings(patch);
     syncSettingsUi();
   } catch (err) {
-    setBanner(`Настройки: ${err.message || err}`);
+    setBanner(`Настройки: ${errText(err)}`);
   }
 }
 
@@ -838,14 +853,39 @@ function focusAddInput() {
   input?.focus();
 }
 
-function setBanner(text) {
+/**
+ * @param {string} text
+ * @param {{ label?: string, url: string } | null} [action] link button opened in the browser
+ */
+function setBanner(text, action) {
   if (!text) {
     statusBanner.classList.remove('visible');
-    statusBanner.textContent = '';
+    statusBanner.replaceChildren();
     return;
   }
-  statusBanner.textContent = text;
+  statusBanner.replaceChildren(document.createTextNode(text));
+  if (action && action.url) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'banner-action';
+    btn.textContent = action.label || 'Открыть';
+    btn.addEventListener('click', () => window.widgetApi?.openExternal(action.url));
+    statusBanner.append(btn);
+  }
   statusBanner.classList.add('visible');
+}
+
+/** Error text without Electron's «Error invoking remote method '…': Error: » prefix. */
+function errText(err) {
+  const raw = err && err.message ? String(err.message) : String(err);
+  return raw.replace(/^Error invoking remote method '[^']*': (?:[A-Za-z]*Error: )?/, '');
+}
+
+/** Why edits are not possible right now (signed out / Google Cloud setup issue), or null. */
+function authBlockedMessage() {
+  if (state.mode === 'needs_auth') return 'Сначала войдите через Google.';
+  if (state.mode === 'needs_setup') return state.message || 'Проверьте настройку Google Cloud.';
+  return null;
 }
 
 function taskDueClass(task) {
@@ -1448,6 +1488,11 @@ function resortHabitsLocal() {
   state.habits = [...open, ...done];
 }
 
+/** Signed in to Google (possibly offline or with a setup problem): the footer button signs out. */
+function signedIn() {
+  return state.mode === 'google' || state.mode === 'needs_setup' || Boolean(state.offline);
+}
+
 function renderAll() {
   applyAccent(state.accentColor);
   renderTasks();
@@ -1468,17 +1513,24 @@ function renderAll() {
       state.message ||
       state.warning ||
       'Учётные данные есть — нажмите Google для входа.';
+  } else if (state.mode === 'needs_setup') {
+    banner = state.message || 'Проверьте настройку Google Cloud.';
   } else if (state.warning) {
     banner = `Предупреждение: ${state.warning}`;
   } else if (state.mode === 'google') {
     const missing = [];
     if (state.tasksListFound === false) missing.push(`«${state.tasksListName}»`);
     if (state.habitsListFound === false) missing.push(`«${state.habitsListName}»`);
-    if (missing.length) banner = `Списки не найдены: ${missing.join(', ')}. Проверьте имена в config.json.`;
+    if (missing.length) {
+      banner = `В Google Tasks нет ${missing.length > 1 ? 'списков' : 'списка'} ${missing.join(' и ')}. Создайте ${missing.length > 1 ? 'их' : 'его'} (или переименуйте свой) и нажмите ↻.`;
+    }
   }
-  setBanner(banner);
+  setBanner(
+    banner,
+    state.mode === 'needs_setup' && state.actionUrl ? { label: state.actionLabel, url: state.actionUrl } : null
+  );
 
-  btnAuth.textContent = state.mode === 'google' || state.offline ? 'Выйти' : 'Google';
+  btnAuth.textContent = signedIn() ? 'Выйти' : 'Google';
 }
 
 /**
@@ -1554,7 +1606,7 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) syncIfStale();
 });
 
-async function loadData(force) {
+async function loadData(force, extra = {}) {
   if (!window.widgetApi) {
     setBanner('Запустите через Electron (npm start), не открывайте HTML напрямую.');
     return;
@@ -1562,14 +1614,14 @@ async function loadData(force) {
   if (loadInFlight) return loadInFlight;
   loadInFlight = (async () => {
     try {
-      const next = await window.widgetApi.getData(force ? { force: true } : {});
+      const next = await window.widgetApi.getData(force ? { force: true, ...extra } : {});
       carryPendingItems(state, next);
       state = next;
       lastLoadAt = Date.now();
       if (state.defaultAccent) configAccent = state.defaultAccent;
       renderAll();
     } catch (err) {
-      setBanner(`Ошибка загрузки: ${err.message || err}`);
+      setBanner(`Ошибка загрузки: ${errText(err)}`);
     } finally {
       loadInFlight = null;
     }
@@ -1683,7 +1735,7 @@ async function toggleItem(listKind, item) {
       resortTasksLocal();
       patchTaskRow(item);
     }
-    setBanner(`Не удалось обновить: ${err.message || err}`);
+    setBanner(`Не удалось обновить: ${errText(err)}`);
   } finally {
     pendingIds.delete(item.id);
   }
@@ -1699,7 +1751,7 @@ async function undoReschedule(item, prevKey) {
     resortTasksLocal();
     patchTaskRow(item);
   } catch (err) {
-    setBanner(`Не удалось отменить: ${err.message || err}`);
+    setBanner(`Не удалось отменить: ${errText(err)}`);
   } finally {
     pendingIds.delete(item.id);
   }
@@ -1734,8 +1786,9 @@ async function onAddSubmit(listKind, input) {
     setBanner('Офлайн: нельзя создать задачу в Google.');
     return;
   }
-  if (state.mode === 'needs_auth') {
-    setBanner('Сначала войдите через Google.');
+  const blocked = authBlockedMessage();
+  if (blocked) {
+    setBanner(blocked);
     return;
   }
   addBusy = true;
@@ -1748,7 +1801,7 @@ async function onAddSubmit(listKind, input) {
       await loadData(true);
     }
   } catch (err) {
-    setBanner(`Не удалось добавить: ${err.message || err}`);
+    setBanner(`Не удалось добавить: ${errText(err)}`);
   } finally {
     addBusy = false;
   }
@@ -1760,8 +1813,9 @@ function guardMutate(actionLabel) {
     setBanner(`Офлайн: нельзя ${actionLabel} в Google. Обновите, когда сеть появится.`);
     return false;
   }
-  if (state.mode === 'needs_auth') {
-    setBanner('Сначала войдите через Google.');
+  const blocked = authBlockedMessage();
+  if (blocked) {
+    setBanner(blocked);
     return false;
   }
   return true;
@@ -1927,7 +1981,7 @@ function bindListReorder(listKind, listEl) {
     try {
       await window.widgetApi.moveItem(kind, taskId, previousId, orderedIds);
     } catch (err) {
-      setBanner(`Не удалось изменить порядок: ${err.message || err}`);
+      setBanner(`Не удалось изменить порядок: ${errText(err)}`);
       await loadData(true);
     }
   }
@@ -2008,8 +2062,9 @@ function bindListReorder(listKind, listEl) {
       setBanner('Офлайн: нельзя изменить порядок в Google. Обновите, когда сеть появится.');
       return;
     }
-    if (state.mode === 'needs_auth') {
-      setBanner('Сначала войдите через Google.');
+    const blocked = authBlockedMessage();
+    if (blocked) {
+      setBanner(blocked);
       return;
     }
 
@@ -2075,7 +2130,7 @@ async function renameItem(listKind, item, nextTitle) {
     item.title = prevTitle;
     if (listKind === 'habits') patchHabitRow(item);
     else patchTaskRow(item);
-    setBanner(`Не удалось изменить: ${err.message || err}`);
+    setBanner(`Не удалось изменить: ${errText(err)}`);
   } finally {
     pendingIds.delete(item.id);
   }
@@ -2199,7 +2254,7 @@ async function removeItem(listKind, item) {
         await window.widgetApi.deleteItem(listKind, item.id);
       } catch (err) {
         restore();
-        setBanner(`Не удалось удалить: ${err.message || err}`);
+        setBanner(`Не удалось удалить: ${errText(err)}`);
       } finally {
         pendingIds.delete(item.id);
       }
@@ -2307,7 +2362,7 @@ async function saveNotesPanel({ closeAfter } = {}) {
     if (closeAfter) closeNotesPanel();
     return true;
   } catch (err) {
-    setBanner(`Не удалось сохранить заметки: ${err.message || err}`);
+    setBanner(`Не удалось сохранить заметки: ${errText(err)}`);
     return false;
   } finally {
     notesSaving = false;
@@ -2401,7 +2456,7 @@ async function saveTimePanel({ closeAfter, clear } = {}) {
     if (closeAfter) closeTimePanel();
     return true;
   } catch (err) {
-    setBanner(`Не удалось сохранить время: ${err.message || err}`);
+    setBanner(`Не удалось сохранить время: ${errText(err)}`);
     return false;
   } finally {
     timeSaving = false;
@@ -2486,7 +2541,7 @@ async function saveDatePanel(value) {
     closeDatePanel();
     return true;
   } catch (err) {
-    setBanner(`Не удалось сохранить срок: ${err.message || err}`);
+    setBanner(`Не удалось сохранить срок: ${errText(err)}`);
     return false;
   } finally {
     dateSaving = false;
@@ -2559,7 +2614,7 @@ async function saveRepeatPanel(next) {
     closeRepeatPanel();
     return true;
   } catch (err) {
-    setBanner(`Не удалось сохранить повтор: ${err.message || err}`);
+    setBanner(`Не удалось сохранить повтор: ${errText(err)}`);
     return false;
   } finally {
     repeatSaving = false;
@@ -2739,7 +2794,7 @@ async function beginAddSubtask(parentItem, parentRow) {
         await loadData(true);
       }
     } catch (err) {
-      setBanner(`Не удалось добавить подзадачу: ${err.message || err}`);
+      setBanner(`Не удалось добавить подзадачу: ${errText(err)}`);
     } finally {
       addBusy = false;
     }
@@ -2977,7 +3032,7 @@ async function applyWallpaperPalette({ persistAuto } = {}) {
       setBanner('');
     }
   } catch (err) {
-    setBanner(`Палитра: ${err.message || err}`);
+    setBanner(`Палитра: ${errText(err)}`);
     if (optAutoPalette) optAutoPalette.checked = Boolean(settings.autoPalette);
   }
 }
@@ -2994,26 +3049,106 @@ async function onAutoPaletteChange() {
   applyAccent(configAccent);
 }
 
+let loginBusy = false;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let loginHintTimer = null;
+const LOGIN_HINT_MS = 30 * 1000;
+
+function setLoginPending(on) {
+  if (!loginPending) return;
+  loginPending.hidden = !on;
+  if (loginPendingHint) loginPendingHint.hidden = true;
+  if (loginHintTimer) {
+    clearTimeout(loginHintTimer);
+    loginHintTimer = null;
+  }
+  if (on) {
+    // Google shows its errors in the browser and never redirects back — after a while, explain.
+    loginHintTimer = setTimeout(() => {
+      if (loginPendingHint) loginPendingHint.hidden = false;
+    }, LOGIN_HINT_MS);
+  }
+}
+
+/** Open Google sign-in in the browser and wait (cancel / reopen / copy link stay available). */
+async function startLogin() {
+  if (!window.widgetApi || loginBusy) return;
+  loginBusy = true;
+  setBanner('');
+  setLoginPending(true);
+  try {
+    const res = await window.widgetApi.login();
+    if (res && res.ok) {
+      state = res.data;
+      if (state.defaultAccent) configAccent = state.defaultAccent;
+      renderAll();
+      return;
+    }
+    if (!res || res.code === 'cancelled') {
+      renderAll();
+      return;
+    }
+    setBanner(
+      res.message || 'Не удалось войти в Google.',
+      res.actionUrl ? { label: res.actionLabel, url: res.actionUrl } : null
+    );
+  } catch (err) {
+    setBanner(`Вход в Google: ${errText(err)}`);
+  } finally {
+    loginBusy = false;
+    setLoginPending(false);
+  }
+}
+
 async function onAuthClick() {
-  if (!window.widgetApi || addBusy) return;
-  if (state.mode !== 'google' && !state.offline && credentials && !credentials.configured) {
+  if (!window.widgetApi || addBusy || loginBusy) return;
+  if (!signedIn() && credentials && !credentials.configured) {
     syncCredentialsForm({ open: true, fromSettings: true });
+    return;
+  }
+  if (!signedIn()) {
+    startLogin();
     return;
   }
   addBusy = true;
   try {
-    if (state.mode === 'google' || state.offline) {
-      state = await window.widgetApi.logout();
-    } else {
-      setBanner('Откройте браузер и подтвердите доступ к Google Tasks…');
-      state = await window.widgetApi.login();
-    }
+    state = await window.widgetApi.logout();
     renderAll();
   } catch (err) {
-    const msg = err && err.message ? String(err.message) : String(err);
-    setBanner(msg.indexOf('Сессия Google') === 0 ? msg : `Вход в Google: ${msg}`);
+    setBanner(`Выход из Google: ${errText(err)}`);
   } finally {
     addBusy = false;
+  }
+}
+
+/** Apply a save / import result and go straight to sign-in. */
+function applyCredentialsResult(result) {
+  credentials = result.credentials || credentials;
+  if (result.settings) settings = result.settings;
+  if (result.data) state = result.data;
+  syncCredentialsForm({ open: false });
+  syncSettingsUi();
+  renderAll();
+  if (state.mode === 'needs_auth' && credentials?.configured) startLogin();
+}
+
+/**
+ * Import client_secret.json: `text` from a drop / paste, or a file dialog when omitted.
+ * @param {string} [text]
+ */
+async function importClientJson(text) {
+  if (!window.widgetApi?.importClientJson || addBusy) return;
+  addBusy = true;
+  onboardingDrop?.setAttribute('aria-busy', 'true');
+  setOnboardingError('');
+  try {
+    const result = await window.widgetApi.importClientJson(text);
+    if (result && !result.canceled) applyCredentialsResult(result);
+  } catch (err) {
+    setOnboardingError(errText(err));
+  } finally {
+    addBusy = false;
+    onboardingDrop?.removeAttribute('aria-busy');
   }
 }
 
@@ -3021,7 +3156,12 @@ async function onSaveCredentials() {
   if (!window.widgetApi || addBusy) return;
   const clientId = (inputClientId?.value || '').trim();
   const clientSecret = (inputClientSecret?.value || '').trim();
-  const redirectPort = Number(inputRedirectPort?.value || 42813);
+  const redirectPort = (inputRedirectPort?.value || '').trim();
+  // The whole client_secret.json pasted into the Client ID field.
+  if (clientId.startsWith('{')) {
+    await importClientJson(clientId);
+    return;
+  }
   if (!clientId) {
     setOnboardingError('Укажите Client ID');
     return;
@@ -3034,30 +3174,17 @@ async function onSaveCredentials() {
   if (btnSaveCredentials) btnSaveCredentials.disabled = true;
   if (btnSkipCredentials) btnSkipCredentials.disabled = true;
   setOnboardingError('');
+  let result = null;
   try {
-    const result = await window.widgetApi.saveCredentials({
-      clientId,
-      clientSecret,
-      redirectPort,
-    });
-    credentials = result.credentials || credentials;
-    if (result.settings) settings = result.settings;
-    if (result.data) state = result.data;
-    syncCredentialsForm({ open: false });
-    syncSettingsUi();
-    renderAll();
-    setBanner(
-      state.mode === 'needs_auth'
-        ? 'Ключи сохранены — нажмите Google для входа.'
-        : 'Ключи сохранены.'
-    );
+    result = await window.widgetApi.saveCredentials({ clientId, clientSecret, redirectPort });
   } catch (err) {
-    setOnboardingError(err.message || String(err));
+    setOnboardingError(errText(err));
   } finally {
     addBusy = false;
     if (btnSaveCredentials) btnSaveCredentials.disabled = false;
     if (btnSkipCredentials) btnSkipCredentials.disabled = false;
   }
+  if (result) applyCredentialsResult(result);
 }
 
 async function onSkipCredentials() {
@@ -3078,7 +3205,7 @@ async function onSkipCredentials() {
     syncSettingsUi();
     renderAll();
   } catch (err) {
-    setOnboardingError(err.message || String(err));
+    setOnboardingError(errText(err));
   } finally {
     addBusy = false;
     if (btnSaveCredentials) btnSaveCredentials.disabled = false;
@@ -3114,7 +3241,7 @@ async function bootstrap() {
     maybeShowFirstRunOnboarding();
   } catch (err) {
     syncSettingsUi();
-    setBanner(`Ошибка загрузки: ${err.message || err}`);
+    setBanner(`Ошибка загрузки: ${errText(err)}`);
   }
 }
 
@@ -3599,7 +3726,7 @@ document.addEventListener('click', (e) => {
 
 document.getElementById('btnMin').addEventListener('click', () => window.widgetApi?.minimize());
 document.getElementById('btnClose').addEventListener('click', () => window.widgetApi?.close());
-document.getElementById('btnRefresh').addEventListener('click', () => loadData(true));
+document.getElementById('btnRefresh').addEventListener('click', () => loadData(true, { lists: true }));
 btnAuth.addEventListener('click', onAuthClick);
 
 if (btnGoogleKeys) {
@@ -3621,12 +3748,55 @@ if (btnSkipCredentials) {
     onSkipCredentials();
   });
 }
-if (btnOpenConsole) {
-  btnOpenConsole.addEventListener('click', (e) => {
+onboardingPanel?.addEventListener('click', (e) => {
+  const link = e.target.closest('[data-console]');
+  if (!link) return;
+  e.preventDefault();
+  const url = CONSOLE_LINKS[link.getAttribute('data-console')];
+  if (url) window.widgetApi?.openExternal(url);
+});
+
+const MAX_CLIENT_JSON_BYTES = 64 * 1024;
+if (onboardingDrop) {
+  onboardingDrop.addEventListener('click', () => importClientJson());
+  onboardingDrop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      importClientJson();
+    }
+  });
+  onboardingDrop.addEventListener('dragover', (e) => {
     e.preventDefault();
-    window.widgetApi?.openExternal('https://console.cloud.google.com/apis/credentials');
+    onboardingDrop.classList.add('is-dragover');
+  });
+  onboardingDrop.addEventListener('dragleave', () => onboardingDrop.classList.remove('is-dragover'));
+  onboardingDrop.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    onboardingDrop.classList.remove('is-dragover');
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!file) return;
+    if (file.size > MAX_CLIENT_JSON_BYTES) {
+      setOnboardingError('Это не похоже на client_secret.json: файл слишком большой.');
+      return;
+    }
+    importClientJson(await file.text());
   });
 }
+// A file dropped anywhere else must not navigate the widget away.
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => e.preventDefault());
+
+btnLoginReopen?.addEventListener('click', () => window.widgetApi?.loginReopen?.());
+btnLoginCancel?.addEventListener('click', () => window.widgetApi?.loginCancel?.());
+btnLoginCopy?.addEventListener('click', async () => {
+  const ok = await window.widgetApi?.loginCopyLink?.();
+  if (!ok) return;
+  const label = btnLoginCopy.textContent;
+  btnLoginCopy.textContent = 'Скопировано';
+  setTimeout(() => {
+    btnLoginCopy.textContent = label;
+  }, 1500);
+});
 
 document.getElementById('form-add-tasks').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -3696,7 +3866,7 @@ document.addEventListener('keydown', (e) => {
     openSearch();
   } else if (e.key === 'F5' && !e.ctrlKey) {
     e.preventDefault();
-    loadData(true);
+    loadData(true, { lists: true });
   } else if (!typing && !e.ctrlKey && !e.shiftKey) {
     if (key === 'n' || key === 'т') {
       e.preventDefault();
@@ -3706,7 +3876,7 @@ document.addEventListener('keydown', (e) => {
       openSearch();
     } else if (key === 'r' || key === 'к') {
       e.preventDefault();
-      loadData(true);
+      loadData(true, { lists: true });
     } else if (view === 'tasks' && FILTER_KEYS[key]) {
       e.preventDefault();
       setTaskDueFilter(FILTER_KEYS[key]);

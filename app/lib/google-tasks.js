@@ -479,7 +479,7 @@ async function fetchLivePayloadOnce(config) {
       tasks: [],
       habits: [],
       offline: false,
-      message: 'Нужна авторизация Google',
+      message: 'Нажмите «Google» внизу, чтобы войти.',
     };
   }
 
@@ -683,6 +683,24 @@ async function getWidgetDataUncached(force) {
   } catch (err) {
     const mapped = normalizeGoogleAuthError(err);
     console.error('Google Tasks fetch failed:', mapped.message);
+    // Setup problems (API disabled, client deleted, org policy) are not «offline»:
+    // retrying won't help until the user fixes something in Google Cloud.
+    if (SETUP_ERROR_CODES.has(mapped.code)) {
+      invalidateListCache();
+      invalidatePayloadCache();
+      return {
+        mode: 'needs_setup',
+        tasksListName: config.tasksListName,
+        habitsListName: config.habitsListName,
+        accentColor: config.accentColor,
+        tasks: [],
+        habits: [],
+        offline: false,
+        message: mapped.message,
+        actionUrl: mapped.actionUrl || null,
+        actionLabel: mapped.actionLabel || null,
+      };
+    }
     if (isInvalidGrantError(err) || mapped.code === 'invalid_grant') {
       invalidateListCache();
       invalidatePayloadCache();
@@ -717,11 +735,16 @@ async function getWidgetDataUncached(force) {
   }
 }
 
+/** Errors that need a fix in Google Cloud rather than a retry. */
+const SETUP_ERROR_CODES = new Set(['api_disabled', 'invalid_client', 'admin_policy']);
+
 /**
- * @param {{ force?: boolean }} [opts]
+ * @param {{ force?: boolean, lists?: boolean }} [opts]
+ *   lists: also re-read the task-list names (user-initiated refresh after creating a list).
  */
 async function getWidgetData(opts = {}) {
   const force = Boolean(opts && opts.force);
+  if (force && opts.lists) invalidateListCache();
   if (dataInFlight && !force) return dataInFlight;
   if (force) {
     // Forced refreshes queued behind the same in-flight load share one round-trip.
@@ -754,7 +777,6 @@ async function getWidgetData(opts = {}) {
 }
 
 async function loginGoogle() {
-  const config = loadConfig();
   if (!hasGoogleCredentials()) {
     throw new Error('Сначала сохраните Google Client ID и Secret в настройках виджета');
   }
@@ -762,10 +784,11 @@ async function loginGoogle() {
   invalidatePayloadCache();
   try {
     await getAuthorizedClient({ interactive: true });
-    return await fetchLivePayload(config);
   } catch (err) {
     throw normalizeGoogleAuthError(err);
   }
+  // Signed in: a failing first load (e.g. Tasks API disabled) becomes a payload the UI explains.
+  return getWidgetData({ force: true });
 }
 
 /**

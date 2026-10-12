@@ -100,7 +100,7 @@ function migrateAppWrittenEnv() {
       writeSecretJson(getCredentialsJsonPath(), {
         clientId: values.GOOGLE_CLIENT_ID,
         clientSecret: values.GOOGLE_CLIENT_SECRET,
-        redirectPort: Number(values.OAUTH_REDIRECT_PORT) || DEFAULT_OAUTH_PORT,
+        redirectPort: Number(values.OAUTH_REDIRECT_PORT) || null,
         updatedAt: new Date().toISOString(),
       });
     }
@@ -108,6 +108,20 @@ function migrateAppWrittenEnv() {
   } catch (err) {
     console.warn('[config] .env migration failed:', err && err.message ? err.message : err);
   }
+}
+
+/**
+ * Port the user pinned, or null for «choose a free one». Older versions saved their default
+ * 42813 for everybody; without an explicit `portPinned` flag that value is not a choice,
+ * and keeping it would leave a well-known port open during every sign-in.
+ * @param {Record<string, any>} data parsed credentials.json
+ * @returns {number | null}
+ */
+function savedPinnedPort(data) {
+  const port = Math.round(Number(data && (data.redirectPort || data.OAUTH_REDIRECT_PORT)));
+  if (!Number.isFinite(port) || port <= 0) return null;
+  if (port === DEFAULT_OAUTH_PORT && !data.portPinned) return null;
+  return port;
 }
 
 function loadCredentialsJson(jsonPath, { force = false } = {}) {
@@ -118,10 +132,9 @@ function loadCredentialsJson(jsonPath, { force = false } = {}) {
   if (!clientId || !clientSecret) return false;
   applyEnvValue('GOOGLE_CLIENT_ID', clientId, { force });
   applyEnvValue('GOOGLE_CLIENT_SECRET', clientSecret, { force });
-  const port = Number(data.redirectPort || data.OAUTH_REDIRECT_PORT || DEFAULT_OAUTH_PORT);
-  if (Number.isFinite(port) && port > 0) {
-    applyEnvValue('OAUTH_REDIRECT_PORT', String(Math.round(port)), { force });
-  }
+  // No saved port = pick a free loopback port per sign-in (Desktop clients accept any).
+  const port = savedPinnedPort(data);
+  if (port) applyEnvValue('OAUTH_REDIRECT_PORT', String(port), { force });
   return true;
 }
 
@@ -173,10 +186,13 @@ function resetEnvCache() {
 /** Printable ASCII without spaces — what Google issues for client id / secret. */
 const CREDENTIAL_RE = /^[\x21-\x7E]{1,512}$/;
 
+const CLIENT_ID_SUFFIX = '.apps.googleusercontent.com';
+
 /**
  * Persist Desktop OAuth client credentials for the widget
  * to data/credentials.json (encrypted via safeStorage when available).
- * @param {{ clientId: string, clientSecret: string, redirectPort?: number }} input
+ * @param {{ clientId: string, clientSecret: string, redirectPort?: number | string | null }} input
+ *   redirectPort empty / null = choose a free port at each sign-in.
  */
 function saveGoogleCredentials(input) {
   const clientId = String(input?.clientId || '').trim();
@@ -187,17 +203,24 @@ function saveGoogleCredentials(input) {
   if (!CREDENTIAL_RE.test(clientId) || !CREDENTIAL_RE.test(clientSecret)) {
     throw new Error('Client ID и Client Secret не должны содержать пробелов и переводов строк');
   }
-  let redirectPort = Number(input?.redirectPort);
-  if (!Number.isFinite(redirectPort) || redirectPort <= 0) redirectPort = DEFAULT_OAUTH_PORT;
-  redirectPort = Math.round(redirectPort);
-  if (redirectPort < 1024 || redirectPort > 65535) {
-    throw new Error('Порт redirect должен быть в диапазоне 1024–65535');
+  if (!clientId.endsWith(CLIENT_ID_SUFFIX)) {
+    throw new Error(`Client ID должен заканчиваться на ${CLIENT_ID_SUFFIX} — похоже, вставлено не то поле.`);
+  }
+  const rawPort = input?.redirectPort;
+  /** @type {number | null} */
+  let redirectPort = null;
+  if (rawPort !== undefined && rawPort !== null && String(rawPort).trim() !== '' && Number(rawPort) !== 0) {
+    redirectPort = Math.round(Number(rawPort));
+    if (!Number.isFinite(redirectPort) || redirectPort < 1024 || redirectPort > 65535) {
+      throw new Error('Порт redirect должен быть в диапазоне 1024–65535 (или оставьте поле пустым)');
+    }
   }
 
   writeSecretJson(getCredentialsJsonPath(), {
     clientId,
     clientSecret,
     redirectPort,
+    portPinned: Boolean(redirectPort),
     updatedAt: new Date().toISOString(),
   });
 
@@ -205,7 +228,8 @@ function saveGoogleCredentials(input) {
   loadEnvFile({ force: true });
   process.env.GOOGLE_CLIENT_ID = clientId;
   process.env.GOOGLE_CLIENT_SECRET = clientSecret;
-  process.env.OAUTH_REDIRECT_PORT = String(redirectPort);
+  if (redirectPort) process.env.OAUTH_REDIRECT_PORT = String(redirectPort);
+  else delete process.env.OAUTH_REDIRECT_PORT;
 
   return {
     configured: true,
@@ -219,7 +243,7 @@ function saveGoogleCredentials(input) {
  * @returns {{
  *   configured: boolean,
  *   clientId: string | null,
- *   redirectPort: number,
+ *   redirectPort: number | null,
  *   envPath: string,
  *   jsonPath: string,
  * }}
@@ -228,12 +252,13 @@ function getGoogleCredentialsStatus() {
   loadEnvFile();
   const clientId = process.env.GOOGLE_CLIENT_ID || null;
   const configured = Boolean(clientId && process.env.GOOGLE_CLIENT_SECRET);
-  let redirectPort = Number(process.env.OAUTH_REDIRECT_PORT || DEFAULT_OAUTH_PORT);
-  if (!Number.isFinite(redirectPort) || redirectPort <= 0) redirectPort = DEFAULT_OAUTH_PORT;
+  // null = automatic (a free port is chosen at each sign-in).
+  const fixed = Number(process.env.OAUTH_REDIRECT_PORT);
+  const redirectPort = Number.isFinite(fixed) && fixed > 0 ? Math.round(fixed) : null;
   return {
     configured,
     clientId: configured ? clientId : null,
-    redirectPort: Math.round(redirectPort),
+    redirectPort,
     envPath: getCredentialsEnvPath(),
     jsonPath: getCredentialsJsonPath(),
   };
@@ -438,6 +463,7 @@ module.exports = {
   readSecretJson,
   writeSecretJson,
   setSafeStorageForTests,
+  savedPinnedPort,
   loadConfig,
   dataPath,
   getDataRoot,

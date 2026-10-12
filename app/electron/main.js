@@ -11,6 +11,8 @@ const {
   Menu,
   nativeImage,
   Notification,
+  dialog,
+  clipboard,
 } = require('electron');
 const fs = require('fs');
 const path = require('path');
@@ -29,7 +31,14 @@ const {
   clearOfflineCache,
   resetCompletedHabitsForNewDay,
 } = require('../lib/google-tasks');
-const { revokeAndClearTokens, resetAuthClient } = require('../lib/google-auth');
+const {
+  revokeAndClearTokens,
+  resetAuthClient,
+  cancelLogin,
+  reopenLoginInBrowser,
+  getPendingLoginUrl,
+} = require('../lib/google-auth');
+const { parseClientSecretJson, MAX_FILE_BYTES } = require('../lib/client-secret-file');
 const {
   loadSettings,
   saveSettings,
@@ -696,21 +705,23 @@ function registerIpc() {
     return credentialsPayload();
   });
 
-  ipcMain.handle('widget:save-credentials', async (event, payload) => {
-    if (!isFromWidget(event)) throw new Error('Unauthorized');
-    if (!payload || typeof payload !== 'object') throw new Error('Invalid credentials');
+  /**
+   * Save OAuth client keys and reload. A different Client ID invalidates the saved
+   * refresh token (it belongs to the old client), so the user signs in again.
+   */
+  async function storeCredentials({ clientId, clientSecret, redirectPort }) {
     const existing = getGoogleCredentialsStatus();
-    const clientId = String(payload.clientId || '').trim();
-    let clientSecret = String(payload.clientSecret || '').trim();
-    if (!clientSecret && existing.configured && process.env.GOOGLE_CLIENT_SECRET) {
-      clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    const clientChanged = Boolean(existing.clientId && existing.clientId !== clientId);
+    // Validation happens inside save (it throws), so nothing is cleared for rejected input.
+    saveGoogleCredentials({ clientId, clientSecret, redirectPort });
+    if (clientChanged) {
+      // Same cleanup as «Выйти»: revoke the old grant (best effort), forget the previous
+      // account's tasks so they can't reappear as «offline» data for the next sign-in.
+      await revokeAndClearTokens();
+      clearOfflineCache();
+    } else {
+      resetAuthClient();
     }
-    saveGoogleCredentials({
-      clientId,
-      clientSecret,
-      redirectPort: payload.redirectPort,
-    });
-    resetAuthClient();
     saveSettings({ onboardingSkipped: false });
     invalidateListCache();
     invalidatePayloadCache();
@@ -720,6 +731,39 @@ function registerIpc() {
       settings: settingsForRenderer(),
       data,
     };
+  }
+
+  ipcMain.handle('widget:save-credentials', async (event, payload) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    if (!payload || typeof payload !== 'object') throw new Error('Invalid credentials');
+    const existing = getGoogleCredentialsStatus();
+    const clientId = String(payload.clientId || '').trim();
+    let clientSecret = String(payload.clientSecret || '').trim();
+    if (!clientSecret && existing.configured && clientId === existing.clientId && process.env.GOOGLE_CLIENT_SECRET) {
+      clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    }
+    return storeCredentials({ clientId, clientSecret, redirectPort: payload.redirectPort });
+  });
+
+  // client_secret.json: dropped / pasted text, or picked via a file dialog when no text is given.
+  ipcMain.handle('widget:import-client-json', async (event, payload) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    let text = payload && typeof payload.text === 'string' ? payload.text : null;
+    if (text === null) {
+      const picked = await dialog.showOpenDialog(mainWindow, {
+        title: 'Файл client_secret.json из Google Cloud',
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+        properties: ['openFile'],
+      });
+      if (picked.canceled || !picked.filePaths.length) return { canceled: true };
+      const file = picked.filePaths[0];
+      if (fs.statSync(file).size > MAX_FILE_BYTES) {
+        throw new Error('Это не похоже на client_secret.json: файл слишком большой.');
+      }
+      text = fs.readFileSync(file, 'utf8');
+    }
+    const { clientId, clientSecret } = parseClientSecretJson(text);
+    return storeCredentials({ clientId, clientSecret, redirectPort: null });
   });
 
   ipcMain.handle('widget:skip-credentials', async (event) => {
@@ -738,13 +782,45 @@ function registerIpc() {
     return sampleAndPersistPalette();
   });
 
+  // Resolves with {ok:false, code} instead of throwing so the renderer keeps the error code
+  // (Electron flattens thrown errors to a prefixed message string).
   ipcMain.handle('widget:login', async (event) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
     const creds = getGoogleCredentialsStatus();
     if (!creds.configured) {
-      throw new Error('Сначала сохраните Google Client ID и Secret');
+      return { ok: false, code: 'no_credentials', message: 'Сначала загрузите client_secret.json или введите ключи Google.' };
     }
-    return loginGoogle();
+    try {
+      const data = applyAutoPaletteToData(await loginGoogle());
+      refreshExactReminders(data);
+      return { ok: true, data };
+    } catch (err) {
+      return {
+        ok: false,
+        code: (err && err.code) || null,
+        message: err && err.message ? err.message : String(err),
+        actionUrl: (err && err.actionUrl) || null,
+        actionLabel: (err && err.actionLabel) || null,
+      };
+    }
+  });
+
+  ipcMain.handle('widget:login-reopen', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    return reopenLoginInBrowser();
+  });
+
+  ipcMain.handle('widget:login-copy', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    const url = getPendingLoginUrl();
+    if (!url) return false;
+    clipboard.writeText(url);
+    return true;
+  });
+
+  ipcMain.handle('widget:login-cancel', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    return cancelLogin();
   });
 
   ipcMain.handle('widget:logout', async (event) => {
