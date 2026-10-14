@@ -20,7 +20,8 @@
     "pack:desktop": "npm run pack",
     "dist": "npm run prebuild:clean && electron-builder --win nsis && npm run shortcut",
     "build:win": "npm run dist",
-    "dist:portable": "npm run prebuild:clean && electron-builder --win portable && npm run shortcut"
+    "dist:portable": "npm run prebuild:clean && electron-builder --win portable && npm run shortcut",
+    "smoke:packaged": "node scripts/smoke-packaged.js"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
