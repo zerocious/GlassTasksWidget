@@ -736,12 +736,9 @@ function registerIpc() {
   ipcMain.handle('widget:save-credentials', async (event, payload) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
     if (!payload || typeof payload !== 'object') throw new Error('Invalid credentials');
-    const existing = getGoogleCredentialsStatus();
     const clientId = String(payload.clientId || '').trim();
-    let clientSecret = String(payload.clientSecret || '').trim();
-    if (!clientSecret && existing.configured && clientId === existing.clientId && process.env.GOOGLE_CLIENT_SECRET) {
-      clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-    }
+    // An empty secret with the current Client ID keeps the saved one (lib/config.js).
+    const clientSecret = String(payload.clientSecret || '').trim();
     return storeCredentials({ clientId, clientSecret, redirectPort: payload.redirectPort });
   });
 
@@ -951,6 +948,7 @@ if (!gotTheLock) {
     const settings = loadSettings();
     applyAutostart(settings.autostart);
     registerIpc();
+    require('./data-ipc').registerDataIpc({ getWindow: () => mainWindow, applySettingsPatch });
     createWindow();
     createTray();
     registerHotkeys(settings);

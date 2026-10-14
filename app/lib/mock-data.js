@@ -4,16 +4,20 @@ const { META_TASK, META_DONE, META_HABIT, localizeMeta } = require('./task-parse
 
 const {
   enrichHabits,
-  todayIso,
   markCompleted,
   unmarkCompleted,
   removeHabit,
 } = require('./streak-store');
-const { readJson, writeJson, dataPath } = require('./config');
+const { todayIso } = require('./dates');
+const { createJsonDoc } = require('./storage-doc');
 
-function mockFile() {
-  return dataPath('mock-items.json');
-}
+/** mock-items.json — demo-mode lists. Schema 1 = `{ tasks, habits }` (same as schema 0). */
+const mockDoc = createJsonDoc({
+  name: 'mock-items.json',
+  label: 'демо-задачи',
+  version: 1,
+  defaults: () => ({}),
+});
 
 function dueIsoDaysFromNow(delta) {
   const d = new Date();
@@ -90,7 +94,7 @@ const DEFAULT_HABITS = [
 ];
 
 function loadMockStore() {
-  const stored = readJson(mockFile(), null);
+  const stored = mockDoc.read();
   if (stored && Array.isArray(stored.tasks) && Array.isArray(stored.habits)) {
     return stored;
   }
@@ -98,12 +102,12 @@ function loadMockStore() {
     tasks: DEFAULT_TASKS.map((t) => ({ ...t })),
     habits: DEFAULT_HABITS.map((h) => ({ ...h })),
   };
-  writeJson(mockFile(), fresh);
+  mockDoc.write(fresh);
   return fresh;
 }
 
 function saveMockStore(store) {
-  writeJson(mockFile(), store);
+  mockDoc.write(store);
 }
 
 /** Seed demo streak history once so week strip looks alive in mock mode. */
@@ -397,4 +401,5 @@ module.exports = {
   deleteMockItem,
   reorderMockItems,
   loadMockStore,
+  mockDoc,
 };

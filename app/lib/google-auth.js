@@ -1,10 +1,16 @@
 'use strict';
 
 const crypto = require('crypto');
-const fs = require('fs');
 const http = require('http');
 const { URL } = require('url');
-const { loadEnvFile, readSecretJson, writeSecretJson, dataPath, hasGoogleCredentials } = require('./config');
+const {
+  getGoogleClientCredentials,
+  readSecretJson,
+  writeSecretJson,
+  deleteSecretJson,
+  dataPath,
+  hasGoogleCredentials,
+} = require('./config');
 
 const { describeAuthError } = require('./auth-errors');
 
@@ -137,18 +143,15 @@ function escapeHtml(s) {
  * fixedPort is set only when the user (or an old install) pinned a port.
  */
 function getOAuthClient() {
-  loadEnvFile();
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
-    throw new Error('Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET');
+  const creds = getGoogleClientCredentials();
+  if (!creds) {
+    throw new Error('Missing Google OAuth client ID / secret');
   }
-  const pinned = Number(process.env.OAUTH_REDIRECT_PORT);
   const google = getGoogle();
   return {
     // Desktop clients send client_secret too: Google's token endpoint still requires it.
-    oauth2: new google.auth.OAuth2(clientId, clientSecret),
-    fixedPort: Number.isFinite(pinned) && pinned > 0 ? Math.round(pinned) : null,
+    oauth2: new google.auth.OAuth2(creds.clientId, creds.clientSecret),
+    fixedPort: creds.redirectPort,
   };
 }
 
@@ -175,12 +178,8 @@ function resetAuthClient() {
 
 function clearTokens() {
   resetAuthClient();
-  const file = tokensFile();
-  try {
-    if (fs.existsSync(file)) fs.unlinkSync(file);
-  } catch {
-    writeSecretJson(file, {});
-  }
+  // Also drops a session-only copy kept when safeStorage is unavailable.
+  deleteSecretJson(tokensFile());
 }
 
 /**

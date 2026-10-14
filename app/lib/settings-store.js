@@ -1,6 +1,6 @@
 'use strict';
 
-const { readJson, writeJson, dataPath } = require('./config');
+const { createJsonDoc } = require('./storage-doc');
 
 /**
  * @typedef {'dark' | 'light'} Theme
@@ -81,9 +81,17 @@ const SIZE_PRESETS = {
 /** @type {AppSettings | null} */
 let settingsCache = null;
 
-function settingsFile() {
-  return dataPath('settings.json');
-}
+/**
+ * settings.json. Schema 1 = the flat settings object plus `schemaVersion`
+ * (schema 0, written before versioning, has the same fields; normalizeSettings fills gaps).
+ */
+const settingsDoc = createJsonDoc({
+  name: 'settings.json',
+  label: 'настройки',
+  version: 1,
+  lastGood: true,
+  defaults: () => ({}),
+});
 
 function normalizeHotkey(value, fallback) {
   if (typeof value !== 'string' || !value.trim()) return fallback;
@@ -140,7 +148,7 @@ function normalizeSettings(raw) {
  */
 function loadSettings() {
   if (settingsCache) return settingsCache;
-  settingsCache = normalizeSettings(readJson(settingsFile(), {}));
+  settingsCache = normalizeSettings(settingsDoc.read());
   return settingsCache;
 }
 
@@ -162,9 +170,14 @@ function saveSettings(patch) {
   );
   if (unchanged) return current;
 
-  writeJson(settingsFile(), next);
+  settingsDoc.write(next);
   settingsCache = next;
   return next;
+}
+
+/** Forget the in-memory copy (after import / wipe) so the next load reads the file. */
+function resetSettingsCache() {
+  settingsCache = null;
 }
 
 function getSizePreset(size) {
@@ -178,8 +191,12 @@ module.exports = {
   DEFAULT_TOGGLE_HOTKEY,
   DEFAULT_SWITCH_HOTKEY,
   SIZE_PRESETS,
+  DEFAULTS,
   loadSettings,
   saveSettings,
+  resetSettingsCache,
+  normalizeSettings,
   getSizePreset,
   normalizeBgOpacity,
+  settingsDoc,
 };
