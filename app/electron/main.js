@@ -13,6 +13,7 @@ const {
   Notification,
   dialog,
   clipboard,
+  powerMonitor,
 } = require('electron');
 const fs = require('fs');
 const os = require('os');
@@ -65,6 +66,7 @@ const {
   refreshExactReminders,
 } = require('./reminders');
 const { setupAutoUpdater, checkForAppUpdates } = require('./updater');
+const { createWakeDetector } = require('./power');
 
 function credentialsPayload() {
   const status = getGoogleCredentialsStatus();
@@ -669,6 +671,50 @@ function scheduleHabitsDayRollover() {
   if (typeof habitsRolloverTimer.unref === 'function') habitsRolloverTimer.unref();
 }
 
+const WAKE_SETTLE_MS = 5 * 1000;
+const WAKE_TICK_MS = 60 * 1000;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let wakeTimer = null;
+
+/**
+ * After sleep or a clock change the long setTimeout timers (exact reminders, midnight habit
+ * reset) are measured against a clock that may not have advanced, so re-arm them from the real
+ * time, apply a day change that happened meanwhile, and toast reminders that came due.
+ * Waits a few seconds first: the network is usually not back yet when the system resumes.
+ * @param {string} reason
+ */
+function handleSystemWake(reason) {
+  console.log('[power] wake:', reason);
+  if (wakeTimer) clearTimeout(wakeTimer);
+  wakeTimer = setTimeout(() => {
+    wakeTimer = null;
+    if (isQuitting) return;
+    scheduleHabitsDayRollover();
+    resetCompletedHabitsForNewDay()
+      .then((result) => {
+        if (result && result.reset) {
+          invalidatePayloadCache();
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('widget:habits-reset');
+        }
+      })
+      .catch((err) => console.warn('[power] habits reset', err && err.message ? err.message : err))
+      .finally(() => {
+        refreshExactReminders();
+        if (loadSettings().remindersEnabled !== false) {
+          runReminderCheck().catch((err) => console.warn('[power] reminders', err && err.message ? err.message : err));
+        }
+      });
+  }, WAKE_SETTLE_MS);
+  if (typeof wakeTimer.unref === 'function') wakeTimer.unref();
+}
+
+function watchSystemWake() {
+  const detector = createWakeDetector({ onWake: handleSystemWake });
+  powerMonitor.on('resume', () => detector.notify('resume'));
+  const heartbeat = setInterval(() => detector.tick(WAKE_TICK_MS), WAKE_TICK_MS);
+  if (typeof heartbeat.unref === 'function') heartbeat.unref();
+}
+
 function applySettingsPatch(patch) {
   const allowed = {};
   if (patch.theme === 'light' || patch.theme === 'dark') allowed.theme = patch.theme;
@@ -1113,6 +1159,7 @@ if (!gotTheLock) {
     registerHotkeys(settings);
     syncRemindersScheduler(settings.remindersEnabled !== false);
     scheduleHabitsDayRollover();
+    watchSystemWake();
     setupAutoUpdater({ onBeforeQuitAndInstall: () => { isQuitting = true; } });
 
     app.on('activate', () => {
