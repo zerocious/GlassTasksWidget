@@ -11,6 +11,7 @@ const path = require('path');
 const { execSync, execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const { markNotified } = require('../lib/reminder-store');
+const { childEnv } = require('../lib/child-env');
 
 const APP_USER_MODEL_ID = 'com.glasstasks.widget';
 
@@ -176,13 +177,13 @@ function showNativeWinRtToast(title, body) {
       {
         windowsHide: true,
         timeout: 8000,
-        env: {
-          ...process.env,
+        // Without the OAuth client id / secret that live in this process's environment.
+        env: childEnv({
           GT_TOAST_TITLE: String(title || '').slice(0, 120),
           GT_TOAST_BODY: String(body || '').slice(0, 240),
           GT_TOAST_ICON: iconPath ? pathToFileURL(iconPath).href : '',
           GT_TOAST_AUMID: APP_USER_MODEL_ID,
-        },
+        }),
       },
       (err) => {
         if (err) {

@@ -63,4 +63,7 @@ contextBridge.exposeInMainWorld('widgetApi', {
   minimize: () => ipcRenderer.send('widget:minimize'),
   close: () => ipcRenderer.send('widget:close'),
   openExternal: (url) => ipcRenderer.send('widget:open-external', url),
+  copyDiagnostics: () => ipcRenderer.invoke('widget:diagnostics-copy'),
+  openLogs: () => ipcRenderer.invoke('widget:open-logs'),
+  reportError: (payload) => ipcRenderer.send('widget:log', payload),
 });

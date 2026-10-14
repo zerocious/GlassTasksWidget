@@ -15,6 +15,7 @@ const {
   clipboard,
 } = require('electron');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { loadConfig, getGoogleCredentialsStatus, saveGoogleCredentials } = require('../lib/config');
@@ -37,8 +38,11 @@ const {
   cancelLogin,
   reopenLoginInBrowser,
   getPendingLoginUrl,
+  loadSavedTokens,
 } = require('../lib/google-auth');
 const { parseClientSecretJson, MAX_FILE_BYTES } = require('../lib/client-secret-file');
+const { createLogger, captureConsole } = require('../lib/logger');
+const { formatDiagnostics } = require('../lib/diagnostics');
 const {
   loadSettings,
   saveSettings,
@@ -98,6 +102,35 @@ if (process.platform === 'win32') {
 if (!app.isPackaged && process.env.GT_USER_DATA_DIR) {
   app.setPath('userData', path.resolve(process.env.GT_USER_DATA_DIR));
 }
+
+// File log next to the profile: without it a user's «it doesn't work» can't be investigated.
+// (console.* is mirrored, secrets are redacted; see lib/logger.js.)
+const logger = createLogger({ dir: path.join(app.getPath('userData'), 'logs') });
+captureConsole(logger);
+console.log(`[app] start v${app.getVersion()} ${app.isPackaged ? 'packaged' : 'dev'} electron ${process.versions.electron}`);
+
+// The main process must not die (or pop Electron's raw error box) on a stray exception:
+// log it and keep the widget alive. Repeated crashes are visible in the log.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err && err.stack ? err.stack : err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason && reason.stack ? reason.stack : reason);
+});
+
+// Nothing in this app needs camera, microphone, geolocation, notifications from web content,
+// or embedded webviews: deny every permission and block <webview> outright.
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('will-attach-webview', (e) => e.preventDefault());
+});
+app.whenReady().then(() => {
+  const ses = require('electron').session.defaultSession;
+  ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  ses.setPermissionCheckHandler(() => false);
+});
+app.on('child-process-gone', (_event, details) => {
+  console.error('[child-process-gone]', details.type, details.reason, details.exitCode);
+});
 
 // Minimal 16×16 accent PNG (glass-tasks red square with check hint)
 const TRAY_PNG_BASE64 =
@@ -407,6 +440,76 @@ function clampPosToDisplays(x, y, width, height) {
   };
 }
 
+const RENDERER_RESTARTS = [];
+const MAX_RESTARTS_PER_MINUTE = 3;
+const HANG_RELOAD_MS = 10 * 1000;
+
+/**
+ * Reload the widget page when its renderer crashes or hangs. State lives in the main process
+ * and on disk, so a reload loses nothing. After repeated crashes stop and tell the user.
+ * @param {BrowserWindow} win
+ */
+function watchRendererHealth(win) {
+  const wc = win.webContents;
+  /** @type {NodeJS.Timeout | null} */
+  let hangTimer = null;
+
+  const reloadAfterCrash = (reason) => {
+    const now = Date.now();
+    while (RENDERER_RESTARTS.length && now - RENDERER_RESTARTS[0] > 60 * 1000) RENDERER_RESTARTS.shift();
+    RENDERER_RESTARTS.push(now);
+    if (RENDERER_RESTARTS.length > MAX_RESTARTS_PER_MINUTE) {
+      console.error('[renderer] too many restarts, giving up:', reason);
+      dialog
+        .showMessageBox({
+          type: 'error',
+          title: 'Glass Tasks Widget',
+          message: 'Окно виджета постоянно падает.',
+          detail: 'Подробности в журнале: Настройки → «Папка логов». Перезапустите приложение.',
+          buttons: ['Открыть папку логов', 'Закрыть'],
+          defaultId: 0,
+          cancelId: 1,
+        })
+        .then((r) => {
+          if (r.response === 0) shell.openPath(logger.dir);
+        })
+        .catch(() => {});
+      return;
+    }
+    setTimeout(() => {
+      if (!win.isDestroyed()) wc.reload();
+    }, 500);
+  };
+
+  wc.on('render-process-gone', (_e, details) => {
+    console.error('[renderer] gone:', details.reason, details.exitCode);
+    if (details.reason !== 'clean-exit' && !isQuitting) reloadAfterCrash(details.reason);
+  });
+  wc.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
+    if (isMainFrame && code !== -3) console.error('[renderer] load failed:', code, desc);
+  });
+  wc.on('unresponsive', () => {
+    console.warn('[renderer] unresponsive');
+    if (hangTimer) clearTimeout(hangTimer);
+    hangTimer = setTimeout(() => {
+      hangTimer = null;
+      if (win.isDestroyed() || isQuitting) return;
+      console.error('[renderer] still hung after 10 s, restarting it');
+      wc.forcefullyCrashRenderer();
+    }, HANG_RELOAD_MS);
+  });
+  wc.on('responsive', () => {
+    if (hangTimer) {
+      clearTimeout(hangTimer);
+      hangTimer = null;
+      console.log('[renderer] responsive again');
+    }
+  });
+  win.on('closed', () => {
+    if (hangTimer) clearTimeout(hangTimer);
+  });
+}
+
 function createWindow() {
   if (mainWindow && !mainWindow.isDestroyed()) return;
 
@@ -461,6 +564,8 @@ function createWindow() {
       event.preventDefault();
     }
   });
+
+  watchRendererHealth(mainWindow);
 
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -912,6 +1017,52 @@ function registerIpc() {
   ipcMain.on('widget:close', (event) => {
     if (!isFromWidget(event)) return;
     hideWidget();
+  });
+
+  ipcMain.handle('widget:diagnostics-copy', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    const status = getGoogleCredentialsStatus();
+    const report = formatDiagnostics(
+      {
+        app: { name: app.getName(), version: app.getVersion(), packaged: app.isPackaged },
+        versions: process.versions,
+        os: `${os.type()} ${os.release()} ${os.arch()}`,
+        auth: {
+          credentialsConfigured: status.configured,
+          signedIn: Boolean(loadSavedTokens() && loadSavedTokens().refresh_token),
+          clientId: status.clientId,
+          pinnedPort: status.redirectPort,
+        },
+        settings: loadSettings(),
+        hotkeys: settingsForRenderer().hotkeys,
+        dataDir: path.join(app.getPath('userData'), 'data'),
+      },
+      logger.tail(200)
+    );
+    clipboard.writeText(report);
+    return { ok: true, lines: report.split('\n').length };
+  });
+
+  ipcMain.handle('widget:open-logs', async (event) => {
+    if (!isFromWidget(event)) throw new Error('Unauthorized');
+    fs.mkdirSync(logger.dir, { recursive: true });
+    const err = await shell.openPath(logger.dir);
+    return { ok: !err, error: err || null };
+  });
+
+  // Renderer errors (window.onerror / unhandled rejections); capped so a loop can't flood the disk.
+  let rendererLogWindowStart = 0;
+  let rendererLogCount = 0;
+  ipcMain.on('widget:log', (event, payload) => {
+    if (!isFromWidget(event) || !payload || typeof payload !== 'object') return;
+    const now = Date.now();
+    if (now - rendererLogWindowStart > 60 * 1000) {
+      rendererLogWindowStart = now;
+      rendererLogCount = 0;
+    }
+    if (++rendererLogCount > 30) return;
+    const clip = (v) => String(v == null ? '' : v).slice(0, 600);
+    console.error('[renderer-error]', clip(payload.message), clip(payload.source), clip(payload.stack));
   });
 
   ipcMain.on('widget:open-external', (event, url) => {
