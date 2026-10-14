@@ -1,5 +1,21 @@
 'use strict';
 
+/** Forward uncaught renderer errors to the main-process log (capped there). */
+function reportRendererError(message, source, stack) {
+  try {
+    window.widgetApi?.reportError?.({ message, source, stack });
+  } catch {
+    /* logging must never throw */
+  }
+}
+window.addEventListener('error', (e) => {
+  reportRendererError(e.message, `${e.filename}:${e.lineno}:${e.colno}`, e.error && e.error.stack);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason;
+  reportRendererError(`unhandled rejection: ${(r && r.message) || r}`, '', r && r.stack);
+});
+
 const panels = document.getElementById('panels');
 const viewTitle = document.getElementById('viewTitle');
 const sourceLabel = document.getElementById('sourceLabel');
@@ -50,6 +66,9 @@ const btnHideCompletedHabits = document.getElementById('btnHideCompletedHabits')
 const taskFilterChips = document.getElementById('taskFilterChips');
 const btnCheckReminders = document.getElementById('btnCheckReminders');
 const btnCheckUpdates = document.getElementById('btnCheckUpdates');
+const btnCopyDiagnostics = document.getElementById('btnCopyDiagnostics');
+const btnOpenLogs = document.getElementById('btnOpenLogs');
+const diagnosticsHint = document.getElementById('diagnosticsHint');
 const remindersHint = document.getElementById('remindersHint');
 const updatesHint = document.getElementById('updatesHint');
 const btnRefreshPalette = document.getElementById('btnRefreshPalette');
@@ -3662,6 +3681,39 @@ if (btnCheckReminders) {
     }
   });
 }
+/** Brief result next to the diagnostics buttons, then back to the usual hint. */
+function flashDiagnosticsHint(text, tone) {
+  if (!diagnosticsHint) return;
+  const original = diagnosticsHint.dataset.original || diagnosticsHint.textContent;
+  diagnosticsHint.dataset.original = original;
+  diagnosticsHint.hidden = false;
+  diagnosticsHint.textContent = text;
+  diagnosticsHint.classList.toggle('is-ok', tone === 'ok');
+  diagnosticsHint.classList.toggle('is-error', tone === 'error');
+  setTimeout(() => {
+    diagnosticsHint.textContent = original;
+    diagnosticsHint.classList.remove('is-ok', 'is-error');
+  }, 4000);
+}
+btnCopyDiagnostics?.addEventListener('click', async (e) => {
+  e.preventDefault();
+  try {
+    const res = await window.widgetApi.copyDiagnostics();
+    flashDiagnosticsHint(`Отчёт скопирован в буфер обмена (${res.lines} строк). Вставьте его в сообщение.`, 'ok');
+  } catch (err) {
+    flashDiagnosticsHint(`Не удалось собрать отчёт: ${errText(err)}`, 'error');
+  }
+});
+btnOpenLogs?.addEventListener('click', async (e) => {
+  e.preventDefault();
+  try {
+    const res = await window.widgetApi.openLogs();
+    if (!res.ok) flashDiagnosticsHint(`Не удалось открыть папку: ${res.error}`, 'error');
+  } catch (err) {
+    flashDiagnosticsHint(`Не удалось открыть папку: ${errText(err)}`, 'error');
+  }
+});
+
 if (btnCheckUpdates) {
   btnCheckUpdates.addEventListener('click', async (e) => {
     e.preventDefault();

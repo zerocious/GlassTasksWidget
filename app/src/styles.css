@@ -1174,6 +1174,13 @@ body.is-dnd .row {
   color: var(--text);
 }
 
+.settings-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  justify-content: flex-end;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
