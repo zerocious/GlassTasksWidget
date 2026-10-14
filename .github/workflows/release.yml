@@ -1,0 +1,81 @@
+name: Release
+
+# Push a tag like v1.1.0 (it must equal the version in app/package.json) and this builds the
+# installer and creates a DRAFT GitHub release. Nothing reaches users (electron-updater only
+# sees published releases) until you test the installer and press "Publish release".
+# Run it by hand (workflow_dispatch) for a dry run: the installer is attached to the run instead.
+# Steps and the manual test checklist: RELEASING.md.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm test
+
+      - name: Tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match app/package.json version $version"
+            exit 1
+          fi
+
+      # Informational until it has been seen passing on this runner (needs an interactive
+      # desktop session). The manual installer test in RELEASING.md is the real gate.
+      - name: Smoke-test the packaged app on a clean profile
+        continue-on-error: true
+        run: npm run smoke:packaged
+
+      - name: Build installer
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Check that auto-update will work for this build
+        run: node scripts/check-release.js dist
+
+      - name: Attach installer to the run (dry run)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: |
+            app/dist/Glass-Tasks-Widget-Setup-*.exe
+            app/dist/Glass-Tasks-Widget-Setup-*.exe.blockmap
+            app/dist/latest.yml
+
+      - name: Create draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/Glass-Tasks-Widget-Setup-*.exe \
+            dist/Glass-Tasks-Widget-Setup-*.exe.blockmap \
+            dist/latest.yml \
+            --draft --generate-notes --title "$GITHUB_REF_NAME"
