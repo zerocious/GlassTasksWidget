@@ -41,6 +41,8 @@ const onboardingDrop = document.getElementById('onboardingDrop');
 const onboardingManual = document.getElementById('onboardingManual');
 const loginPending = document.getElementById('loginPending');
 const loginPendingHint = document.getElementById('loginPendingHint');
+const loginPendingText = document.getElementById('loginPendingText');
+const loginPendingActions = document.getElementById('loginPendingActions');
 const btnLoginReopen = document.getElementById('btnLoginReopen');
 const btnLoginCopy = document.getElementById('btnLoginCopy');
 const btnLoginCancel = document.getElementById('btnLoginCancel');
@@ -622,6 +624,30 @@ function syncUpdatesHint(opts = {}) {
   updatesHint.classList.remove('is-error', 'is-ok');
 }
 
+/** Element to refocus when a panel closes (so keyboard users don't fall back to <body>). */
+let onboardingReturnFocus = null;
+let loginReturnFocus = null;
+/** True from opening the wizard until the user's first click or key press. */
+let wizardFocusArmed = false;
+for (const type of ['pointerdown', 'keydown']) {
+  document.addEventListener(type, () => { wizardFocusArmed = false; }, true);
+}
+window.addEventListener('focus', () => {
+  if (wizardFocusArmed && onboardingPanel && !onboardingPanel.hidden && !onboardingPanel.contains(document.activeElement)) {
+    onboardingDrop?.focus();
+  }
+  wizardFocusArmed = false;
+});
+
+function restoreFocus(target, closedPanel) {
+  const active = document.activeElement;
+  const lost = !active || active === document.body || (closedPanel && closedPanel.contains(active));
+  if (!lost) return;
+  const fallback = typeof inputAddTasks !== 'undefined' ? inputAddTasks : null;
+  const el = target && target.isConnected && !target.closest('[hidden]') ? target : fallback;
+  el?.focus?.();
+}
+
 function setOnboardingError(msg) {
   if (!onboardingError) return;
   if (!msg) {
@@ -631,6 +657,7 @@ function setOnboardingError(msg) {
   }
   onboardingError.hidden = false;
   onboardingError.textContent = msg;
+  onboardingError.scrollIntoView({ block: 'nearest' });
 }
 
 /**
@@ -666,9 +693,23 @@ function syncCredentialsForm(opts = {}) {
     inputRedirectPort.value = credentials?.redirectPort ? String(credentials.redirectPort) : '';
   }
   if (onboardingManual) onboardingManual.open = Boolean(credentials?.configured);
+  const steps = document.getElementById('onboardingSteps');
+  if (steps) steps.open = document.documentElement.dataset.size !== 'compact';
   setOnboardingError('');
+  const wasHidden = onboardingPanel.hidden;
   onboardingPanel.hidden = !open;
-  if (open) setSettingsOpen(false);
+  if (open) {
+    setSettingsOpen(false);
+    if (wasHidden) {
+      onboardingReturnFocus = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
+      onboardingDrop?.focus();
+      // A window that is still hidden / not yet active can lose this focus when it is shown.
+      wizardFocusArmed = true;
+    }
+  } else if (!wasHidden) {
+    restoreFocus(onboardingReturnFocus, onboardingPanel);
+    onboardingReturnFocus = null;
+  }
 }
 
 function maybeShowFirstRunOnboarding() {
@@ -874,7 +915,8 @@ function focusAddInput() {
 
 /**
  * @param {string} text
- * @param {{ label?: string, url: string } | null} [action] link button opened in the browser
+ * @param {{ label?: string, url?: string, onClick?: () => void } | null} [action]
+ *   button next to the text: opens `url` in the browser, or runs `onClick`
  */
 function setBanner(text, action) {
   if (!text) {
@@ -883,12 +925,15 @@ function setBanner(text, action) {
     return;
   }
   statusBanner.replaceChildren(document.createTextNode(text));
-  if (action && action.url) {
+  if (action && (action.url || action.onClick)) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'banner-action';
     btn.textContent = action.label || 'Открыть';
-    btn.addEventListener('click', () => window.widgetApi?.openExternal(action.url));
+    btn.addEventListener('click', () => {
+      if (action.onClick) action.onClick();
+      else window.widgetApi?.openExternal(action.url);
+    });
     statusBanner.append(btn);
   }
   statusBanner.classList.add('visible');
@@ -900,10 +945,29 @@ function errText(err) {
   return raw.replace(/^Error invoking remote method '[^']*': (?:[A-Za-z]*Error: )?/, '');
 }
 
+/**
+ * Button for a Google auth / setup error: a bad client goes back to the keys form,
+ * everything else to the console page named by the error.
+ * @param {{ code?: string | null, actionUrl?: string | null, actionLabel?: string | null }} e
+ */
+function errorAction(e) {
+  if (e.code === 'invalid_client') {
+    return { label: 'Ввести ключи', onClick: () => syncCredentialsForm({ open: true, fromSettings: true }) };
+  }
+  return e.actionUrl ? { label: e.actionLabel, url: e.actionUrl } : null;
+}
+
+/** Button for a needs_setup problem. */
+function setupAction() {
+  return state.mode === 'needs_setup' ? errorAction(state) : null;
+}
+
 /** Why edits are not possible right now (signed out / Google Cloud setup issue), or null. */
 function authBlockedMessage() {
-  if (state.mode === 'needs_auth') return 'Сначала войдите через Google.';
-  if (state.mode === 'needs_setup') return state.message || 'Проверьте настройку Google Cloud.';
+  if (state.mode === 'needs_auth') return { text: 'Сначала войдите через Google.', action: null };
+  if (state.mode === 'needs_setup') {
+    return { text: state.message || 'Проверьте настройку Google Cloud.', action: setupAction() };
+  }
   return null;
 }
 
@@ -1544,10 +1608,7 @@ function renderAll() {
       banner = `В Google Tasks нет ${missing.length > 1 ? 'списков' : 'списка'} ${missing.join(' и ')}. Создайте ${missing.length > 1 ? 'их' : 'его'} (или переименуйте свой) и нажмите ↻.`;
     }
   }
-  setBanner(
-    banner,
-    state.mode === 'needs_setup' && state.actionUrl ? { label: state.actionLabel, url: state.actionUrl } : null
-  );
+  setBanner(banner, setupAction());
 
   btnAuth.textContent = signedIn() ? 'Выйти' : 'Google';
 }
@@ -1807,7 +1868,7 @@ async function onAddSubmit(listKind, input) {
   }
   const blocked = authBlockedMessage();
   if (blocked) {
-    setBanner(blocked);
+    setBanner(blocked.text, blocked.action);
     return;
   }
   addBusy = true;
@@ -1834,7 +1895,7 @@ function guardMutate(actionLabel) {
   }
   const blocked = authBlockedMessage();
   if (blocked) {
-    setBanner(blocked);
+    setBanner(blocked.text, blocked.action);
     return false;
   }
   return true;
@@ -2083,7 +2144,7 @@ function bindListReorder(listKind, listEl) {
     }
     const blocked = authBlockedMessage();
     if (blocked) {
-      setBanner(blocked);
+      setBanner(blocked.text, blocked.action);
       return;
     }
 
@@ -3073,21 +3134,61 @@ let loginBusy = false;
 let loginHintTimer = null;
 const LOGIN_HINT_MS = 30 * 1000;
 
-function setLoginPending(on) {
+const LOGIN_WAIT_TEXT = 'Подтвердите доступ в открывшемся браузере…';
+const LOGIN_LOADING_TEXT = 'Вход выполнен. Загружаем задачи…';
+const COPY_LABEL = btnLoginCopy ? btnLoginCopy.textContent : 'Скопировать ссылку';
+/** @type {ReturnType<typeof setTimeout> | null} */
+let copyLabelTimer = null;
+
+function resetCopyLabel() {
+  if (copyLabelTimer) clearTimeout(copyLabelTimer);
+  copyLabelTimer = null;
+  if (btnLoginCopy) btnLoginCopy.textContent = COPY_LABEL;
+}
+
+/**
+ * @param {boolean} on
+ * @param {'browser' | 'loading'} [phase]
+ *   browser: waiting for Google (cancel / reopen / copy link); loading: browser step is over,
+ *   the first load is running — nothing to cancel any more.
+ */
+function setLoginPending(on, phase = 'browser') {
   if (!loginPending) return;
+  const wasHidden = loginPending.hidden;
   loginPending.hidden = !on;
   if (loginPendingHint) loginPendingHint.hidden = true;
   if (loginHintTimer) {
     clearTimeout(loginHintTimer);
     loginHintTimer = null;
   }
-  if (on) {
+  const loading = phase === 'loading';
+  if (loginPendingText) loginPendingText.textContent = loading ? LOGIN_LOADING_TEXT : LOGIN_WAIT_TEXT;
+  if (loginPendingActions) loginPendingActions.hidden = loading;
+  resetCopyLabel();
+  if (on && !loading) {
     // Google shows its errors in the browser and never redirects back — after a while, explain.
     loginHintTimer = setTimeout(() => {
       if (loginPendingHint) loginPendingHint.hidden = false;
     }, LOGIN_HINT_MS);
   }
+  if (on && wasHidden) {
+    const a = document.activeElement;
+    loginReturnFocus = a && a !== document.body && !loginPending.contains(a) ? a : null;
+    // «Открыть снова», not «Отмена»: a held Enter on the footer button auto-repeats and would
+    // click a freshly focused Cancel.
+    btnLoginReopen?.focus();
+  } else if (on && loading) {
+    // The focused button was just hidden.
+    if (!document.activeElement || document.activeElement === document.body) loginPending.focus?.();
+  } else if (!on) {
+    restoreFocus(loginReturnFocus, loginPending);
+    loginReturnFocus = null;
+  }
 }
+
+window.widgetApi?.onLoginPhase?.((phase) => {
+  if (loginBusy && phase === 'loading') setLoginPending(true, 'loading');
+});
 
 /** Open Google sign-in in the browser and wait (cancel / reopen / copy link stay available). */
 async function startLogin() {
@@ -3107,10 +3208,7 @@ async function startLogin() {
       renderAll();
       return;
     }
-    setBanner(
-      res.message || 'Не удалось войти в Google.',
-      res.actionUrl ? { label: res.actionLabel, url: res.actionUrl } : null
-    );
+    setBanner(res.message || 'Не удалось войти в Google.', errorAction(res));
   } catch (err) {
     setBanner(`Вход в Google: ${errText(err)}`);
   } finally {
@@ -3350,6 +3448,11 @@ document.addEventListener('pointerdown', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
+  if (loginPending && !loginPending.hidden && loginPendingActions && !loginPendingActions.hidden) {
+    e.preventDefault();
+    window.widgetApi?.loginCancel?.();
+    return;
+  }
   if (dateOverlay && !dateOverlay.hidden) {
     e.preventDefault();
     closeDatePanel();
@@ -3834,20 +3937,24 @@ if (onboardingDrop) {
     importClientJson(await file.text());
   });
 }
-// A file dropped anywhere else must not navigate the widget away.
-document.addEventListener('dragover', (e) => e.preventDefault());
-document.addEventListener('drop', (e) => e.preventDefault());
+// A file dropped outside the drop zone must not navigate the widget away. Only file drags are
+// cancelled: dropping text into the add / search / notes fields keeps working.
+const isFileDrag = (e) => !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+document.addEventListener('dragover', (e) => {
+  if (isFileDrag(e)) e.preventDefault();
+});
+document.addEventListener('drop', (e) => {
+  if (isFileDrag(e)) e.preventDefault();
+});
 
 btnLoginReopen?.addEventListener('click', () => window.widgetApi?.loginReopen?.());
 btnLoginCancel?.addEventListener('click', () => window.widgetApi?.loginCancel?.());
 btnLoginCopy?.addEventListener('click', async () => {
   const ok = await window.widgetApi?.loginCopyLink?.();
   if (!ok) return;
-  const label = btnLoginCopy.textContent;
   btnLoginCopy.textContent = 'Скопировано';
-  setTimeout(() => {
-    btnLoginCopy.textContent = label;
-  }, 1500);
+  if (copyLabelTimer) clearTimeout(copyLabelTimer);
+  copyLabelTimer = setTimeout(resetCopyLabel, 1500);
 });
 
 document.getElementById('form-add-tasks').addEventListener('submit', (e) => {

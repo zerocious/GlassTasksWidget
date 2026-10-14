@@ -296,6 +296,8 @@ function cancelLogin() {
   return true;
 }
 
+const PINNED_PORT_FALLBACK_CODES = new Set(['EADDRINUSE', 'EACCES', 'EPERM', 'EADDRNOTAVAIL']);
+
 /** Callback page shown in the browser after Google redirects back. */
 function callbackPage(title, body) {
   return `<!doctype html><meta charset="utf-8"><title>Glass Tasks</title>
@@ -338,62 +340,78 @@ function interactiveLogin(oauth2, fixedPort) {
     const cancel = () => finish(codedError('Вход в Google отменён', 'cancelled'));
     cancelInteractiveLogin = cancel;
 
+    let exchanging = false;
+    const page = (res, status, title, body) => {
+      if (res.headersSent) return;
+      res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(callbackPage(title, body));
+    };
+
     const server = http.createServer(async (req, res) => {
+      // Parse on its own: a malformed request line (e.g. "GET //") must never reach the
+      // sign-in's failure path, or any local page could abort the login.
+      let url;
       try {
-        const url = new URL(req.url || '/', 'http://127.0.0.1');
-        if (url.pathname !== '/oauth2callback') {
-          res.writeHead(404);
-          res.end();
-          return;
+        url = new URL(req.url || '/', 'http://127.0.0.1');
+      } catch {
+        page(res, 400, 'Запрос не принят', 'Это не ответ Google для текущего входа. Вернитесь в виджет.');
+        return;
+      }
+      if (url.pathname !== '/oauth2callback') {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const code = url.searchParams.get('code');
+      const returnedState = url.searchParams.get('state');
+      // Anything without our state is not Google's redirect (another page or program poking
+      // the loopback port): answer 400 and keep waiting for the real one.
+      if (!returnedState || returnedState !== state) {
+        page(res, 400, 'Запрос не принят', 'Это не ответ Google для текущего входа. Вернитесь в виджет.');
+        return;
+      }
+      // The state is ours. A repeat of the same redirect (browser reload, link scanner) while
+      // the code is being exchanged must not exchange it twice or fail the sign-in.
+      if (exchanging || settled) {
+        page(res, 409, 'Запрос уже обрабатывается', 'Вернитесь в виджет: вход завершается.');
+        return;
+      }
+      const errParam = url.searchParams.get('error');
+      if (errParam) {
+        // Never echo Google's raw string into the widget: map it, or use a fixed text.
+        const mapped = describeAuthError(errParam);
+        const message = mapped
+          ? mapped.message
+          : 'Google отклонил вход. Попробуйте снова или проверьте настройки клиента.';
+        page(res, 400, 'Вход не выполнен', message);
+        const failure = codedError(message, mapped ? mapped.code : /^[a-z_]{1,64}$/.test(errParam) ? errParam : 'oauth_error');
+        if (mapped && mapped.actionUrl) {
+          failure.actionUrl = mapped.actionUrl;
+          failure.actionLabel = mapped.actionLabel;
         }
-        const code = url.searchParams.get('code');
-        const returnedState = url.searchParams.get('state');
-        // Anything without our state is not Google's redirect (another page or program poking
-        // the well-known loopback port): answer 400 and keep waiting for the real one.
-        if (!returnedState || returnedState !== state) {
-          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(callbackPage('Запрос не принят', 'Это не ответ Google для текущего входа. Вернитесь в виджет.'));
-          return;
-        }
-        const errParam = url.searchParams.get('error');
-        if (errParam) {
-          // Never echo Google's raw string into the widget: map it, or use a fixed text.
-          const mapped = describeAuthError(errParam);
-          const message = mapped
-            ? mapped.message
-            : 'Google отклонил вход. Попробуйте снова или проверьте настройки клиента.';
-          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(callbackPage('Вход не выполнен', message));
-          const failure = codedError(message, mapped ? mapped.code : /^[a-z_]{1,64}$/.test(errParam) ? errParam : 'oauth_error');
-          if (mapped && mapped.actionUrl) {
-            failure.actionUrl = mapped.actionUrl;
-            failure.actionLabel = mapped.actionLabel;
-          }
-          finish(failure);
-          return;
-        }
-        if (!code) {
-          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(callbackPage('Нет кода авторизации', 'Закройте окно и войдите снова из виджета.'));
-          finish(new Error('OAuth: нет кода авторизации'));
-          return;
-        }
+        finish(failure);
+        return;
+      }
+      if (!code) {
+        page(res, 400, 'Нет кода авторизации', 'Закройте окно и войдите снова из виджета.');
+        finish(new Error('OAuth: нет кода авторизации'));
+        return;
+      }
+      exchanging = true;
+      try {
         const { tokens } = await oauth2.getToken({ code, codeVerifier, redirect_uri: redirectUri });
         if (settled || generation !== authGeneration) {
-          res.writeHead(409, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(callbackPage('Вход отменён', 'Закройте окно и войдите снова из виджета.'));
+          page(res, 409, 'Вход отменён', 'Закройте окно и войдите снова из виджета.');
           return;
         }
         oauth2.setCredentials(tokens);
         attachTokenSaver(oauth2);
         saveTokens(tokens);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(callbackPage('Готово', 'Можно закрыть это окно и вернуться к виджету.'));
+        page(res, 200, 'Готово', 'Можно закрыть это окно и вернуться к виджету.');
         finish(null, oauth2);
       } catch (e) {
         const mapped = classifyExchangeError(e);
-        res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(callbackPage('Вход не выполнен', mapped.message));
+        page(res, 500, 'Вход не выполнен', mapped.message);
         finish(mapped);
       }
     });
@@ -422,13 +440,16 @@ function interactiveLogin(oauth2, fixedPort) {
 
     let triedFallback = false;
     server.on('error', (e) => {
-      if (e && e.code === 'EADDRINUSE' && fixedPort && !triedFallback) {
+      // A pinned port can be taken (EADDRINUSE) or reserved by Windows for Hyper-V / WSL /
+      // Docker (EACCES): in both cases any free loopback port works for a Desktop client.
+      if (fixedPort && !triedFallback && !server.listening && e && PINNED_PORT_FALLBACK_CODES.has(e.code)) {
         triedFallback = true;
-        console.warn(`[auth] port ${fixedPort} busy, using a free port`);
+        console.warn(`[auth] port ${fixedPort} unavailable (${e.code}), using a free port`);
         server.listen(0, '127.0.0.1');
         return;
       }
-      finish(e);
+      const known = describeAuthError(e);
+      finish(known ? codedError(known.message, known.code) : e);
     });
     server.on('listening', onListening);
     server.listen(fixedPort || 0, '127.0.0.1');

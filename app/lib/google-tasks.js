@@ -697,6 +697,7 @@ async function getWidgetDataUncached(force) {
         habits: [],
         offline: false,
         message: mapped.message,
+        code: mapped.code,
         actionUrl: mapped.actionUrl || null,
         actionLabel: mapped.actionLabel || null,
       };
@@ -776,7 +777,11 @@ async function getWidgetData(opts = {}) {
   return run;
 }
 
-async function loginGoogle() {
+/**
+ * @param {{ onSignedIn?: () => void }} [opts] called once the browser step is over,
+ *   before the (possibly slow) first data load
+ */
+async function loginGoogle(opts = {}) {
   if (!hasGoogleCredentials()) {
     throw new Error('Сначала сохраните Google Client ID и Secret в настройках виджета');
   }
@@ -786,6 +791,13 @@ async function loginGoogle() {
     await getAuthorizedClient({ interactive: true });
   } catch (err) {
     throw normalizeGoogleAuthError(err);
+  }
+  if (opts.onSignedIn) {
+    try {
+      opts.onSignedIn();
+    } catch {
+      /* UI notification only */
+    }
   }
   // Signed in: a failing first load (e.g. Tasks API disabled) becomes a payload the UI explains.
   return getWidgetData({ force: true });

@@ -74,7 +74,8 @@ test('a real error redirect (right state) is mapped, and raw text is never echoe
   const s = await startLogin(async () => ({ tokens: {} }));
   const res = await get(`${s.base}/oauth2callback?error=access_denied&state=${s.state}`);
   assert.equal(res.status, 400);
-  await assert.rejects(s.login, (e) => e.code === 'access_denied' && /Test users/.test(e.message) && Boolean(e.actionUrl));
+  // The user pressed «Отмена» on Google's screen: say so, don't send them to the console.
+  await assert.rejects(s.login, (e) => e.code === 'access_denied' && /не разрешили/.test(e.message) && !e.actionUrl);
 
   const t = await startLogin(async () => ({ tokens: {} }));
   await get(`${t.base}/oauth2callback?error=${encodeURIComponent('Аккаунт заблокирован, позвоните 112')}&state=${t.state}`);
@@ -127,11 +128,49 @@ test('classifyExchangeError has no side effects and keeps unknown errors', () =>
   assert.equal(auth.classifyExchangeError({ response: { data: { error: 'invalid_client' } } }).code, 'invalid_client');
 });
 
-test('savedPinnedPort treats the old default as automatic unless pinned on purpose', () => {
-  assert.equal(savedPinnedPort({ redirectPort: 42813 }), null);
-  assert.equal(savedPinnedPort({ redirectPort: 42813, portPinned: true }), 42813);
+test('savedPinnedPort honours a saved port, including the old default (Web-client installs)', () => {
+  assert.equal(savedPinnedPort({ redirectPort: 42813 }), 42813);
   assert.equal(savedPinnedPort({ redirectPort: 51000 }), 51000);
   assert.equal(savedPinnedPort({}), null);
   assert.equal(savedPinnedPort(null), null);
   assert.equal(savedPinnedPort({ redirectPort: 'x' }), null);
+});
+
+test('a repeated callback while the code is being exchanged neither re-exchanges nor fails the login', async () => {
+  let calls = 0;
+  const s = await startLogin(async () => {
+    calls += 1;
+    await new Promise((r) => setTimeout(r, 300));
+    return { tokens: {} };
+  });
+  const first = get(`${s.base}/oauth2callback?code=abc&state=${s.state}`);
+  await new Promise((r) => setTimeout(r, 80));
+  const dup = await get(`${s.base}/oauth2callback?code=abc&state=${s.state}`);
+  assert.equal(dup.status, 409);
+  assert.equal(calls, 1, 'the code must be exchanged once');
+  assert.equal(s.settled(), null, 'the duplicate must not settle the login');
+  // The first request owns the exchange; it saves tokens through saveTokens, which is the real
+  // file store, so stop here: cancel instead of letting a fake token reach app/data.
+  auth.cancelLogin();
+  await first.catch(() => {});
+  await assert.rejects(s.login);
+});
+
+test('malformed request lines do not abort the sign-in', async () => {
+  const s = await startLogin(async () => ({ tokens: {} }));
+  for (const target of ['//', '//[']) {
+    const res = await new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port: s.port, method: 'GET', path: target }, (r) => {
+        r.resume();
+        r.on('end', () => resolve(r.statusCode));
+      });
+      req.on('error', reject);
+      req.end();
+    }).catch(() => 'closed');
+    assert.ok(res === 400 || res === 404 || res === 'closed', `${target}: ${res}`);
+  }
+  await tick();
+  assert.equal(s.settled(), null, 'login must still be waiting');
+  auth.cancelLogin();
+  await assert.rejects(s.login, (e) => e.code === 'cancelled');
 });

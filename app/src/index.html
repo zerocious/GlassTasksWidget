@@ -167,16 +167,20 @@
           Виджету нужен ваш OAuth-клиент Google — это бесплатно и занимает около 5 минут.
           Пройдите шаги, ссылки откроются в браузере:
         </p>
-        <ol class="onboarding-steps">
-          <li><button type="button" class="onboarding-link" data-console="enableApi">Включить Google Tasks API</button> — создайте проект, если Google попросит.</li>
-          <li><button type="button" class="onboarding-link" data-console="branding">Заполнить экран согласия</button> — тип «Внешний» (External).</li>
-          <li><button type="button" class="onboarding-link" data-console="audience">Опубликовать приложение</button> — «Publish app», иначе вход слетает каждые 7 дней.</li>
-          <li><button type="button" class="onboarding-link" data-console="clients">Создать клиент «Приложение для ПК»</button> и сразу нажать «Download JSON».</li>
-        </ol>
         <div class="onboarding-drop" id="onboardingDrop" role="button" tabindex="0" aria-describedby="onboardingDropHint">
           <strong>Загрузить client_secret….json</strong>
-          <span id="onboardingDropHint">Перетащите файл сюда или нажмите, чтобы выбрать</span>
+          <span id="onboardingDropHint">Перетащите файл сюда или нажмите, чтобы выбрать. После импорта скачанный файл можно удалить.</span>
         </div>
+        <p class="onboarding-error" id="onboardingError" role="alert" hidden></p>
+        <details class="onboarding-howto" id="onboardingSteps" open>
+          <summary>Как получить этот файл</summary>
+          <ol class="onboarding-steps">
+            <li><button type="button" class="onboarding-link" data-console="enableApi">Включить Google Tasks API</button> — создайте проект, если Google попросит.</li>
+            <li><button type="button" class="onboarding-link" data-console="branding">Заполнить экран согласия</button> — тип «Внешний» (External).</li>
+            <li><button type="button" class="onboarding-link" data-console="audience">Опубликовать приложение</button> — «Publish app», иначе вход слетает каждые 7 дней.</li>
+            <li><button type="button" class="onboarding-link" data-console="clients">Создать клиент «Приложение для ПК»</button> и сразу нажать «Download JSON».</li>
+          </ol>
+        </details>
         <details class="onboarding-manual" id="onboardingManual">
           <summary>Ввести ключи вручную</summary>
           <label class="onboarding-field">
@@ -195,7 +199,6 @@
           </label>
           <button type="button" class="onboarding-primary" id="btnSaveCredentials">Сохранить и войти</button>
         </details>
-        <p class="onboarding-error" id="onboardingError" role="alert" hidden></p>
         <div class="onboarding-actions">
           <button type="button" class="onboarding-secondary" id="btnSkipCredentials">
             Продолжить в демо
@@ -204,12 +207,12 @@
       </div>
 
       <div class="login-pending" id="loginPending" role="status" aria-live="polite" hidden>
-        <div class="login-pending-text">Подтвердите доступ в открывшемся браузере…</div>
+        <div class="login-pending-text" id="loginPendingText">Подтвердите доступ в открывшемся браузере…</div>
         <p class="login-pending-hint" id="loginPendingHint" hidden>
           Ошибка в браузере? «Access blocked» или «access_denied» — добавьте себя в Test users
           или опубликуйте приложение. «redirect_uri_mismatch» — нужен клиент типа «Приложение для ПК».
         </p>
-        <div class="login-pending-actions">
+        <div class="login-pending-actions" id="loginPendingActions">
           <button type="button" class="login-pending-btn" id="btnLoginReopen">Открыть снова</button>
           <button type="button" class="login-pending-btn" id="btnLoginCopy">Скопировать ссылку</button>
           <button type="button" class="login-pending-btn" id="btnLoginCancel">Отмена</button>

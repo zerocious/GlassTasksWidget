@@ -8,3 +8,5 @@ dist/
 .DS_Store
 Thumbs.db
 app/dist/
+# OAuth client file downloaded from Google Cloud
+client_secret*.json

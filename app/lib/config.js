@@ -120,17 +120,16 @@ function migrateAppWrittenEnv() {
 }
 
 /**
- * Port the user pinned, or null for «choose a free one». Older versions saved their default
- * 42813 for everybody; without an explicit `portPinned` flag that value is not a choice,
- * and keeping it would leave a well-known port open during every sign-in.
+ * Port saved in credentials.json, or null for «choose a free one».
+ * Older versions saved 42813 for everybody, and users with a Web-application client had
+ * registered exactly that redirect URI, so a saved port is honoured (a busy one falls back to
+ * a free port). Sign-in no longer trusts anything that reaches the port without our state.
  * @param {Record<string, any>} data parsed credentials.json
  * @returns {number | null}
  */
 function savedPinnedPort(data) {
   const port = Math.round(Number(data && (data.redirectPort || data.OAUTH_REDIRECT_PORT)));
-  if (!Number.isFinite(port) || port <= 0) return null;
-  if (port === DEFAULT_OAUTH_PORT && !data.portPinned) return null;
-  return port;
+  return Number.isFinite(port) && port > 0 ? port : null;
 }
 
 function loadCredentialsJson(jsonPath, { force = false } = {}) {
@@ -229,7 +228,6 @@ function saveGoogleCredentials(input) {
     clientId,
     clientSecret,
     redirectPort,
-    portPinned: Boolean(redirectPort),
     updatedAt: new Date().toISOString(),
   });
 

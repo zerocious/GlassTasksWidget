@@ -1887,6 +1887,16 @@ html[data-simple-anim="true"] .undo-toast {
   text-underline-offset: 2px;
 }
 
+.onboarding-howto {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.onboarding-howto summary {
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+
 .onboarding-steps {
   margin: 0;
   padding-left: 18px;
@@ -2191,7 +2201,7 @@ html[data-simple-anim="true"] .undo-toast {
 [data-size="compact"] .onboarding-panel {
   margin: 0 10px 6px;
   padding: 10px;
-  max-height: 52%;
+  max-height: none;
 }
 
 [data-size="compact"] .add-input {
