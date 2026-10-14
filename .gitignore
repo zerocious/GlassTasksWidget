@@ -1,8 +1,11 @@
 node_modules/
 .env
-data/tokens.json
-data/streaks.json
-data/settings.json
+# Runtime data (sign-in, keys, task cache, habit history, backups) — the whole folder,
+# so files added later can never be committed by accident.
+data/
+*.corrupt-*
+*.tmp
+*.bak
 dist/
 *.log
 .DS_Store

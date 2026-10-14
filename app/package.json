@@ -83,7 +83,9 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Glass Tasks Widget",
-      "uninstallDisplayName": "Glass Tasks Widget"
+      "uninstallDisplayName": "Glass Tasks Widget",
+      "include": "build/installer.nsh",
+      "deleteAppDataOnUninstall": false
     }
   }
 }
