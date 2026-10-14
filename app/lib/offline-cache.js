@@ -1,13 +1,40 @@
 'use strict';
 
-const { readJson, writeJson, dataPath } = require('./config');
+const { createJsonDoc } = require('./storage-doc');
 const { applyItemPatch, reorderList } = require('./list-ops');
+
+/**
+ * offline-cache.json — last live Google payload: task titles and notes, i.e. personal data.
+ * Encrypted with safeStorage like the tokens; without it the cache lives in memory only
+ * (no Google sign-in survives a restart then either, so nothing is lost).
+ * Writes are debounced: a mutation updates memory and returns, the file follows ~0.4 s later
+ * (bursts collapse into one write; electron/data-ipc.js flushes on quit).
+ * Schema 1 = the slim payload below (schema 0 had the same fields, unencrypted).
+ */
+const cacheDoc = createJsonDoc({
+  name: 'offline-cache.json',
+  label: 'офлайн-кэш задач',
+  version: 1,
+  encrypt: true,
+  compact: true,
+  debounceMs: 400,
+  defaults: () => ({}),
+  migrations: {
+    1: (d) => ({ ...d, habits: Array.isArray(d.habits) ? d.habits.map(slimHabit) : d.habits }),
+  },
+});
+
+/** Per-day stats withHabits() recomputes from streaks.json on every load. */
+const DERIVED_HABIT_FIELDS = ['habitId', 'streak', 'week', 'ring', 'completedToday', 'completedDates'];
 
 /** @type {object | null | undefined} undefined = not loaded yet */
 let memoryCache = undefined;
 
-function cacheFile() {
-  return dataPath('offline-cache.json');
+function slimHabit(habit) {
+  if (!habit || typeof habit !== 'object') return habit;
+  const out = { ...habit };
+  for (const key of DERIVED_HABIT_FIELDS) delete out[key];
+  return out;
 }
 
 /**
@@ -25,10 +52,11 @@ function saveOfflineCache(payload) {
     tasksListFound: payload.tasksListFound,
     habitsListFound: payload.habitsListFound,
     tasks: payload.tasks || [],
-    habits: payload.habits || [],
+    // Streak history lives in streaks.json; copying it here doubled the file for nothing.
+    habits: (payload.habits || []).map(slimHabit),
   };
   memoryCache = slim;
-  writeJson(cacheFile(), slim);
+  cacheDoc.writeSoon(slim);
 }
 
 /**
@@ -36,7 +64,7 @@ function saveOfflineCache(payload) {
  */
 function loadOfflineCache() {
   if (memoryCache !== undefined) return memoryCache;
-  const raw = readJson(cacheFile(), null);
+  const raw = cacheDoc.read();
   // Require google mode so a wiped/placeholder file is not treated as a real cache.
   if (
     !raw ||
@@ -53,14 +81,19 @@ function loadOfflineCache() {
 
 function clearOfflineCache() {
   memoryCache = null;
-  const fs = require('fs');
-  const file = cacheFile();
-  try {
-    if (fs.existsSync(file)) fs.unlinkSync(file);
-  } catch {
-    // Placeholder without mode:google so loadOfflineCache ignores it.
-    writeJson(file, { clearedAt: new Date().toISOString() });
+  if (!cacheDoc.remove()) {
+    // Locked file: placeholder without mode:google so loadOfflineCache ignores it.
+    try {
+      cacheDoc.write({ clearedAt: new Date().toISOString() });
+    } catch {
+      /* reported by the doc */
+    }
   }
+}
+
+/** Forget the in-memory copy (wipe / tests) without touching the file. */
+function resetOfflineCacheMemory() {
+  memoryCache = undefined;
 }
 
 /**
@@ -98,4 +131,6 @@ module.exports = {
   clearOfflineCache,
   patchOfflineCache,
   reorderOfflineCache,
+  resetOfflineCacheMemory,
+  cacheDoc,
 };

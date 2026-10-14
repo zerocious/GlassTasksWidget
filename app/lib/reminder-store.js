@@ -1,6 +1,6 @@
 'use strict';
 
-const { readJson, writeJson, dataPath } = require('./config');
+const { createJsonDoc } = require('./storage-doc');
 const { todayIso } = require('./dates');
 
 /**
@@ -8,15 +8,19 @@ const { todayIso } = require('./dates');
  * @typedef {{ date: string, notifiedIds: string[] }} ReminderState
  */
 
-function remindersFile() {
-  return dataPath('reminders.json');
-}
+/** reminders.json — schema 1 = `{ date, notifiedIds }` (schema 0 had the same fields). */
+const remindersDoc = createJsonDoc({
+  name: 'reminders.json',
+  label: 'журнал напоминаний',
+  version: 1,
+  defaults: () => ({}),
+});
 
 /**
  * @returns {ReminderState}
  */
 function loadReminderState() {
-  const raw = readJson(remindersFile(), {});
+  const raw = remindersDoc.read();
   const date = typeof raw.date === 'string' ? raw.date : '';
   const today = todayIso();
   if (date !== today) {
@@ -32,7 +36,7 @@ function loadReminderState() {
  * @param {ReminderState} state
  */
 function saveReminderState(state) {
-  writeJson(remindersFile(), {
+  remindersDoc.write({
     date: state.date || todayIso(),
     notifiedIds: [...new Set(state.notifiedIds || [])],
   });
@@ -72,4 +76,5 @@ module.exports = {
   markNotified,
   wasNotifiedToday,
   clearNotifiedToday,
+  remindersDoc,
 };
