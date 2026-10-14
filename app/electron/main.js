@@ -896,7 +896,13 @@ function registerIpc() {
       return { ok: false, code: 'no_credentials', message: 'Сначала загрузите client_secret.json или введите ключи Google.' };
     }
     try {
-      const data = applyAutoPaletteToData(await loginGoogle());
+      const data = applyAutoPaletteToData(
+        await loginGoogle({
+          onSignedIn: () => {
+            if (!event.sender.isDestroyed()) event.sender.send('widget:login-phase', 'loading');
+          },
+        })
+      );
       refreshExactReminders(data);
       return { ok: true, data };
     } catch (err) {

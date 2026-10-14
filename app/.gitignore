@@ -12,3 +12,5 @@ dist-*/
 dist-build/
 *.log
 .DS_Store
+# OAuth client file downloaded from Google Cloud
+client_secret*.json

@@ -69,19 +69,20 @@ function describeAuthError(err) {
     };
   }
   if (has('access_denied')) {
+    // Google redirects back with access_denied only when the user pressed «Отмена» on its
+    // consent screen. Setup errors («Access blocked», test users) never redirect — those are
+    // explained by the hint shown while waiting for the browser.
     return {
       code: 'access_denied',
       message:
-        'Google не выдал доступ. Если приложение в Google Cloud в режиме «Testing», добавьте свой аккаунт в Test users или опубликуйте приложение (Audience → Publish app).',
-      actionUrl: CONSOLE_LINKS.audience,
-      actionLabel: 'Открыть Audience',
+        'Вы не разрешили доступ к Google Tasks. Нажмите «Google» и разрешите его ещё раз. Если в браузере была ошибка «Access blocked» — добавьте себя в Test users или опубликуйте приложение (Audience → Publish app).',
     };
   }
   if (has('invalid_client', 'unauthorized_client', 'deleted_client') || says(/OAuth client was not found/i)) {
     return {
       code: 'invalid_client',
       message:
-        'Google не узнал Client ID или Client Secret. Загрузите client_secret.json заново. Google удаляет клиенты, которыми не пользовались 6 месяцев.',
+        'Google не узнал Client ID или Client Secret. Откройте ⚙ → Google API ключи и загрузите client_secret.json заново. Google удаляет клиенты, которыми не пользовались 6 месяцев.',
       actionUrl: CONSOLE_LINKS.clients,
       actionLabel: 'Открыть клиенты',
     };
@@ -105,10 +106,11 @@ function describeAuthError(err) {
   if (has('rate_limit_exceeded')) {
     return { code: 'rate_limit', message: 'Google временно ограничил новые входы. Попробуйте через несколько минут.' };
   }
-  if (has('eaddrinuse')) {
+  if (has('eaddrinuse', 'eacces', 'eperm', 'eaddrnotavail')) {
     return {
       code: 'port_busy',
-      message: 'Порт для входа занят другой программой. Очистите поле порта в ключах Google (тогда порт выберется автоматически).',
+      message:
+        'Порт для входа занят или недоступен (Windows может резервировать порты). Очистите поле порта в ключах Google: тогда порт выберется автоматически.',
     };
   }
   return null;

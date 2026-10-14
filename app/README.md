@@ -29,4 +29,4 @@ npm run dist
 После `pack` / `dist` — `scripts/update-desktop-shortcut.ps1` обновляет  
 `%USERPROFILE%\Desktop\Glass Tasks Widget.lnk`. Установщик: Desktop + Start Menu, per-user.
 
-Если `winCodeSign` / symlink — **Режим разработчика** Windows. См. корневой README: данные, OAuth redirect `http://127.0.0.1:42813/oauth2callback`, напоминания (точное время + sweep), ежедневный сброс привычек, автообновления с GitHub Releases, автопалитра.
+Если `winCodeSign` / symlink — **Режим разработчика** Windows. См. корневой README: данные, вход в Google (порт выбирается автоматически), напоминания (точное время + sweep), ежедневный сброс привычек, автообновления с GitHub Releases, автопалитра.

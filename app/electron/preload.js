@@ -9,6 +9,11 @@ contextBridge.exposeInMainWorld('widgetApi', {
   loginReopen: () => ipcRenderer.invoke('widget:login-reopen'),
   loginCopyLink: () => ipcRenderer.invoke('widget:login-copy'),
   loginCancel: () => ipcRenderer.invoke('widget:login-cancel'),
+  onLoginPhase: (handler) => {
+    const listener = (_event, phase) => handler(phase);
+    ipcRenderer.on('widget:login-phase', listener);
+    return () => ipcRenderer.removeListener('widget:login-phase', listener);
+  },
   importClientJson: (text) =>
     ipcRenderer.invoke('widget:import-client-json', typeof text === 'string' ? { text } : {}),
   logout: () => ipcRenderer.invoke('widget:logout'),

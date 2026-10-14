@@ -61,3 +61,15 @@ test('describeAuthError links the right project when the Tasks API is disabled',
   assert.match(d.actionUrl, /project=987654321$/);
   assert.equal(describeAuthError(new Error('API is disabled. Enable it by visiting …')).actionUrl, CONSOLE_LINKS.enableApi);
 });
+
+test('describeAuthError maps every bind failure of the loopback port', () => {
+  for (const code of ['EADDRINUSE', 'EACCES', 'EPERM', 'EADDRNOTAVAIL']) {
+    assert.equal(describeAuthError(Object.assign(new Error('listen failed'), { code })).code, 'port_busy', code);
+  }
+});
+
+test('access_denied tells the user they declined, without a console button', () => {
+  const d = describeAuthError('access_denied');
+  assert.match(d.message, /не разрешили/);
+  assert.equal(d.actionUrl, undefined);
+});
