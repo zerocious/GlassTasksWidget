@@ -2,11 +2,11 @@
 
 const {
   enrichHabits,
-  todayIso,
   markCompleted,
   unmarkCompleted,
   removeHabit,
 } = require('./streak-store');
+const { todayIso } = require('./dates');
 const { readJson, writeJson, dataPath } = require('./config');
 
 function mockFile() {
