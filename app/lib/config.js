@@ -20,7 +20,16 @@ function tryElectronApp() {
 /**
  * Writable data root. Dev: app/data. Packaged: %APPDATA%/glass-tasks-widget/data
  */
+/** @type {string | null} */
+let dataRootOverride = null;
+
+/** Test hook: point every store at a throw-away folder (null = back to the real one). */
+function setDataRootForTests(dir) {
+  dataRootOverride = dir || null;
+}
+
 function getDataRoot() {
+  if (dataRootOverride) return dataRootOverride;
   const app = tryElectronApp();
   if (app && app.isPackaged) {
     return path.join(app.getPath('userData'), 'data');
@@ -438,6 +447,7 @@ module.exports = {
   readSecretJson,
   writeSecretJson,
   setSafeStorageForTests,
+  setDataRootForTests,
   loadConfig,
   dataPath,
   getDataRoot,
