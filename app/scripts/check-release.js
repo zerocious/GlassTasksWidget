@@ -25,9 +25,9 @@ function parseLatestYml(text) {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.replace(/\s+$/, '');
     if (!line) continue;
-    let m;
-    if ((m = line.match(/^files:\s*$/))) continue;
-    if ((m = line.match(/^\s+-\s+url:\s*(.+)$/))) {
+    if (/^files:\s*$/.test(line)) continue;
+    let m = line.match(/^\s+-\s+url:\s*(.+)$/);
+    if (m) {
       current = { url: m[1].trim() };
       out.files.push(current);
     } else if (current && (m = line.match(/^\s{4}(sha512|size):\s*(.+)$/))) {
