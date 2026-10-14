@@ -71,4 +71,18 @@ contextBridge.exposeInMainWorld('widgetApi', {
   copyDiagnostics: () => ipcRenderer.invoke('widget:diagnostics-copy'),
   openLogs: () => ipcRenderer.invoke('widget:open-logs'),
   reportError: (payload) => ipcRenderer.send('widget:log', payload),
+  // Data & storage (electron/data-ipc.js)
+  getStorageStatus: () => ipcRenderer.invoke('data:storage-status'),
+  exportData: () => ipcRenderer.invoke('data:export-json'),
+  exportTasksCsv: () => ipcRenderer.invoke('data:export-tasks-csv'),
+  importData: () => ipcRenderer.invoke('data:import-json'),
+  backupNow: () => ipcRenderer.invoke('data:backup-now'),
+  listBackups: () => ipcRenderer.invoke('data:list-backups'),
+  openDataFolder: () => ipcRenderer.invoke('data:open-folder'),
+  wipeAllData: () => ipcRenderer.invoke('data:wipe-all'),
+  onStorageIssue: (handler) => {
+    const listener = (_event, issue) => handler(issue);
+    ipcRenderer.on('data:storage-issue', listener);
+    return () => ipcRenderer.removeListener('data:storage-issue', listener);
+  },
 });
