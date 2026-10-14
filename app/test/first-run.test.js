@@ -14,6 +14,12 @@ const path = require('path');
 
 const APP_ROOT = path.join(__dirname, '..');
 
+// Some lib modules do `require('electron')` at load time. Without the downloaded binary
+// (CI sets ELECTRON_SKIP_BINARY_DOWNLOAD) that require throws, so load them against a stub:
+// these tests only check wiring, never Electron behaviour.
+const electronPath = require.resolve('electron');
+require.cache[electronPath] = { id: electronPath, filename: electronPath, loaded: true, exports: {} };
+
 test('demo mode works on a fresh profile (no data files yet)', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-fresh-'));
   const config = require('../lib/config');
