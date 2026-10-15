@@ -228,3 +228,12 @@ test('keys that cannot be decrypted yet (Windows before «ready») are retried, 
   assert.equal(config.getGoogleClientCredentials().clientSecret, 'GOCSPX-later', 'picked up without a manual reset');
   assert.equal(config.getGoogleCredentialsStatus().source, 'credentials.json');
 });
+
+test('a corrupt secret file is deleted, never kept as a plaintext .corrupt copy', () => {
+  const root = freshDataRoot();
+  const file = path.join(root, 'tokens.json');
+  fs.writeFileSync(file, '{"refresh_token": "1//0gPartialToken'); // legacy plaintext, cut off
+  assert.equal(config.readSecretJson(file, null), null);
+  assert.deepEqual(fs.readdirSync(root), []);
+  assert.ok(getStorageIssues().some((i) => i.kind === 'secret-corrupt' && i.file === 'tokens.json'));
+});
