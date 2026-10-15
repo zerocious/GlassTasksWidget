@@ -8,6 +8,7 @@ const {
   readSecretJson,
   writeSecretJson,
   deleteSecretJson,
+  describeSecretFile,
   dataPath,
   hasGoogleCredentials,
 } = require('./config');
@@ -182,25 +183,70 @@ function clearTokens() {
   deleteSecretJson(tokensFile());
 }
 
+const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
+const REVOKE_TIMEOUT_MS = 5000;
+
 /**
- * Best-effort revoke of the saved refresh token at Google, then clear it locally.
+ * Revoke a token at Google with the token in the POST body. google-auth-library's
+ * revokeToken() puts it in the URL query, where proxies log it and where network errors
+ * echo it back in err.message. The endpoint needs no client id / secret.
+ * Rejects with an error whose message never contains the token.
+ * @param {string} token
+ */
+async function revokeAtGoogle(token) {
+  const { google } = require('googleapis');
+  const transporter = new google.auth.OAuth2().transporter;
+  let timer;
+  try {
+    await Promise.race([
+      transporter.request({
+        url: REVOKE_URL,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        data: `token=${encodeURIComponent(token)}`,
+        timeout: REVOKE_TIMEOUT_MS,
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(codedError('revoke timeout', 'ETIMEDOUT')), REVOKE_TIMEOUT_MS + 500);
+      }),
+    ]);
+  } catch (err) {
+    const status = err && err.response && err.response.status;
+    // 400 invalid_token: Google no longer honours it — the goal of revoking is reached.
+    if (status === 400) return;
+    const reason = status ? `HTTP ${status}` : (err && (err.code || err.name)) || 'error';
+    throw codedError(`revoke failed (${/^[\w .-]{1,40}$/.test(String(reason)) ? reason : 'error'})`, 'revoke_failed');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Revoke the saved refresh token at Google (best effort), then clear it locally.
  * Never throws: logout must work offline too.
+ * @returns {Promise<'revoked' | 'failed' | 'none' | 'locked'>}
+ *   failed: the grant may still be valid at Google (offline, timeout, server error);
+ *   locked: an encrypted token exists but safeStorage cannot open it, so it was not revoked.
+ *   For both, the user should remove access at https://myaccount.google.com/permissions.
  */
 async function revokeAndClearTokens() {
+  const stored = describeSecretFile(tokensFile());
   const saved = loadSavedTokens();
   const token = saved && (saved.refresh_token || saved.access_token);
-  if (token && hasGoogleCredentials()) {
+  /** @type {'revoked' | 'failed' | 'none' | 'locked'} */
+  let result = stored === 'locked' ? 'locked' : 'none';
+  if (token) {
     try {
-      const { oauth2 } = getOAuthClient();
-      await Promise.race([
-        oauth2.revokeToken(token),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('revoke timeout')), 5000)),
-      ]);
+      await revokeAtGoogle(token);
+      result = 'revoked';
     } catch (err) {
-      console.warn('[auth] revoke failed:', err && err.message ? err.message : err);
+      result = 'failed';
+      // Only the sanitized message: never err.response / config, which carry the token.
+      console.warn('[auth] revoke failed:', err && err.message ? err.message : 'error');
     }
   }
   clearTokens();
+  return result;
 }
 
 function attachTokenSaver(oauth2) {
