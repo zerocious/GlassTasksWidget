@@ -7,11 +7,12 @@
  *
  *  - a file without `schemaVersion` is version 0 (written by an older widget);
  *  - an older file is migrated step by step (`migrations[N]` turns version N-1 into N),
- *    after a copy of the original is saved to `backups/migrations/`;
+ *    after a copy of the original is saved to `backups/migrations/` (never for secret
+ *    documents: a legacy secrets file may be plaintext, and a copy would outlive the encryption);
  *  - a damaged file is moved aside (`*.corrupt-<ts>`) and, when the document keeps a last
  *    good copy (`keepBak`), restored from `<file>.bak`;
  *  - a file written by a NEWER widget is copied to `backups/migrations/` once before this
- *    older widget can overwrite it;
+ *    older widget can overwrite it (non-secret documents);
  *  - every notable event is recorded for the diagnostics report (storage-status.js).
  *
  * Secret documents (`secret: true`) go through safeStorage via storage-core.
@@ -143,15 +144,16 @@ function loadDoc(spec) {
   if (version > spec.version) {
     if (!newerHandled.has(file)) {
       newerHandled.add(file);
-      backupBeforeMigration(file, `newer-v${version}`);
+      // Secret documents get no copies: a legacy file may be plaintext and a copy would outlive encryption.
+      if (!spec.secret) backupBeforeMigration(file, `newer-v${version}`);
       recordStorageEvent('newer-schema', spec.name);
     }
     return { data: raw, status: 'newer' };
   }
 
   if (version < spec.version) {
-    // A file that does not exist on disk any more (restored data came from .bak) still has a copy.
-    if (fs.existsSync(file)) backupBeforeMigration(file, `v${version}`);
+    // Never copy a secrets file (see above); it can always be recreated by signing in again.
+    if (!spec.secret && fs.existsSync(file)) backupBeforeMigration(file, `v${version}`);
     let data = structuredClone(raw);
     try {
       for (let v = version + 1; v <= spec.version; v += 1) {
@@ -165,6 +167,11 @@ function loadDoc(spec) {
       return { data: null, status: 'reset' };
     }
     data.schemaVersion = spec.version;
+    // Without safeStorage a secrets file cannot be rewritten (it would only go to memory and the
+    // old file would be deleted): leave it as it is and use the migrated data for this session.
+    if (spec.secret && !core.canEncrypt() && !core.plaintextSecretsAllowed()) {
+      return { data, status: 'migrated', migratedFrom: version };
+    }
     try {
       saveDoc(spec, data);
     } catch {

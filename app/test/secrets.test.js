@@ -114,12 +114,41 @@ test('tokens: saved versioned and encrypted, schemaVersion hidden from the OAuth
   assert.deepEqual(auth.loadSavedTokens(), { refresh_token: 'rt-secret', access_token: 'at' });
 });
 
-test('tokens: a legacy unversioned plaintext file is migrated to the encrypted v1 format', () => {
+/** Every file under dir (recursively) whose text contains `needle`. */
+function filesContaining(dir, needle) {
+  const hits = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) hits.push(...filesContaining(full, needle));
+    else if (fs.readFileSync(full, 'utf8').includes(needle)) hits.push(full);
+  }
+  return hits;
+}
+
+test('tokens: a legacy unversioned plaintext file is migrated to the encrypted v1 format, leaving no plaintext copy anywhere', () => {
   write(env.dir, 'tokens.json', { refresh_token: 'rt-legacy' });
+  write(env.dir, 'credentials.json', { clientId: CLIENT_ID, clientSecret: 'cs-legacy' });
   config.setSafeStorageForTests(fakeSafeStorage);
   assert.deepEqual(auth.loadSavedTokens(), { refresh_token: 'rt-legacy' });
-  assert.equal(read(env.dir, 'tokens.json').includes('rt-legacy'), false);
-  assert.ok(fs.readdirSync(path.join(env.dir, 'backups', 'migrations')).length >= 1);
+  assert.equal(config.getGoogleClientSecret(), 'cs-legacy');
+  assert.deepEqual(filesContaining(env.dir, 'rt-legacy'), [], 'no file may keep the refresh token in plain text');
+  assert.deepEqual(filesContaining(env.dir, 'cs-legacy'), [], 'no file may keep the client secret in plain text');
+  assert.equal(exists(env.dir, 'backups'), false, 'secret documents are never copied to backups/migrations');
+  // and it still loads after the migration
+  assert.deepEqual(auth.loadSavedTokens(), { refresh_token: 'rt-legacy' });
+});
+
+test('legacy plaintext secrets are NOT deleted by a version bump when encryption is unavailable', () => {
+  config.setSafeStorageForTests(null);
+  write(env.dir, 'tokens.json', { refresh_token: 'rt-legacy' });
+  assert.deepEqual(auth.loadSavedTokens(), { refresh_token: 'rt-legacy' });
+  assert.equal(exists(env.dir, 'tokens.json'), true, 'the user stays signed in for this and the next start');
+  assert.equal(exists(env.dir, 'backups'), false);
+  assert.deepEqual(kinds(), ['plaintext-secrets']);
+  // the next real write (token refresh) replaces it with memory-only storage and removes the plaintext
+  auth._test.saveTokens({ refresh_token: 'rt-new' });
+  assert.equal(exists(env.dir, 'tokens.json'), false);
+  assert.equal(auth.loadSavedTokens().refresh_token, 'rt-new');
 });
 
 test('clearTokens forgets memory-only tokens too', () => {
@@ -186,4 +215,15 @@ test('stored credentials win over shell variables', () => {
 test('google-auth builds the OAuth client from the module, and fails clearly without credentials', () => {
   assert.equal(config.hasGoogleCredentials(), false);
   assert.equal(auth.hasGoogleCredentials(), false);
+});
+
+test('encrypted keys that cannot be read yet are retried instead of being reported as missing for the session', () => {
+  config.setSafeStorageForTests(fakeSafeStorage);
+  config.saveGoogleCredentials({ clientId: CLIENT_ID, clientSecret: 'S3' });
+  config.resetEnvCache();
+  config.setSafeStorageForTests(null); // e.g. keyring not unlocked / app not ready yet
+  assert.equal(config.hasGoogleCredentials(), false);
+  config.setSafeStorageForTests(fakeSafeStorage); // becomes available
+  assert.equal(config.hasGoogleCredentials(), true);
+  assert.equal(config.getGoogleClientSecret(), 'S3');
 });

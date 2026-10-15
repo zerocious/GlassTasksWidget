@@ -235,6 +235,9 @@ function loadEnvFile({ force = false } = {}) {
   takeShellEnv(); // scrub before anything else can spawn a child process
   migrateAppWrittenEnv();
   googleCreds = readStoredCredentials() || readDevEnvCredentials();
+  // Encrypted keys exist but cannot be read yet (safeStorage not ready): ask again next time
+  // instead of reporting «not configured» for the whole session.
+  if (!googleCreds && !core.canEncrypt() && fs.existsSync(getCredentialsJsonPath())) envLoaded = false;
 }
 
 /** Force re-read of credentials on next check. */

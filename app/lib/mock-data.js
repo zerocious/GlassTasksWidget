@@ -4,11 +4,11 @@ const { META_TASK, META_DONE, META_HABIT, localizeMeta } = require('./task-parse
 
 const {
   enrichHabits,
-  todayIso,
   markCompleted,
   unmarkCompleted,
   removeHabit,
 } = require('./streak-store');
+const { todayIso } = require('./dates');
 const { dataPath } = require('./config');
 const { loadDoc, saveDoc } = require('./storage-files');
 

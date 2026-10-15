@@ -164,7 +164,8 @@ test('offline cache: a legacy plaintext file is read once and re-saved encrypted
   const loaded = offline.loadOfflineCache();
   assert.equal(loaded.tasks[0].title, 'Secret meeting with Alice');
   assert.equal(read(env.dir, 'offline-cache.json').includes('Secret meeting'), false);
-  assert.ok(migrationCopies('offline-cache.json.v0').length >= 1);
+  assert.equal(migrationCopies('offline-cache.json').length, 0, 'no plaintext copy of personal data is kept');
+  assert.equal(exists(env.dir, 'backups'), false);
 });
 
 test('offline cache: clearing cancels a pending write and removes the file', () => {
@@ -222,4 +223,12 @@ test('mock: merge adds only unknown, well-formed items', () => {
   assert.equal(added.completed, true);
   assert.equal('evil' in added, false);
   assert.equal(mock.loadMockStore().tasks.find((t) => t.id === 'mock-t1').title, 'Review project proposal');
+});
+
+test('mock: a fresh demo session builds its payload and seeds a streak history (regression: todayIso import)', () => {
+  const payload = mock.getMockPayload({ tasksListName: 'Tasks', habitsListName: 'Habits', accentColor: '#C4122E' });
+  assert.equal(payload.mode, 'mock');
+  assert.ok(payload.habits.length > 0);
+  assert.ok(payload.habits.some((h) => h.completedDates.length > 0), 'demo habits start with some history');
+  assert.equal(readJsonFile(env.dir, 'streaks.json').schemaVersion, 1);
 });
