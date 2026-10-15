@@ -15,8 +15,8 @@ const { todayIso, addDaysIso } = require('./dates');
  * Schema 0 (before versioning): `{ habits: { [habitId]: { dates: ['YYYY-MM-DD', …] } } }`.
  * Decoding accepts both fields at once, so a file touched by an older build loses nothing.
  *
- * Growth limit: months older than HISTORY_MONTHS are dropped on save, and a habit with no
- * days left disappears, so the file is bounded by (habits × 120 months).
+ * Growth limit: each habit keeps its newest HISTORY_MONTHS months with marks (see
+ * encodeStore), so the file is bounded by (habits × 120 months) whatever the clock says.
  */
 const HISTORY_MONTHS = 120;
 /** Days per habit sent to the widget (month calendar); the file keeps the full window. */
@@ -40,7 +40,7 @@ function isIsoDay(s) {
   return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(Number(m[1]), month);
 }
 
-/** First month kept: HISTORY_MONTHS months back from `today`'s month (inclusive). */
+/** First month of the HISTORY_MONTHS-month window that ends with `today`'s month. */
 function oldestKeptMonth(today = todayIso()) {
   const [y, m] = today.split('-').map(Number);
   const index = y * 12 + (m - 1) - (HISTORY_MONTHS - 1);
@@ -48,30 +48,28 @@ function oldestKeptMonth(today = todayIso()) {
 }
 
 /**
- * Days a habit can legitimately have: the retention window up to tomorrow (time zones).
- * Anything else (a hostile import of far-future months, a corrupted clock) is ignored.
- * @param {string} today
+ * Days an IMPORTED file may add: the retention window up to tomorrow (time zones).
+ * Never applied to the user's own streaks.json: a PC clock that is wrong at startup
+ * (CMOS reset, autostart before time sync) must not turn real history into «the future».
+ * @param {string} [today]
+ * @returns {{ firstMonth: string, lastMonth: string, lastDay: string }}
  */
-function keptRange(today) {
+function importRange(today = todayIso()) {
   const lastDay = addDaysIso(today, 1);
   return { firstMonth: oldestKeptMonth(today), lastMonth: lastDay.slice(0, 7), lastDay };
 }
 
 /**
  * @param {Record<string, any>} raw file content (schema 0 or 1, without schemaVersion)
- * @param {string} [today] reference day for the kept window
- * @param {{ maxDays?: number }} [limits] throw a RangeError as soon as more days than this
- *   were decoded (imports: bounds the work a hostile file can cause)
+ * @param {{ range?: { firstMonth: string, lastMonth: string, lastDay: string } | null, maxDays?: number }} [opts]
+ *   range: drop days outside it (imports only, see importRange);
+ *   maxDays: throw a RangeError as soon as more days were decoded (bounds hostile files).
  * @returns {StreakStore}
  */
-function decodeStore(raw, today = todayIso(), limits = {}) {
-  const range = keptRange(today);
-  const maxDays = limits.maxDays || Infinity;
+function decodeStore(raw, opts = {}) {
+  const range = opts.range || null;
+  const maxDays = opts.maxDays || Infinity;
   let total = 0;
-  const count = (n) => {
-    total += n;
-    if (total > maxDays) throw new RangeError('too many days');
-  };
   /** @type {StreakStore} null prototype: ids like «toString» must not hit Object.prototype */
   const store = { habits: Object.create(null) };
   const habits = raw && raw.habits && typeof raw.habits === 'object' ? raw.habits : {};
@@ -83,45 +81,48 @@ function decodeStore(raw, today = todayIso(), limits = {}) {
       for (const [key, mask] of Object.entries(entry.months)) {
         const m = MONTH_KEY_RE.exec(key);
         if (!m || !Number.isInteger(mask) || mask <= 0) continue;
-        if (key < range.firstMonth || key > range.lastMonth) continue;
+        if (range && (key < range.firstMonth || key > range.lastMonth)) continue;
         const last = daysInMonth(Number(m[1]), Number(m[2]));
         for (let day = 1; day <= last; day += 1) {
           if (!(mask & (1 << (day - 1)))) continue;
           const iso = `${key}-${String(day).padStart(2, '0')}`;
-          if (iso <= range.lastDay) days.add(iso);
+          if (!range || iso <= range.lastDay) days.add(iso);
         }
       }
     }
     if (Array.isArray(entry.dates)) {
       for (const d of entry.dates) {
-        if (isIsoDay(d) && d.slice(0, 7) >= range.firstMonth && d <= range.lastDay) days.add(d);
+        if (!isIsoDay(d)) continue;
+        if (range && (d.slice(0, 7) < range.firstMonth || d > range.lastDay)) continue;
+        days.add(d);
       }
     }
-    count(days.size);
+    total += days.size;
+    if (total > maxDays) throw new RangeError('too many days');
     store.habits[habitId] = { dates: [...days].sort() };
   }
   return store;
 }
 
 /**
+ * Growth limit without trusting the clock: each habit keeps its newest HISTORY_MONTHS
+ * months that have at least one mark (a daily habit: the last 10 years). A wrong date,
+ * early or late, can never evict real history.
  * @param {StreakStore} store
- * @param {string} [today] retention reference day
  * @returns {{ habits: Record<string, { months: Record<string, number> }> }}
  */
-function encodeStore(store, today = todayIso()) {
-  const range = keptRange(today);
+function encodeStore(store) {
   /** @type {Record<string, { months: Record<string, number> }>} */
   const habits = {};
   for (const [habitId, entry] of Object.entries((store && store.habits) || {})) {
     /** @type {Record<string, number>} */
     const months = {};
     for (const d of (entry && Array.isArray(entry.dates) ? entry.dates : [])) {
-      if (!isIsoDay(d) || d > range.lastDay) continue;
+      if (!isIsoDay(d)) continue;
       const key = d.slice(0, 7);
-      if (key < range.firstMonth) continue;
       months[key] = (months[key] || 0) | (1 << (Number(d.slice(8)) - 1));
     }
-    const keys = Object.keys(months).sort();
+    const keys = Object.keys(months).sort().slice(-HISTORY_MONTHS);
     if (!keys.length) continue;
     habits[habitId] = { months: Object.fromEntries(keys.map((k) => [k, months[k]])) };
   }
@@ -311,6 +312,7 @@ module.exports = {
   resetStreakCache,
   decodeStore,
   encodeStore,
+  importRange,
   isIsoDay,
   streaksDoc,
 };

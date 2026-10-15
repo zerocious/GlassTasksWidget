@@ -20,7 +20,7 @@ const path = require('path');
 const { dataPath, writeFileAtomic, readSecretJson, getGoogleClientCredentials } = require('./config');
 const { schemaVersionOf } = require('./storage-migrate');
 const { loadSettings, saveSettings, DEFAULTS: SETTINGS_DEFAULTS } = require('./settings-store');
-const { loadStore, mergeHistory, decodeStore } = require('./streak-store');
+const { loadStore, mergeHistory, decodeStore, importRange } = require('./streak-store');
 
 const EXPORT_FORMAT = 'glass-tasks-export';
 const BACKUP_FORMAT = 'glass-tasks-backup';
@@ -82,19 +82,23 @@ function exportableSettings() {
 }
 
 /**
- * @param {{ format: string, now?: Date, reason?: string,
+ * @param {{ format: string, now?: Date, reason?: string, secrets?: string[],
  *   habitTitles?: Record<string, string> | null, logsDir?: string | null, includeLogs?: boolean }} opts
  *   includeLogs: logs may hold task text from error messages, so only on request.
+ *   Strings are cleaned of secrets here, before serialising: editing JSON text could break
+ *   its escapes and hide tokens behind them.
  */
 function buildSnapshot(opts) {
   const now = opts.now || new Date();
+  const secrets = opts.secrets || knownSecrets();
   const store = loadStore();
   /** @type {Record<string, { title?: string, dates: string[] }>} */
   const habits = {};
   for (const [id, entry] of Object.entries(store.habits)) {
     if (!entry.dates.length) continue;
     const title = opts.habitTitles && opts.habitTitles[id];
-    habits[id] = { ...(title ? { title: String(title) } : {}), dates: entry.dates.slice() };
+    const clean = title ? redactSecrets(String(title), secrets, { generic: false }) : '';
+    habits[id] = { ...(clean ? { title: clean } : {}), dates: entry.dates.slice() };
   }
   /** @type {Record<string, any>} */
   const snapshot = {
@@ -106,7 +110,9 @@ function buildSnapshot(opts) {
     settings: exportableSettings(),
     habits,
   };
-  if (opts.includeLogs && opts.logsDir) snapshot.logs = readLogs(opts.logsDir);
+  if (opts.includeLogs && opts.logsDir) {
+    snapshot.logs = readLogs(opts.logsDir).map((log) => ({ ...log, text: redactSecrets(log.text, secrets) }));
+  }
   return snapshot;
 }
 
@@ -176,19 +182,26 @@ function knownSecrets() {
 }
 
 const KEYS = 'refresh_token|access_token|id_token|client_secret|clientSecret|code_verifier';
-const SECRET_PATTERNS = [
+/** Shapes that only Google credentials have: applied to every exported string. */
+const STRICT_SECRET_PATTERNS = [
+  /\bya29\.[0-9A-Za-z_-]+/g, // Google access token
+  /\b1(?:\/\/|%2F%2F)[0-9A-Za-z_-]{20,}/gi, // Google refresh token, plain or URL-encoded
+  /\bGOCSPX-[0-9A-Za-z_-]+/g, // OAuth client secret
+];
+/**
+ * Generic credential shapes (key=value, ?code=, Bearer, JWT): logs only. Applied to task
+ * titles and notes they would mangle ordinary text such as «join?code=SPRING2026».
+ */
+const GENERIC_SECRET_PATTERNS = [
   // "refresh_token": "…" (JSON) — keep the key and the quotes
   new RegExp(`("(?:${KEYS})"\\s*:\\s*")[^"]*(")`, 'g'),
   // refresh_token: '…' / refresh_token=… (util.inspect, form bodies, logged objects)
-  new RegExp(`((?:${KEYS})\\s*[:=]\\s*['"]?)[^'"\\s,&}]+`, 'g'),
+  new RegExp(`((?:${KEYS})\\s*[:=]\\s*['"]?)[^'"\\s,&}\\\\]+`, 'g'),
   // ?token=… &code=… in logged URLs
-  /([?&](?:token|code|refresh_token|access_token|id_token|client_secret|code_verifier)=)[^&\s"']+/g,
+  /([?&](?:token|code|refresh_token|access_token|id_token|client_secret|code_verifier)=)[^&\s"'\\]+/g,
   /(\bBearer\s+)[A-Za-z0-9._~+/-]+=*/g,
   /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g, // JWT (id_token carries the e-mail)
-  /\bya29\.[0-9A-Za-z_-]+/g, // Google access token
-  /\b1(?:\/\/|%2F%2F)[0-9A-Za-z_-]{20,}/gi, // Google refresh token, plain or URL-encoded
   /\b4(?:\/|%2F)0[0-9A-Za-z_-]{10,}/gi, // OAuth authorization code
-  /\bGOCSPX-[0-9A-Za-z_-]+/g, // OAuth client secret
 ];
 
 /** Length of the secret fragments that count as a leak (a log tail may start mid-token). */
@@ -201,22 +214,29 @@ function secretWindows(secret) {
   return out;
 }
 
+/** Forms in which a live secret could appear in text: raw, JSON-escaped, URL-encoded. */
+function secretForms(secret) {
+  return [...new Set([secret, JSON.stringify(secret).slice(1, -1), encodeURIComponent(secret)])];
+}
+
 /**
- * Remove anything secret-looking from export text. Throws if a live secret survives.
+ * Remove anything secret-looking from one raw (not yet serialised) string.
+ * Throws if a live secret survives.
  * @param {string} text
  * @param {string[]} [secrets]
+ * @param {{ generic?: boolean }} [opts] generic: also generic credential shapes (logs)
  */
-function redactSecrets(text, secrets = knownSecrets()) {
+function redactSecrets(text, secrets = knownSecrets(), opts = {}) {
   let out = text;
-  for (const re of SECRET_PATTERNS) {
+  const patterns = opts.generic === false ? STRICT_SECRET_PATTERNS : [...GENERIC_SECRET_PATTERNS, ...STRICT_SECRET_PATTERNS];
+  for (const re of patterns) {
     // Patterns with groups keep the key / quotes; the others are replaced whole.
     out = out.replace(re, (match, pre, post) =>
       typeof pre === 'string' ? `${pre}${REDACTED}${typeof post === 'string' ? post : ''}` : REDACTED
     );
   }
-  const forms = (secret) => [...new Set([secret, JSON.stringify(secret).slice(1, -1), encodeURIComponent(secret)])];
   for (const secret of secrets) {
-    for (const form of forms(secret)) out = out.split(form).join(REDACTED);
+    for (const form of secretForms(secret)) out = out.split(form).join(REDACTED);
   }
   // Fragments of a live secret (a cut-off log line, a token without its prefix).
   const windows = new Set();
@@ -229,10 +249,25 @@ function redactSecrets(text, secrets = knownSecrets()) {
       return token;
     });
   }
-  for (const secret of secrets) {
-    if (forms(secret).some((form) => out.includes(form))) throw new Error('Экспорт остановлен: в данных найден секрет.');
-  }
+  assertNoSecrets(out, secrets);
   return out;
+}
+
+/** Last line of defence on the final file text: refuse to write a live secret. */
+function assertNoSecrets(text, secrets) {
+  for (const secret of secrets) {
+    if (secretForms(secret).some((form) => text.includes(form))) {
+      throw new Error('Экспорт остановлен: в данных найден секрет.');
+    }
+  }
+}
+
+/** Serialise a snapshot whose strings were already cleaned; it must stay importable. */
+function finalizeJson(snapshot, secrets) {
+  const text = JSON.stringify(snapshot, null, 2);
+  assertNoSecrets(text, secrets);
+  JSON.parse(text);
+  return text;
 }
 
 /**
@@ -241,8 +276,9 @@ function redactSecrets(text, secrets = knownSecrets()) {
  * @param {{ habitTitles?: Record<string, string> | null, logsDir?: string | null, includeLogs?: boolean, now?: Date }} [opts]
  */
 function exportJson(filePath, opts = {}) {
-  const snapshot = buildSnapshot({ format: EXPORT_FORMAT, ...opts });
-  const text = redactSecrets(JSON.stringify(snapshot, null, 2));
+  const secrets = knownSecrets();
+  const snapshot = buildSnapshot({ format: EXPORT_FORMAT, ...opts, secrets });
+  const text = finalizeJson(snapshot, secrets);
   writeFileAtomic(filePath, text);
   return {
     path: filePath,
@@ -266,7 +302,8 @@ const CSV_SEPARATOR = ';'; // what Excel expects with Russian regional settings
  */
 function csvCell(value) {
   let s = value === null || value === undefined ? '' : String(value);
-  s = s.replace(/(^|[\r\n,;\t])([ \t"]*)([=+\-@])/g, "$1$2'$3");
+  // [ "]*, not [ \t"]*: a tab both opens a field and would match here, making runs of tabs quadratic.
+  s = s.replace(/(^|[\r\n,;\t])([ "]*)([=+\-@])/g, "$1$2'$3");
   if (/[";\r\n,\t]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
   return s;
 }
@@ -275,7 +312,9 @@ function csvCell(value) {
  * @param {{ tasks?: any[], habits?: any[], tasksListName?: string, habitsListName?: string }} payload
  * @returns {{ text: string, rows: number }}
  */
-function tasksToCsv(payload) {
+function tasksToCsv(payload, secrets = []) {
+  // Task text is the user's own: only real credentials are removed, before CSV quoting.
+  const cell = (value) => csvCell(redactSecrets(value === null || value === undefined ? '' : String(value), secrets, { generic: false }));
   const header = ['Список', 'Название', 'Заметки', 'Срок', 'Время', 'Выполнено', 'Родительская задача', 'ID'];
   const lines = [header.map(csvCell).join(CSV_SEPARATOR)];
   let rows = 0;
@@ -299,7 +338,7 @@ function tasksToCsv(payload) {
           t.parent ? titles.get(t.parent) || t.parent : '',
           t.id,
         ]
-          .map(csvCell)
+          .map(cell)
           .join(CSV_SEPARATOR)
       );
       rows += 1;
@@ -314,8 +353,10 @@ function tasksToCsv(payload) {
  * @param {object} payload current widget data (tasks / habits as shown)
  */
 function exportTasksCsv(filePath, payload) {
-  const { text, rows } = tasksToCsv(payload || {});
-  writeFileAtomic(filePath, redactSecrets(text));
+  const secrets = knownSecrets();
+  const { text, rows } = tasksToCsv(payload || {}, secrets);
+  assertNoSecrets(text, secrets);
+  writeFileAtomic(filePath, text);
   return { path: filePath, rows };
 }
 
@@ -360,8 +401,9 @@ async function readFileCapped(file, maxBytes) {
 /**
  * Validate an export / backup file. Throws a Russian message on anything unexpected.
  * @param {string} text
+ * @param {{ today?: string }} [opts] reference day for the accepted date window (tests)
  */
-function parseImport(text) {
+function parseImport(text, opts = {}) {
   if (typeof text !== 'string' || !text.trim()) throw new Error('Файл пустой.');
   if (Buffer.byteLength(text) > MAX_IMPORT_BYTES) throw new Error('Файл слишком большой для экспорта Glass Tasks.');
   let doc;
@@ -390,7 +432,7 @@ function parseImport(text) {
   }
   let incoming;
   try {
-    incoming = decodeStore({ habits }, undefined, { maxDays: MAX_IMPORT_DAYS });
+    incoming = decodeStore({ habits }, { range: importRange(opts.today), maxDays: MAX_IMPORT_DAYS });
   } catch (err) {
     if (err instanceof RangeError) {
       throw new Error('В файле слишком много отметок привычек — это не похоже на экспорт Glass Tasks.', { cause: err });
@@ -428,10 +470,10 @@ function importableSettings(settings) {
  * settings from the file replace the current ones (except window position).
  * A «pre-import» backup is taken first, so the import can be undone.
  * @param {string} text
- * @param {{ includeSettings?: boolean, applySettings?: (patch: object) => unknown, now?: Date }} [opts]
+ * @param {{ includeSettings?: boolean, applySettings?: (patch: object) => unknown, now?: Date, today?: string }} [opts]
  */
 function importData(text, opts = {}) {
-  const parsed = parseImport(text);
+  const parsed = parseImport(text, { today: opts.today });
   const safety = createBackup({ reason: 'pre-import', now: opts.now, force: true });
   const merged = mergeHistory(parsed.incoming);
   /** @type {string[]} */
@@ -511,14 +553,15 @@ function pruneBackups() {
 function createBackup(opts = {}) {
   const reason = opts.reason || 'manual';
   const now = opts.now || new Date();
-  const snapshot = buildSnapshot({ format: BACKUP_FORMAT, now, reason });
+  const snapshotSecrets = knownSecrets();
+  const snapshot = buildSnapshot({ format: BACKUP_FORMAT, now, reason, secrets: snapshotSecrets });
   const empty = !Object.keys(snapshot.habits).length && !fs.existsSync(dataPath('settings.json'));
   if (empty && !opts.force) return null;
   const base = `backup-${stamp(now)}-${reason}`;
   let name = `${base}.json`;
   for (let i = 2; fs.existsSync(path.join(backupsDir(), name)); i += 1) name = `${base}-${i}.json`;
   const file = path.join(backupsDir(), name);
-  const text = redactSecrets(JSON.stringify(snapshot, null, 2));
+  const text = finalizeJson(snapshot, snapshotSecrets);
   writeFileAtomic(file, text);
   pruneBackups();
   return { name, path: file, bytes: Buffer.byteLength(text) };
