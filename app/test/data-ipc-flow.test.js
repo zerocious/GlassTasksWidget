@@ -72,12 +72,21 @@ test('every data:* channel is registered and refuses other senders', async () =>
 test('page URLs match whether or not «~ [ ] %», spaces and Cyrillic are escaped', () => {
   const page = path.join(tmpDir(), 'ADMINI~1', 'Programs [x64]', '100%', 'Задачи', 'src', 'index.html');
   const node = pathToFileURL(page).href; // what data-ipc computes
-  const chromium = `file://${page.split(path.sep).join('/')}`.replace(/ /g, '%20'); // what the frame reports
+  // What the frame reports: file:///C:/… on Windows (drive letter after a third slash), file:///tmp/… elsewhere.
+  const slashed = page.split(path.sep).join('/');
+  const chromium = `file://${slashed.startsWith('/') ? '' : '/'}${slashed}`.replace(/ /g, '%20');
   assert.notEqual(chromium, node);
   assert.equal(dataIpc.samePageUrl(chromium, node, false), true);
   assert.equal(dataIpc.samePageUrl(chromium.toUpperCase(), node, true), true, 'Windows: case-insensitive');
   assert.equal(dataIpc.samePageUrl(chromium.replace('index.html', 'evil.html'), node, false), false);
   assert.equal(dataIpc.samePageUrl(`${chromium}.html`, node, false), false);
+
+  // An installed widget on Windows, checked on every OS.
+  const installed = 'file:///C:/Users/ADMINI~1/AppData/Local/Programs/Glass%20Tasks%20Widget/resources/app.asar/src/index.html';
+  const escaped = 'file:///c:/Users/ADMINI%7E1/AppData/Local/Programs/Glass%20Tasks%20Widget/resources/app.asar/src/index.html';
+  assert.equal(dataIpc.samePageUrl(installed, escaped, true), true);
+  assert.equal(dataIpc.samePageUrl(installed, escaped, false), false, 'drive letter case matters off Windows');
+  assert.equal(dataIpc.samePageUrl(installed.replace('file:///', 'file://'), escaped, true), false, 'host part differs');
   mainFrame.url = `${dataIpc.WIDGET_PAGE_URL}#x`;
   assert.equal(dataIpc.isTrustedSender(event, win), true);
 });
