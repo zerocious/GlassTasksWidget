@@ -1,12 +1,11 @@
 node_modules/
 .env
-data/tokens.json
-data/streaks.json
-data/settings.json
-data/mock-items.json
-data/offline-cache.json
-data/credentials.json
-data/reminders.json
+# Local user data (tokens, credentials, settings, streaks, caches, backups): never commit.
+# The whole folder is ignored so new files can't slip into a commit.
+data/
+*.corrupt-*
+*.tmp
+*.bak
 dist/
 dist-*/
 dist-build/

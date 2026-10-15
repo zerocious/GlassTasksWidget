@@ -1,13 +1,73 @@
 'use strict';
 
-const { readJson, writeJson, dataPath } = require('./config');
+const fs = require('fs');
+const { dataPath } = require('./config');
+const { canEncrypt, plaintextSecretsAllowed } = require('./storage-core');
+const { loadDoc, saveDoc, deleteDoc } = require('./storage-files');
 const { applyItemPatch, reorderList } = require('./list-ops');
+
+/**
+ * offline-cache.json holds the last Google payload: task titles, notes and due dates, i.e.
+ * personal data. It is therefore encrypted with safeStorage like the tokens; without
+ * safeStorage it is kept in memory only (it is a copy of what Google has, so nothing is lost).
+ *
+ * Writes are debounced: a mutation only updates the in-memory copy and schedules one disk
+ * write, so encryption and I/O never sit on the interactive path. The pending write is
+ * flushed on quit (flushOfflineCache) and at process exit.
+ */
+const OFFLINE_SPEC = {
+  name: 'offline-cache.json',
+  file: cacheFile,
+  version: 1,
+  secret: true,
+  pretty: false,
+  // v0 -> v1: the file only gained schemaVersion.
+  migrations: { 1: (d) => d },
+};
+
+/** Max age of an unsaved change. Short enough to lose little on a crash, long enough to coalesce bursts. */
+const WRITE_DELAY_MS = 1500;
 
 /** @type {object | null | undefined} undefined = not loaded yet */
 let memoryCache = undefined;
+let dirty = false;
+/** @type {ReturnType<typeof setTimeout> | null} */
+let writeTimer = null;
+let exitHookInstalled = false;
 
 function cacheFile() {
   return dataPath('offline-cache.json');
+}
+
+function canPersist() {
+  return canEncrypt() || plaintextSecretsAllowed();
+}
+
+/** Write the pending cache now (no-op when nothing changed). Never throws. */
+function flushOfflineCache() {
+  if (writeTimer) {
+    clearTimeout(writeTimer);
+    writeTimer = null;
+  }
+  if (!dirty) return;
+  dirty = false;
+  if (!memoryCache || !canPersist()) return;
+  try {
+    saveDoc(OFFLINE_SPEC, memoryCache);
+  } catch (err) {
+    console.warn('[offline-cache] write failed:', err && err.message ? err.message : err);
+  }
+}
+
+function scheduleWrite() {
+  dirty = true;
+  if (!exitHookInstalled) {
+    exitHookInstalled = true;
+    process.on('exit', flushOfflineCache);
+  }
+  if (writeTimer) return;
+  writeTimer = setTimeout(flushOfflineCache, WRITE_DELAY_MS);
+  if (typeof writeTimer.unref === 'function') writeTimer.unref();
 }
 
 /**
@@ -28,7 +88,7 @@ function saveOfflineCache(payload) {
     habits: payload.habits || [],
   };
   memoryCache = slim;
-  writeJson(cacheFile(), slim);
+  scheduleWrite();
 }
 
 /**
@@ -36,7 +96,7 @@ function saveOfflineCache(payload) {
  */
 function loadOfflineCache() {
   if (memoryCache !== undefined) return memoryCache;
-  const raw = readJson(cacheFile(), null);
+  const raw = loadDoc(OFFLINE_SPEC).data;
   // Require google mode so a wiped/placeholder file is not treated as a real cache.
   if (
     !raw ||
@@ -53,13 +113,29 @@ function loadOfflineCache() {
 
 function clearOfflineCache() {
   memoryCache = null;
-  const fs = require('fs');
-  const file = cacheFile();
-  try {
-    if (fs.existsSync(file)) fs.unlinkSync(file);
-  } catch {
-    // Placeholder without mode:google so loadOfflineCache ignores it.
-    writeJson(file, { clearedAt: new Date().toISOString() });
+  dirty = false;
+  if (writeTimer) {
+    clearTimeout(writeTimer);
+    writeTimer = null;
+  }
+  deleteDoc(OFFLINE_SPEC);
+  if (fs.existsSync(cacheFile())) {
+    try {
+      // Could not delete: overwrite with a placeholder so loadOfflineCache ignores it.
+      saveDoc(OFFLINE_SPEC, { clearedAt: new Date().toISOString() });
+    } catch {
+      /* nothing more we can do */
+    }
+  }
+}
+
+/** Test hook: forget the in-memory copy and any pending write (does not touch the file). */
+function resetOfflineCacheForTests() {
+  memoryCache = undefined;
+  dirty = false;
+  if (writeTimer) {
+    clearTimeout(writeTimer);
+    writeTimer = null;
   }
 }
 
@@ -93,9 +169,13 @@ function reorderOfflineCache(listKind, orderedIds, movedPatch = null) {
 }
 
 module.exports = {
+  OFFLINE_SPEC,
+  WRITE_DELAY_MS,
   saveOfflineCache,
   loadOfflineCache,
   clearOfflineCache,
+  flushOfflineCache,
+  resetOfflineCacheForTests,
   patchOfflineCache,
   reorderOfflineCache,
 };

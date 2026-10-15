@@ -69,13 +69,6 @@ test('readSecretJson migrates a legacy plaintext file to encrypted', () => {
   assert.deepEqual(config.readSecretJson(file, null), { clientId: 'id', clientSecret: 's3cret' });
 });
 
-test('writeSecretJson falls back to plain JSON without safeStorage', () => {
-  config.setSafeStorageForTests(null);
-  const file = path.join(tmpDir(), 'tokens.json');
-  config.writeSecretJson(file, { refresh_token: 'r' });
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { refresh_token: 'r' });
-});
-
 test('encrypted secrets are not returned when safeStorage becomes unavailable', () => {
   config.setSafeStorageForTests(fakeSafeStorage);
   const file = path.join(tmpDir(), 'tokens.json');

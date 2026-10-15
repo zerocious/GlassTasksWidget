@@ -9,11 +9,22 @@ const {
   unmarkCompleted,
   removeHabit,
 } = require('./streak-store');
-const { readJson, writeJson, dataPath } = require('./config');
+const { dataPath } = require('./config');
+const { loadDoc, saveDoc } = require('./storage-files');
 
 function mockFile() {
   return dataPath('mock-items.json');
 }
+
+/** mock-items.json: the demo-mode lists (the only copy of tasks typed in demo mode). */
+const MOCK_SPEC = {
+  name: 'mock-items.json',
+  file: mockFile,
+  version: 1,
+  keepBak: true,
+  // v0 -> v1: the file only gained schemaVersion.
+  migrations: { 1: (d) => d },
+};
 
 function dueIsoDaysFromNow(delta) {
   const d = new Date();
@@ -90,7 +101,7 @@ const DEFAULT_HABITS = [
 ];
 
 function loadMockStore() {
-  const stored = readJson(mockFile(), null);
+  const stored = loadDoc(MOCK_SPEC).data;
   if (stored && Array.isArray(stored.tasks) && Array.isArray(stored.habits)) {
     return stored;
   }
@@ -98,12 +109,12 @@ function loadMockStore() {
     tasks: DEFAULT_TASKS.map((t) => ({ ...t })),
     habits: DEFAULT_HABITS.map((h) => ({ ...h })),
   };
-  writeJson(mockFile(), fresh);
+  saveDoc(MOCK_SPEC, fresh);
   return fresh;
 }
 
 function saveMockStore(store) {
-  writeJson(mockFile(), store);
+  saveDoc(MOCK_SPEC, store);
 }
 
 /** Seed demo streak history once so week strip looks alive in mock mode. */
@@ -387,7 +398,68 @@ function resetMockHabitsCompleted() {
   return n;
 }
 
+/** Demo lists for export / backup. */
+function exportMockStore() {
+  const store = loadMockStore();
+  return { tasks: store.tasks.slice(), habits: store.habits.slice() };
+}
+
+const MOCK_TEXT_MAX = { id: 200, title: 1000, notes: 8000, meta: 200 };
+
+/** Whitelist the fields of one imported demo item; null when it is unusable. */
+function cleanMockItem(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  const id = str(raw.id, MOCK_TEXT_MAX.id);
+  const title = str(raw.title, MOCK_TEXT_MAX.title).trim();
+  if (!id || !title || id === '__proto__') return null;
+  const completed = raw.completed === true || raw.status === 'completed';
+  /** @type {Record<string, unknown>} */
+  const item = {
+    id,
+    title,
+    notes: str(raw.notes, MOCK_TEXT_MAX.notes),
+    due: typeof raw.due === 'string' && !Number.isNaN(Date.parse(raw.due)) ? raw.due : null,
+    status: completed ? 'completed' : 'needsAction',
+    completed,
+    parent: typeof raw.parent === 'string' && raw.parent ? raw.parent.slice(0, MOCK_TEXT_MAX.id) : null,
+  };
+  if (typeof raw.meta === 'string') item.meta = raw.meta.slice(0, MOCK_TEXT_MAX.meta);
+  return item;
+}
+
+/**
+ * Add imported demo items whose ids do not exist yet (existing items are never changed).
+ * @param {unknown} raw `{ tasks: [], habits: [] }`
+ * @returns {{ tasksAdded: number, habitsAdded: number, rejected: number }}
+ */
+function mergeMockStore(raw) {
+  const result = { tasksAdded: 0, habitsAdded: 0, rejected: 0 };
+  if (!raw || typeof raw !== 'object') return result;
+  const store = loadMockStore();
+  for (const key of ['tasks', 'habits']) {
+    const incoming = Array.isArray(raw[key]) ? raw[key] : [];
+    const known = new Set(store[key].map((i) => i && i.id));
+    for (const entry of incoming) {
+      const item = cleanMockItem(entry);
+      if (!item) {
+        result.rejected += 1;
+        continue;
+      }
+      if (known.has(item.id)) continue;
+      known.add(item.id);
+      store[key].push(item);
+      result[key === 'tasks' ? 'tasksAdded' : 'habitsAdded'] += 1;
+    }
+  }
+  if (result.tasksAdded || result.habitsAdded) saveMockStore(store);
+  return result;
+}
+
 module.exports = {
+  MOCK_SPEC,
+  exportMockStore,
+  mergeMockStore,
   getMockPayload,
   getMockItem,
   addMockItem,

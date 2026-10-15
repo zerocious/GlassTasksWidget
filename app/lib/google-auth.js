@@ -1,10 +1,10 @@
 'use strict';
 
 const crypto = require('crypto');
-const fs = require('fs');
 const http = require('http');
 const { URL } = require('url');
-const { loadEnvFile, readSecretJson, writeSecretJson, dataPath, hasGoogleCredentials } = require('./config');
+const { getGoogleCredentials, deleteSecretJson, dataPath, hasGoogleCredentials } = require('./config');
+const { loadDoc, saveDoc } = require('./storage-files');
 
 const { describeAuthError } = require('./auth-errors');
 
@@ -119,6 +119,16 @@ function tokensFile() {
   return dataPath('tokens.json');
 }
 
+/** tokens.json: Google token set, encrypted by safeStorage (memory only when it is unavailable). */
+const TOKENS_SPEC = {
+  name: 'tokens.json',
+  file: tokensFile,
+  version: 1,
+  secret: true,
+  // v0 -> v1: the file only gained schemaVersion.
+  migrations: { 1: (d) => d },
+};
+
 /** @type {import('googleapis').Auth.OAuth2Client | null} */
 let cachedClient = null;
 /** @type {Promise<import('googleapis').Auth.OAuth2Client> | null} */
@@ -137,27 +147,29 @@ function escapeHtml(s) {
  * fixedPort is set only when the user (or an old install) pinned a port.
  */
 function getOAuthClient() {
-  loadEnvFile();
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
-    throw new Error('Missing GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET');
+  // The secret is read from the config module on demand; it is never put into process.env.
+  const creds = getGoogleCredentials();
+  if (!creds) {
+    throw new Error('Missing Google client ID / secret');
   }
-  const pinned = Number(process.env.OAUTH_REDIRECT_PORT);
   const google = getGoogle();
   return {
     // Desktop clients send client_secret too: Google's token endpoint still requires it.
-    oauth2: new google.auth.OAuth2(clientId, clientSecret),
-    fixedPort: Number.isFinite(pinned) && pinned > 0 ? Math.round(pinned) : null,
+    oauth2: new google.auth.OAuth2(creds.clientId, creds.clientSecret),
+    fixedPort: creds.redirectPort,
   };
 }
 
 function loadSavedTokens() {
-  return readSecretJson(tokensFile(), null);
+  const { data } = loadDoc(TOKENS_SPEC);
+  if (!data) return null;
+  const tokens = { ...data };
+  delete tokens.schemaVersion; // our bookkeeping, not part of Google's token set
+  return tokens;
 }
 
 function saveTokens(tokens) {
-  writeSecretJson(tokensFile(), tokens);
+  saveDoc(TOKENS_SPEC, tokens);
 }
 
 /** Bumped on logout / credential change so late OAuth results are discarded. */
@@ -175,11 +187,10 @@ function resetAuthClient() {
 
 function clearTokens() {
   resetAuthClient();
-  const file = tokensFile();
   try {
-    if (fs.existsSync(file)) fs.unlinkSync(file);
+    deleteSecretJson(tokensFile());
   } catch {
-    writeSecretJson(file, {});
+    saveDoc(TOKENS_SPEC, {});
   }
 }
 
@@ -451,5 +462,5 @@ module.exports = {
   normalizeGoogleAuthError,
   classifyExchangeError,
   /** Exposed for unit tests only. */
-  _test: { interactiveLogin },
+  _test: { interactiveLogin, saveTokens, TOKENS_SPEC },
 };

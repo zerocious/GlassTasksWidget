@@ -1,6 +1,7 @@
 'use strict';
 
-const { readJson, writeJson, dataPath } = require('./config');
+const { dataPath } = require('./config');
+const { loadDoc, saveDoc } = require('./storage-files');
 const { todayIso } = require('./dates');
 
 /**
@@ -12,11 +13,20 @@ function remindersFile() {
   return dataPath('reminders.json');
 }
 
+/** reminders.json: which items were already announced today. Disposable: no last good copy. */
+const REMINDERS_SPEC = {
+  name: 'reminders.json',
+  file: remindersFile,
+  version: 1,
+  // v0 -> v1: the file only gained schemaVersion.
+  migrations: { 1: (d) => d },
+};
+
 /**
  * @returns {ReminderState}
  */
 function loadReminderState() {
-  const raw = readJson(remindersFile(), {});
+  const raw = loadDoc(REMINDERS_SPEC).data || {};
   const date = typeof raw.date === 'string' ? raw.date : '';
   const today = todayIso();
   if (date !== today) {
@@ -32,7 +42,7 @@ function loadReminderState() {
  * @param {ReminderState} state
  */
 function saveReminderState(state) {
-  writeJson(remindersFile(), {
+  saveDoc(REMINDERS_SPEC, {
     date: state.date || todayIso(),
     notifiedIds: [...new Set(state.notifiedIds || [])],
   });
@@ -67,6 +77,7 @@ function clearNotifiedToday() {
 }
 
 module.exports = {
+  REMINDERS_SPEC,
   loadReminderState,
   saveReminderState,
   markNotified,

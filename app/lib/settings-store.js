@@ -1,6 +1,7 @@
 'use strict';
 
-const { readJson, writeJson, dataPath } = require('./config');
+const { dataPath } = require('./config');
+const { loadDoc, saveDoc } = require('./storage-files');
 
 /**
  * @typedef {'dark' | 'light'} Theme
@@ -85,6 +86,16 @@ function settingsFile() {
   return dataPath('settings.json');
 }
 
+/** settings.json: window/theme preferences. Keeps a last good copy (settings.json.bak). */
+const SETTINGS_SPEC = {
+  name: 'settings.json',
+  file: settingsFile,
+  version: 1,
+  keepBak: true,
+  // v0 -> v1: the file only gained schemaVersion; normalizeSettings() already fills defaults.
+  migrations: { 1: (d) => d },
+};
+
 function normalizeHotkey(value, fallback) {
   if (typeof value !== 'string' || !value.trim()) return fallback;
   return value.trim();
@@ -140,7 +151,7 @@ function normalizeSettings(raw) {
  */
 function loadSettings() {
   if (settingsCache) return settingsCache;
-  settingsCache = normalizeSettings(readJson(settingsFile(), {}));
+  settingsCache = normalizeSettings(loadDoc(SETTINGS_SPEC).data || {});
   return settingsCache;
 }
 
@@ -162,7 +173,7 @@ function saveSettings(patch) {
   );
   if (unchanged) return current;
 
-  writeJson(settingsFile(), next);
+  saveDoc(SETTINGS_SPEC, next);
   settingsCache = next;
   return next;
 }
@@ -171,7 +182,13 @@ function getSizePreset(size) {
   return SIZE_PRESETS[size === 'compact' ? 'compact' : 'normal'];
 }
 
+/** Forget the in-memory copy so the next load reads the file again. */
+function resetSettingsCache() {
+  settingsCache = null;
+}
+
 module.exports = {
+  SETTINGS_SPEC,
   DEFAULT_BG_OPACITY,
   BG_OPACITY_MIN,
   BG_OPACITY_MAX,
@@ -180,6 +197,8 @@ module.exports = {
   SIZE_PRESETS,
   loadSettings,
   saveSettings,
+  resetSettingsCache,
+  normalizeSettings,
   getSizePreset,
   normalizeBgOpacity,
 };

@@ -2,12 +2,27 @@
 
 const fs = require('fs');
 const path = require('path');
+const core = require('./storage-core');
+const { loadDoc, saveDoc } = require('./storage-files');
+const { readJson } = core;
 
 const ROOT = path.join(__dirname, '..');
 
 let envLoaded = false;
 /** @type {ReturnType<typeof buildConfig> | null} */
 let configCache = null;
+
+/**
+ * Google OAuth client credentials. They live in this module (not in process.env), so child
+ * processes the app spawns (PowerShell toasts, updater) never inherit the client secret and
+ * nothing can read it via `process.env` / crash dumps of the environment block.
+ * @type {{ clientId: string, clientSecret: string, redirectPort: number | null } | null}
+ */
+let googleCreds = null;
+/** @type {string | null} */
+let dataRootOverride = null;
+/** @type {Record<string, string> | undefined} */
+let shellEnvSnapshot;
 
 function tryElectronApp() {
   try {
@@ -18,26 +33,44 @@ function tryElectronApp() {
 }
 
 /**
- * Writable data root. Dev: app/data. Packaged: %APPDATA%/glass-tasks-widget/data
+ * Writable data root. Packaged: %APPDATA%/glass-tasks-widget/data.
+ * Dev: app/data, or <GT_USER_DATA_DIR>/data when an isolated profile is requested.
  */
 function getDataRoot() {
+  if (dataRootOverride) return dataRootOverride;
   const app = tryElectronApp();
   if (app && app.isPackaged) {
     return path.join(app.getPath('userData'), 'data');
   }
+  if (process.env.GT_USER_DATA_DIR) {
+    return path.join(path.resolve(process.env.GT_USER_DATA_DIR), 'data');
+  }
   return path.join(ROOT, 'data');
+}
+
+/** Test hook: point all storage at a temp folder (null = default). */
+function setDataRootForTests(dir) {
+  dataRootOverride = dir ? path.resolve(dir) : null;
+  googleCreds = null;
+  envLoaded = false;
+  shellEnvSnapshot = undefined;
 }
 
 const GOOGLE_ENV_KEYS = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'OAUTH_REDIRECT_PORT'];
 const DEFAULT_OAUTH_PORT = 42813;
 
-function applyEnvValue(key, value, { force = false } = {}) {
-  if (!force && key in process.env) return;
-  process.env[key] = value;
-}
-
 /** Marker line in .env files the app itself wrote (pre-encryption versions). */
 const APP_ENV_MARKER = 'Saved by the app UI';
+
+/** credentials.json: Desktop OAuth client, encrypted by safeStorage. */
+const CREDENTIALS_SPEC = {
+  name: 'credentials.json',
+  file: () => getCredentialsJsonPath(),
+  version: 1,
+  secret: true,
+  // v0 -> v1: the file only gained schemaVersion.
+  migrations: { 1: (d) => d },
+};
 
 /**
  * @param {string} text
@@ -65,18 +98,16 @@ function parseEnvText(text) {
   return out;
 }
 
-function loadEnvFromFile(envPath, { force = false } = {}) {
+/** @returns {Record<string, string> | null} null when the file is missing or has no known keys */
+function readEnvFile(envPath) {
   let text;
   try {
     text = fs.readFileSync(envPath, 'utf8');
   } catch {
-    return false;
+    return null;
   }
   const values = parseEnvText(text);
-  for (const [key, value] of Object.entries(values)) {
-    applyEnvValue(key, value, { force });
-  }
-  return Object.keys(values).length > 0;
+  return Object.keys(values).length > 0 ? values : null;
 }
 
 /**
@@ -92,17 +123,18 @@ function migrateAppWrittenEnv() {
   } catch {
     return;
   }
-  if (!text.includes(APP_ENV_MARKER) || !canEncrypt()) return;
+  if (!text.includes(APP_ENV_MARKER) || !core.canEncrypt()) return;
   const values = parseEnvText(text);
   if (!values.GOOGLE_CLIENT_ID || !values.GOOGLE_CLIENT_SECRET) return;
   try {
-    if (!readSecretJson(getCredentialsJsonPath(), null)) {
-      writeSecretJson(getCredentialsJsonPath(), {
+    if (!loadDoc(CREDENTIALS_SPEC).data) {
+      const res = saveDoc(CREDENTIALS_SPEC, {
         clientId: values.GOOGLE_CLIENT_ID,
         clientSecret: values.GOOGLE_CLIENT_SECRET,
         redirectPort: Number(values.OAUTH_REDIRECT_PORT) || null,
         updatedAt: new Date().toISOString(),
       });
+      if (!res.persisted) return;
     }
     fs.unlinkSync(envPath);
   } catch (err) {
@@ -124,22 +156,20 @@ function savedPinnedPort(data) {
   return port;
 }
 
-function loadCredentialsJson(jsonPath, { force = false } = {}) {
-  const data = readSecretJson(jsonPath, null);
-  if (!data || typeof data !== 'object') return false;
+/** @returns {{ clientId: string, clientSecret: string, redirectPort: number | null } | null} */
+function readStoredCredentials() {
+  const { data } = loadDoc(CREDENTIALS_SPEC);
+  if (!data) return null;
   const clientId = typeof data.clientId === 'string' ? data.clientId.trim() : '';
   const clientSecret = typeof data.clientSecret === 'string' ? data.clientSecret.trim() : '';
-  if (!clientId || !clientSecret) return false;
-  applyEnvValue('GOOGLE_CLIENT_ID', clientId, { force });
-  applyEnvValue('GOOGLE_CLIENT_SECRET', clientSecret, { force });
+  if (!clientId || !clientSecret) return null;
   // No saved port = pick a free loopback port per sign-in (Desktop clients accept any).
-  const port = savedPinnedPort(data);
-  if (port) applyEnvValue('OAUTH_REDIRECT_PORT', String(port), { force });
-  return true;
+  return { clientId, clientSecret, redirectPort: savedPinnedPort(data) };
 }
 
 /** Preferred writable .env path (packaged/dev Electron: %APPDATA%/glass-tasks-widget/.env). */
 function getCredentialsEnvPath() {
+  if (dataRootOverride) return path.join(dataRootOverride, '.env');
   const app = tryElectronApp();
   if (app) return path.join(app.getPath('userData'), '.env');
   return path.join(ROOT, '.env');
@@ -151,6 +181,7 @@ function getCredentialsJsonPath() {
 }
 
 function envCandidatePaths() {
+  if (dataRootOverride) return [getCredentialsEnvPath()]; // tests: never read the developer's .env
   const candidates = [];
   const app = tryElectronApp();
   if (app) {
@@ -163,24 +194,68 @@ function envCandidatePaths() {
   return candidates;
 }
 
+/**
+ * The Google variables a developer exported in the shell. They are read once and removed
+ * from process.env right away so they cannot leak into child processes.
+ */
+function takeShellEnv() {
+  if (shellEnvSnapshot === undefined) {
+    shellEnvSnapshot = {};
+    for (const key of GOOGLE_ENV_KEYS) {
+      if (typeof process.env[key] === 'string' && process.env[key]) shellEnvSnapshot[key] = process.env[key];
+      delete process.env[key];
+    }
+  }
+  return shellEnvSnapshot;
+}
+
+/** Developer fallback: first .env that has Google keys, then variables from the shell. */
+function readDevEnvCredentials() {
+  let values = null;
+  for (const p of envCandidatePaths()) {
+    values = readEnvFile(p);
+    if (values) break;
+  }
+  const merged = { ...takeShellEnv(), ...(values || {}) };
+  const clientId = (merged.GOOGLE_CLIENT_ID || '').trim();
+  const clientSecret = (merged.GOOGLE_CLIENT_SECRET || '').trim();
+  if (!clientId || !clientSecret) return null;
+  const port = Math.round(Number(merged.OAUTH_REDIRECT_PORT));
+  return { clientId, clientSecret, redirectPort: Number.isFinite(port) && port > 0 ? port : null };
+}
+
+/**
+ * Load the Google client credentials into this module (never into process.env).
+ * Encrypted credentials.json saved from the UI wins; a developer .env / shell variables
+ * are the fallback.
+ */
 function loadEnvFile({ force = false } = {}) {
   if (envLoaded && !force) return;
   envLoaded = true;
-
+  takeShellEnv(); // scrub before anything else can spawn a child process
   migrateAppWrittenEnv();
-  // Encrypted credentials saved from the UI win; a developer .env is the fallback.
-  if (loadCredentialsJson(getCredentialsJsonPath(), { force })) return;
-  for (const p of envCandidatePaths()) {
-    if (loadEnvFromFile(p, { force })) break;
-  }
+  googleCreds = readStoredCredentials() || readDevEnvCredentials();
 }
 
 /** Force re-read of credentials on next check. */
 function resetEnvCache() {
   envLoaded = false;
-  for (const key of GOOGLE_ENV_KEYS) {
-    delete process.env[key];
-  }
+  googleCreds = null;
+}
+
+/**
+ * Current Google client credentials, or null when none are configured.
+ * @returns {{ clientId: string, clientSecret: string, redirectPort: number | null } | null}
+ */
+function getGoogleCredentials() {
+  loadEnvFile();
+  return googleCreds ? { ...googleCreds } : null;
+}
+
+/** @returns {string | null} */
+function getGoogleClientSecret() {
+  loadEnvFile();
+  return googleCreds ? googleCreds.clientSecret : null;
 }
 
 /** Printable ASCII without spaces — what Google issues for client id / secret. */
@@ -190,7 +265,7 @@ const CLIENT_ID_SUFFIX = '.apps.googleusercontent.com';
 
 /**
  * Persist Desktop OAuth client credentials for the widget
- * to data/credentials.json (encrypted via safeStorage when available).
+ * to data/credentials.json (encrypted via safeStorage; kept in memory only when it is unavailable).
  * @param {{ clientId: string, clientSecret: string, redirectPort?: number | string | null }} input
  *   redirectPort empty / null = choose a free port at each sign-in.
  */
@@ -216,7 +291,7 @@ function saveGoogleCredentials(input) {
     }
   }
 
-  writeSecretJson(getCredentialsJsonPath(), {
+  const { persisted } = saveDoc(CREDENTIALS_SPEC, {
     clientId,
     clientSecret,
     redirectPort,
@@ -224,18 +299,17 @@ function saveGoogleCredentials(input) {
     updatedAt: new Date().toISOString(),
   });
 
-  resetEnvCache();
-  loadEnvFile({ force: true });
-  process.env.GOOGLE_CLIENT_ID = clientId;
-  process.env.GOOGLE_CLIENT_SECRET = clientSecret;
-  if (redirectPort) process.env.OAUTH_REDIRECT_PORT = String(redirectPort);
-  else delete process.env.OAUTH_REDIRECT_PORT;
+  takeShellEnv();
+  googleCreds = { clientId, clientSecret, redirectPort };
+  envLoaded = true;
 
   return {
     configured: true,
     clientId,
     redirectPort,
     jsonPath: getCredentialsJsonPath(),
+    /** false = safeStorage is unavailable: the keys are valid for this session only. */
+    persisted,
   };
 }
 
@@ -250,152 +324,15 @@ function saveGoogleCredentials(input) {
  */
 function getGoogleCredentialsStatus() {
   loadEnvFile();
-  const clientId = process.env.GOOGLE_CLIENT_ID || null;
-  const configured = Boolean(clientId && process.env.GOOGLE_CLIENT_SECRET);
-  // null = automatic (a free port is chosen at each sign-in).
-  const fixed = Number(process.env.OAUTH_REDIRECT_PORT);
-  const redirectPort = Number.isFinite(fixed) && fixed > 0 ? Math.round(fixed) : null;
+  const configured = Boolean(googleCreds);
   return {
     configured,
-    clientId: configured ? clientId : null,
-    redirectPort,
+    clientId: googleCreds ? googleCreds.clientId : null,
+    // null = automatic (a free port is chosen at each sign-in).
+    redirectPort: googleCreds ? googleCreds.redirectPort : null,
     envPath: getCredentialsEnvPath(),
     jsonPath: getCredentialsJsonPath(),
   };
-}
-
-/**
- * Move an unparseable JSON file aside so the next save does not silently
- * overwrite whatever the user had (streak history, settings, tokens).
- */
-function quarantineCorruptFile(filePath, err) {
-  const target = `${filePath}.corrupt-${Date.now()}`;
-  try {
-    fs.renameSync(filePath, target);
-    console.warn(`[config] corrupt JSON moved to ${target}:`, err && err.message ? err.message : err);
-  } catch {
-    // Read-only location (e.g. inside app.asar) — nothing to protect there.
-    console.warn(`[config] corrupt JSON at ${filePath}:`, err && err.message ? err.message : err);
-  }
-}
-
-function readJson(filePath, fallback) {
-  let text;
-  try {
-    text = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return fallback;
-  }
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    quarantineCorruptFile(filePath, err);
-    return fallback;
-  }
-}
-
-/**
- * Crash-safe write: temp file in the same directory, then rename over the target.
- * @param {string} filePath
- * @param {string} body
- * @param {fs.WriteFileOptions} [opts]
- */
-function writeFileAtomic(filePath, body, opts = 'utf8') {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, body, opts);
-  try {
-    fs.renameSync(tmp, filePath);
-  } catch (err) {
-    // Windows: AV / indexer can briefly lock the target. Fall back to a direct write.
-    try {
-      fs.writeFileSync(filePath, body, opts);
-    } finally {
-      try {
-        fs.unlinkSync(tmp);
-      } catch {
-        /* ignore */
-      }
-    }
-    if (err && err.code !== 'EPERM' && err.code !== 'EACCES' && err.code !== 'EBUSY') {
-      console.warn('[config] atomic rename failed:', err.message || err);
-    }
-  }
-}
-
-function writeJson(filePath, data) {
-  writeFileAtomic(filePath, JSON.stringify(data, null, 2), 'utf8');
-}
-
-const SECRET_ENVELOPE = 'glass-tasks/safeStorage@1';
-/** @type {{ isEncryptionAvailable(): boolean, encryptString(s: string): Buffer, decryptString(b: Buffer): string } | null | undefined} */
-let safeStorageOverride;
-
-function getSafeStorage() {
-  if (safeStorageOverride !== undefined) return safeStorageOverride;
-  try {
-    const { safeStorage } = require('electron');
-    return safeStorage && typeof safeStorage.encryptString === 'function' ? safeStorage : null;
-  } catch {
-    return null;
-  }
-}
-
-function canEncrypt() {
-  const ss = getSafeStorage();
-  try {
-    return Boolean(ss && ss.isEncryptionAvailable());
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Secrets (tokens, client secret) are encrypted with Electron safeStorage (DPAPI on Windows).
- * Falls back to plain JSON outside Electron or when encryption is unavailable.
- */
-function writeSecretJson(filePath, data) {
-  let body = JSON.stringify(data, null, 2);
-  if (canEncrypt()) {
-    const enc = getSafeStorage().encryptString(body).toString('base64');
-    body = JSON.stringify({ format: SECRET_ENVELOPE, data: enc });
-  }
-  writeFileAtomic(filePath, body, { encoding: 'utf8', mode: 0o600 });
-}
-
-/**
- * Read a file written by writeSecretJson. Plain-JSON files from older versions
- * are returned as-is and re-saved encrypted when possible.
- */
-function readSecretJson(filePath, fallback) {
-  const raw = readJson(filePath, undefined);
-  if (raw === undefined) return fallback;
-  if (raw && typeof raw === 'object' && raw.format === SECRET_ENVELOPE) {
-    if (!canEncrypt()) {
-      console.warn(`[config] cannot decrypt ${path.basename(filePath)}: safeStorage unavailable`);
-      return fallback;
-    }
-    try {
-      const plain = getSafeStorage().decryptString(Buffer.from(String(raw.data || ''), 'base64'));
-      return JSON.parse(plain);
-    } catch (err) {
-      console.warn(`[config] decrypt ${path.basename(filePath)} failed:`, err && err.message ? err.message : err);
-      return fallback;
-    }
-  }
-  if (canEncrypt() && raw && typeof raw === 'object') {
-    try {
-      writeSecretJson(filePath, raw);
-    } catch {
-      /* keep plaintext; retry next read */
-    }
-  }
-  return raw;
-}
-
-/** Test hook: inject a fake safeStorage (null = unavailable, undefined = real). */
-function setSafeStorageForTests(impl) {
-  safeStorageOverride = impl;
 }
 
 function buildConfig() {
@@ -450,24 +387,39 @@ function dataPath(...parts) {
 
 function hasGoogleCredentials() {
   loadEnvFile();
-  return Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+  return Boolean(googleCreds);
 }
+
+const {
+  readJsonStrict,
+  writeJson,
+  writeFileAtomic,
+  readSecretJson,
+  writeSecretJson,
+  deleteSecretJson,
+  setSafeStorageForTests,
+} = core;
 
 module.exports = {
   ROOT,
   loadEnvFile,
   resetEnvCache,
   readJson,
+  readJsonStrict,
   writeJson,
   writeFileAtomic,
   readSecretJson,
   writeSecretJson,
+  deleteSecretJson,
   setSafeStorageForTests,
+  setDataRootForTests,
   savedPinnedPort,
   loadConfig,
   dataPath,
   getDataRoot,
   hasGoogleCredentials,
+  getGoogleCredentials,
+  getGoogleClientSecret,
   getCredentialsEnvPath,
   getCredentialsJsonPath,
   saveGoogleCredentials,

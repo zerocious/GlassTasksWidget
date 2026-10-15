@@ -17,7 +17,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
-const { loadConfig, getGoogleCredentialsStatus, saveGoogleCredentials } = require('../lib/config');
+const { loadConfig, getGoogleCredentialsStatus, getGoogleClientSecret, saveGoogleCredentials } = require('../lib/config');
 const {
   getWidgetData,
   loginGoogle,
@@ -739,8 +739,8 @@ function registerIpc() {
     const existing = getGoogleCredentialsStatus();
     const clientId = String(payload.clientId || '').trim();
     let clientSecret = String(payload.clientSecret || '').trim();
-    if (!clientSecret && existing.configured && clientId === existing.clientId && process.env.GOOGLE_CLIENT_SECRET) {
-      clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    if (!clientSecret && existing.configured && clientId === existing.clientId) {
+      clientSecret = getGoogleClientSecret() || '';
     }
     return storeCredentials({ clientId, clientSecret, redirectPort: payload.redirectPort });
   });
