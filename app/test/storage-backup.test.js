@@ -179,7 +179,9 @@ test('hostile import cannot blow up the history: future days dropped, totals cap
   const habits = {};
   for (let i = 0; i < 50; i += 1) habits[`h${i}`] = { months };
   const started = process.hrtime.bigint();
-  const report = backup.importData(JSON.stringify({ format: 'glass-tasks-export', createdAt: 'x'.repeat(1000), habits }));
+  const report = backup.importData(JSON.stringify({ format: 'glass-tasks-export', createdAt: 'x'.repeat(1000), habits }), {
+    today: '2026-10-14',
+  });
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   assert.equal(report.daysAdded, 0, 'nothing from the future');
   assert.equal(report.createdAt, null, 'unexpected createdAt is not echoed back');
@@ -190,7 +192,7 @@ test('hostile import cannot blow up the history: future days dropped, totals cap
   const dates = Array.from({ length: 3000 }, (_, i) => day(i));
   for (let i = 0; i < 400; i += 1) many[`m${i}`] = { dates };
   assert.throws(
-    () => backup.importData(JSON.stringify({ format: 'glass-tasks-export', habits: many })),
+    () => backup.importData(JSON.stringify({ format: 'glass-tasks-export', habits: many }), { today: '2026-10-14' }),
     /слишком много отметок/
   );
 });
@@ -252,11 +254,12 @@ test('import stops decoding as soon as the day cap is exceeded (bounded work and
   const habits = {};
   for (let i = 0; i < 500; i += 1) habits[`h${i}`] = { months };
   const started = process.hrtime.bigint();
-  assert.throws(() => backup.parseImport(JSON.stringify({ format: 'glass-tasks-export', habits })), /слишком много отметок/);
+  const today = { today: '2026-10-14' };
+  assert.throws(() => backup.parseImport(JSON.stringify({ format: 'glass-tasks-export', habits }), today), /слишком много отметок/);
   const ms = Number(process.hrtime.bigint() - started) / 1e6;
   assert.ok(ms < 1500, `took ${ms} ms`);
   habits.h500 = { months };
-  assert.throws(() => backup.parseImport(JSON.stringify({ format: 'glass-tasks-export', habits })), /слишком много привычек/);
+  assert.throws(() => backup.parseImport(JSON.stringify({ format: 'glass-tasks-export', habits }), today), /слишком много привычек/);
 });
 
 test('export includes logs only when asked', () => {
@@ -268,4 +271,50 @@ test('export includes logs only when asked', () => {
   assert.equal('logs' in JSON.parse(fs.readFileSync(out, 'utf8')), false);
   backup.exportJson(out, { logsDir: logs, includeLogs: true });
   assert.equal(JSON.parse(fs.readFileSync(out, 'utf8')).logs.length, 1);
+});
+
+test('export stays valid, importable JSON and catches tokens at the start of log lines', () => {
+  populatedProfile();
+  const logs = tmpDir('gt-logs-');
+  const stale = '1//0gStaleButValidRefreshTokenXYZabcdef';
+  fs.writeFileSync(
+    path.join(logs, 'main.log'),
+    [
+      '{"url":"https://x/revoke?token=abc\\"def","quote":"he said \\"hi\\""}',
+      stale, // a whole line that is a token (old, not the live one)
+      `\t${'ya29.a0AfStale'}`,
+      `${REFRESH.slice(5)} at line start`, // live-token fragment
+      'eyJhbGciOiJSUzI1NiJ9.eyJlbWFpbCI6InhAeC5jb20ifQ.c2lnbmF0dXJlLXg',
+    ].join('\n')
+  );
+  const out = path.join(tmpDir(), 'export.json');
+  backup.exportJson(out, { logsDir: logs, includeLogs: true, habitTitles: { 'habit-1': 'Бег\n"утром"' } });
+  const text = fs.readFileSync(out, 'utf8');
+  const doc = JSON.parse(text); // must parse
+  const logText = doc.logs[0].text;
+  for (const leak of [stale, 'ya29.a0AfStale', REFRESH.slice(5), 'eyJhbGciOiJSUzI1NiJ9']) {
+    assert.equal(logText.includes(leak), false, leak);
+  }
+  assert.ok(logText.includes('token=[скрыто]\\"def'), 'an escaped quote after a value is kept');
+  assert.ok(logText.includes('he said \\"hi\\"'), 'ordinary text and escapes intact');
+  assert.equal(doc.habits['habit-1'].title, 'Бег\n"утром"');
+  assert.equal(backup.importData(text, { includeSettings: false }).daysAdded, 0, 'export re-imports');
+});
+
+test('CSV keeps the user\'s own text: ?code=, Bearer, refresh_token= in notes are not secrets', () => {
+  const notes = 'join https://club.example/join?code=SPRING2026 — explain Bearer auth; refresh_token=docs';
+  const { text } = backup.tasksToCsv({ tasks: [{ id: 't', title: 'Клуб', notes }] }, ['GOCSPX-live-secret-value']);
+  assert.ok(text.includes('?code=SPRING2026'));
+  assert.ok(text.includes('Bearer auth'));
+  assert.ok(text.includes('refresh_token=docs'));
+  const leaked = backup.tasksToCsv({ tasks: [{ id: 't', title: 'x GOCSPX-live-secret-value' }] }, ['GOCSPX-live-secret-value']).text;
+  assert.equal(leaked.includes('GOCSPX-live'), false, 'a real credential is still removed');
+});
+
+test('CSV neutralising stays linear on long runs of tabs', () => {
+  const started = process.hrtime.bigint();
+  backup.csvCell(`${'\t'.repeat(65536)}x`);
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(ms < 100, `${ms} ms`);
+  assert.equal(backup.csvCell('\t \t=1'), `"\t \t'=1"`);
 });

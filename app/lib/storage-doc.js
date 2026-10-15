@@ -154,9 +154,18 @@ function createJsonDoc(spec) {
     } catch {
       return null;
     }
-    if (text.startsWith(`{"format":"${SECRET_ENVELOPE}"`)) return text;
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && parsed.format === SECRET_ENVELOPE) return text; // already ciphertext
+    } catch {
+      /* not JSON: plaintext garbage, wrap it */
+    }
     if (!canEncrypt()) return null;
-    return JSON.stringify({ format: SECRET_ENVELOPE, schemaVersion: null, data: encryptText(text) });
+    try {
+      return JSON.stringify({ format: SECRET_ENVELOPE, schemaVersion: null, data: encryptText(text) });
+    } catch {
+      return null; // safeStorage claims availability but fails: never fall back to plaintext
+    }
   }
 
   /** Copy `src` to `<name>.<suffix>` once (an existing copy is the older, more valuable one). */
@@ -240,6 +249,8 @@ function createJsonDoc(spec) {
     const recentlyLocked = unreadableAt && Date.now() - unreadableAt < UNREADABLE_COOLDOWN_MS;
     const main = parseDocFile(file(), recentlyLocked ? 0 : READ_RETRIES);
     if (main.status !== 'unreadable') unreadableAt = 0;
+    // Read (or found absent) after all: no blind overwrite to guard against any more.
+    if (main.status === 'ok' || main.status === 'missing') unreadOnDisk = false;
     if (main.status === 'ok') return accept(main, file(), false);
     if (main.status === 'missing') return spec.defaults();
     if (main.status === 'locked') {
@@ -254,7 +265,9 @@ function createJsonDoc(spec) {
       // Locked by another program: leave it alone, fall back to the last good copy if any.
       unreadOnDisk = true;
       unreadableAt = Date.now();
-      const bak = spec.lastGood ? parseDocFile(bakFile(), 0) : null;
+      // Tools that lock a file at login often lock its sibling too: retry the copy as well,
+      // unless it is a repeat within the cooldown.
+      const bak = spec.lastGood ? parseDocFile(bakFile(), recentlyLocked ? 0 : READ_RETRIES) : null;
       reportStorageIssue({
         kind: 'unreadable',
         file: spec.name,
@@ -461,11 +474,14 @@ function listDocs() {
 }
 
 const TEMP_FILE_RE = /\.\d+\.\d+\.tmp$/;
+/** Quarantined secrets from versions before 2026-10: may hold a cut-off plaintext token or key. */
+const LEGACY_SECRET_COPY_RE = /^(?:tokens|credentials)\.json\.corrupt-\d+$/;
 const STALE_TEMP_MS = 10 * 60 * 1000;
 
 /**
  * Temp files from a write interrupted by a crash or power cut: never valid data, and an
  * older version's may hold secrets in clear. Fresh ones may belong to a write in progress.
+ * Also old quarantined copies of tokens.json / credentials.json (useless, possibly plaintext).
  */
 function removeStaleTempFiles() {
   for (const dir of [dataPath(), dataPath('backups')]) {
@@ -476,10 +492,11 @@ function removeStaleTempFiles() {
       continue;
     }
     for (const name of names) {
-      if (!TEMP_FILE_RE.test(name)) continue;
+      const legacySecret = dir === dataPath() && LEGACY_SECRET_COPY_RE.test(name);
+      if (!TEMP_FILE_RE.test(name) && !legacySecret) continue;
       const full = path.join(dir, name);
       const st = statSafe(full);
-      if (st && st.isFile() && Date.now() - st.mtimeMs > STALE_TEMP_MS) {
+      if (st && st.isFile() && (legacySecret || Date.now() - st.mtimeMs > STALE_TEMP_MS)) {
         try {
           fs.unlinkSync(full);
         } catch {

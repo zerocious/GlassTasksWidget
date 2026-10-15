@@ -1,6 +1,7 @@
 'use strict';
 
 const { createJsonDoc } = require('./storage-doc');
+const { reportStorageIssue } = require('./storage-events');
 
 /**
  * @typedef {'dark' | 'light'} Theme
@@ -93,7 +94,12 @@ const settingsDoc = createJsonDoc({
   defaults: () => ({}),
 });
 
-/** Electron modifier names (any case) → canonical name, in canonical order. */
+/**
+ * Electron modifier names (any case) → canonical name. Super / Meta / Command / AltGr map to
+ * null: Electron 33 on Windows drops them when it calls RegisterHotKey, so «Super+A» would
+ * register a bare A (and «Control+Super+C» a plain Ctrl+C).
+ * @type {Record<string, string | null>}
+ */
 const MODIFIERS = {
   control: 'Control',
   ctrl: 'Control',
@@ -101,14 +107,14 @@ const MODIFIERS = {
   commandorcontrol: 'Control',
   alt: 'Alt',
   option: 'Alt',
-  altgr: 'AltGr',
   shift: 'Shift',
-  super: 'Super',
-  meta: 'Super',
-  command: 'Super',
-  cmd: 'Super',
+  altgr: null,
+  super: null,
+  meta: null,
+  command: null,
+  cmd: null,
 };
-const MODIFIER_ORDER = ['Control', 'Alt', 'AltGr', 'Shift', 'Super'];
+const MODIFIER_ORDER = ['Control', 'Alt', 'Shift'];
 
 /** Non-letter keys a hotkey may use (lower-case → canonical). */
 const NAMED_KEYS = Object.fromEntries(
@@ -116,7 +122,8 @@ const NAMED_KEYS = Object.fromEntries(
     'Tab', 'Space', 'Backspace', 'Delete', 'Insert', 'Return', 'Enter', 'Escape', 'Esc',
     'Up', 'Down', 'Left', 'Right', 'Home', 'End', 'PageUp', 'PageDown', 'PrintScreen',
     'num0', 'num1', 'num2', 'num3', 'num4', 'num5', 'num6', 'num7', 'num8', 'num9',
-    'numadd', 'numsub', 'nummult', 'numdiv', 'numdec',
+    'numadd', 'numsub', 'nummult', 'numdiv', 'numdec', 'Plus', 'Capslock', 'Numlock', 'Scrolllock',
+    'VolumeUp', 'VolumeDown', 'VolumeMute', 'MediaNextTrack', 'MediaPreviousTrack', 'MediaStop', 'MediaPlayPause',
   ].map((k) => [k.toLowerCase(), k])
 );
 
@@ -131,8 +138,9 @@ const RESERVED_ACCELERATORS = new Set([
 ]);
 
 /**
- * Canonical, safe accelerator or null. Requires Control, Alt, AltGr or Super (Shift alone
- * still types), exactly one key, and no reserved system combo; F13–F24 may stand alone.
+ * Canonical, safe accelerator or null. Requires Control or Alt (Shift alone still types),
+ * exactly one key (modifiers in any order), and no reserved system combo; F13–F24 may stand
+ * alone. Super / Meta / AltGr are refused (see MODIFIERS).
  * @param {unknown} value e.g. "ctrl+alt+w"
  * @returns {string | null} e.g. "Control+Alt+W"
  */
@@ -147,9 +155,10 @@ function normalizeAccelerator(value) {
     const token = part.trim();
     if (!/^[A-Za-z0-9]+$/.test(token)) return null;
     const lower = token.toLowerCase();
-    if (MODIFIERS[lower]) {
-      if (mods.has(MODIFIERS[lower]) || key) return null;
-      mods.add(MODIFIERS[lower]);
+    if (Object.hasOwn(MODIFIERS, lower)) {
+      const mod = MODIFIERS[lower];
+      if (!mod || mods.has(mod)) return null;
+      mods.add(mod);
       continue;
     }
     if (key) return null;
@@ -160,13 +169,25 @@ function normalizeAccelerator(value) {
   }
   if (!key) return null;
   const bareOk = /^F(1[3-9]|2[0-4])$/.test(key);
-  if (!bareOk && !['Control', 'Alt', 'AltGr', 'Super'].some((m) => mods.has(m))) return null;
+  if (!bareOk && !mods.has('Control') && !mods.has('Alt')) return null;
   const accel = [...MODIFIER_ORDER.filter((m) => mods.has(m)), key].join('+');
   return RESERVED_ACCELERATORS.has(accel) ? null : accel;
 }
 
 function normalizeHotkey(value, fallback) {
   return normalizeAccelerator(value) || fallback;
+}
+
+const HOTKEY_KEYS = /** @type {const} */ (['toggleHotkey', 'switchViewHotkey']);
+
+/** Tell the user a hotkey from settings.json or a settings change was not accepted. */
+function reportRejectedHotkey(value, used) {
+  reportStorageIssue({
+    kind: 'hotkey-rejected',
+    file: 'settings.json',
+    repeat: true,
+    message: `Сочетание «${String(value).slice(0, 64)}» не принято: оно занимает системную клавишу, не содержит Ctrl или Alt либо не поддерживается Windows. Используется «${used}».`,
+  });
 }
 
 /**
@@ -219,7 +240,13 @@ function normalizeSettings(raw) {
  */
 function loadSettings() {
   if (settingsCache) return settingsCache;
-  settingsCache = normalizeSettings(settingsDoc.read());
+  const raw = settingsDoc.read();
+  settingsCache = normalizeSettings(raw);
+  for (const key of HOTKEY_KEYS) {
+    if (typeof raw[key] === 'string' && raw[key].trim() && !normalizeAccelerator(raw[key])) {
+      reportRejectedHotkey(raw[key], settingsCache[key]);
+    }
+  }
   return settingsCache;
 }
 
@@ -229,7 +256,15 @@ function loadSettings() {
  */
 function saveSettings(patch) {
   const current = loadSettings();
-  const next = normalizeSettings({ ...current, ...patch });
+  const accepted = { ...patch };
+  for (const key of HOTKEY_KEYS) {
+    // A rejected hotkey keeps the current one instead of silently resetting it to the default.
+    if (key in accepted && !normalizeAccelerator(accepted[key])) {
+      reportRejectedHotkey(accepted[key], current[key]);
+      delete accepted[key];
+    }
+  }
+  const next = normalizeSettings({ ...current, ...accepted });
 
   // Skip disk write when nothing meaningful changed (e.g. same pos after snap).
   // DEFAULTS lists every setting, so a new key can't be forgotten here.
