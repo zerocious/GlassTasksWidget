@@ -13,6 +13,7 @@ const remindersDoc = createJsonDoc({
   name: 'reminders.json',
   label: 'журнал напоминаний',
   version: 1,
+  rereadsEveryTime: true,
   defaults: () => ({}),
 });
 

@@ -20,6 +20,8 @@ test('accelerators are canonicalised (case, aliases, modifier order)', () => {
   assert.equal(normalizeAccelerator('Control+Plus'), 'Control+Plus');
   assert.equal(normalizeAccelerator('alt+mediaplaypause'), 'Alt+MediaPlayPause');
   assert.equal(normalizeAccelerator('Control+Shift+volumeup'), 'Control+Shift+VolumeUp');
+  assert.equal(normalizeAccelerator('Control+`'), 'Control+`', 'console-style toggle');
+  assert.equal(normalizeAccelerator('alt+shift+/'), 'Alt+Shift+/');
   assert.equal(normalizeAccelerator('F13'), 'F13', 'keys nobody types may stand alone');
 });
 
@@ -30,7 +32,7 @@ test('accelerators that would hijack typing or system keys are rejected', () => 
     'Control+V', 'ctrl+c', 'CmdOrCtrl+X', 'CommandOrControl+v', 'Control+Z', 'Control+A', 'Control+Insert',
     'Alt+F4', 'alt+f4', 'Alt+Tab', 'Alt+Escape', 'Alt+Space', 'Control+Escape',
     'Control+Alt+Delete', 'Control+Shift+Escape',
-    'Control+Alt', 'Control+', '+W', 'Control+W+Q', 'Control+Alt+Control+W', 'Control+Ö', 'Control+F99',
+    '`', 'Shift+=', 'Control+Alt', 'Control+', '+W', 'Control+W+Q', 'Control+Alt+Control+W', 'Control+Ö', 'Control+F99',
     // Electron 33 on Windows drops Super / AltGr: these would register a bare key or Ctrl+C
     'Super+A', 'AltGr+A', 'Meta+Shift+C', 'Control+Super+C', 'Alt+Super+F4', 'Cmd+Q', 'Command+Alt+W',
     '', null, 42, 'x'.repeat(100),
