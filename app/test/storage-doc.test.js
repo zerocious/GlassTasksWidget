@@ -356,20 +356,30 @@ test('a locked .bak gets retries too when the main file is locked at startup', (
   assert.ok(fs.existsSync(path.join(root, doc.spec.name)));
 });
 
-test('after a lock clears and the file is read, the next write makes no «unread» copy', (t) => {
+test('lock lifted: a doc read before every write drops the guard, a cached one keeps it', (t) => {
   const root = freshDataRoot();
-  const doc = testDoc();
-  writeRaw(root, doc.spec.name, { schemaVersion: 2, items: ['x'] });
+  const fresh = testDoc({ rereadsEveryTime: true });
+  const cached = testDoc();
+  for (const doc of [fresh, cached]) writeRaw(root, doc.spec.name, { schemaVersion: 2, items: ['real'] });
   const realRead = fs.readFileSync;
   const lock = t.mock.method(fs, 'readFileSync', function (p, ...rest) {
-    if (p === doc.file()) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    if (p === fresh.file() || p === cached.file()) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
     return realRead.call(this, p, ...rest);
   });
-  doc.read();
+  // A caching owner (settings, streaks) gets defaults here and keeps them in memory.
+  const cachedView = cached.read();
+  fresh.read();
   lock.mock.restore();
-  assert.deepEqual(doc.read(), { items: ['x'] });
-  doc.write({ items: ['y'] });
-  assert.equal(names(root).some((n) => n.includes('.unread-')), false);
+  assert.deepEqual(fresh.read(), { items: ['real'] });
+  assert.deepEqual(cached.read(), { items: ['real'] }, 'e.g. migrateAllDocs re-reading later');
+
+  fresh.write({ items: ['next'] });
+  assert.equal(names(root).some((n) => n.startsWith(`${fresh.spec.name}.unread-`)), false, 'no spurious copy');
+
+  cached.write(cachedView); // the owner saves what it has: the defaults
+  const copy = names(root).find((n) => n.startsWith(`${cached.spec.name}.unread-`));
+  assert.ok(copy, 'real content preserved before the defaults overwrite it');
+  assert.deepEqual(readRaw(root, copy).items, ['real']);
 });
 
 test('encrypted doc copies: an existing envelope (any key order) is not wrapped twice; encryption errors never escape read()', () => {
