@@ -491,8 +491,29 @@ function writeSecretJson(filePath, data) {
  */
 function readSecretJson(filePath, fallback) {
   if (memorySecrets.has(filePath)) return JSON.parse(/** @type {string} */ (memorySecrets.get(filePath)));
-  const raw = readJson(filePath, undefined);
-  if (raw === undefined) return fallback;
+  let text;
+  try {
+    text = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return fallback;
+  }
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    // Unlike other files, no .corrupt copy: a cut-off legacy plaintext secret would stay in
+    // clear forever, and a broken token or key is useless anyway (sign in / import again).
+    deleteSecretJson(filePath);
+    reportStorageIssue({
+      kind: 'secret-corrupt',
+      file: path.basename(filePath),
+      repeat: true,
+      message: `${path.basename(filePath)} был повреждён и удалён. ${
+        path.basename(filePath) === 'tokens.json' ? 'Войдите в Google снова.' : 'Загрузите ключи Google снова.'
+      }`,
+    });
+    return fallback;
+  }
   if (raw && typeof raw === 'object' && raw.format === SECRET_ENVELOPE) {
     if (!canEncrypt()) {
       reportStorageIssue({
