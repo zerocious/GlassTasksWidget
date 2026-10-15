@@ -29,8 +29,9 @@ const fakeSafeStorage = {
 };
 
 function resetAll() {
+  core.unfreezeWritesForTests();
   config.setSafeStorageForTests(undefined);
-  core.resetSecretMemoryForTests();
+  core.forgetSecretMemory();
   status.clearStorageEvents();
   files.resetStorageFilesForTests();
   resetSettingsCache();
@@ -41,18 +42,22 @@ function resetAll() {
 /**
  * Point storage at a fresh temp folder for the current test file section.
  * Call inside `beforeEach`; the returned object's `dir` is the data folder.
- * @returns {{ dir: string, cleanup: () => void }}
+ * @returns {{ dir: string, base: string, cleanup: () => void }}
  */
 function useTempDataRoot() {
   resetAll();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-data-'));
+  // <tmp>/gt-xxxx/data mirrors the real layout (<userData>/data) and keeps siblings (logs, exports) apart.
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-'));
+  const dir = path.join(base, 'data');
+  fs.mkdirSync(dir);
   config.setDataRootForTests(dir);
   return {
     dir,
+    base,
     cleanup() {
       resetAll();
       config.setDataRootForTests(null);
-      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(base, { recursive: true, force: true });
     },
   };
 }

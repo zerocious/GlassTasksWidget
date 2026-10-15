@@ -951,6 +951,7 @@ if (!gotTheLock) {
     const settings = loadSettings();
     applyAutostart(settings.autostart);
     registerIpc();
+    require('./data-ipc').registerDataIpc({ isFromWidget, getMainWindow: () => mainWindow });
     createWindow();
     createTray();
     registerHotkeys(settings);

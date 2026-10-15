@@ -63,4 +63,21 @@ contextBridge.exposeInMainWorld('widgetApi', {
   minimize: () => ipcRenderer.send('widget:minimize'),
   close: () => ipcRenderer.send('widget:close'),
   openExternal: (url) => ipcRenderer.send('widget:open-external', url),
+
+  // --- stored data: status, backups, export / import, delete-all (electron/data-ipc.js) ---
+  dataStatus: () => ipcRenderer.invoke('data:status'),
+  dataBackupsList: () => ipcRenderer.invoke('data:backups-list'),
+  dataBackupNow: () => ipcRenderer.invoke('data:backup-now'),
+  dataExportJson: (opts) =>
+    ipcRenderer.invoke('data:export-json', { includeLogs: Boolean(opts && opts.includeLogs) }),
+  dataExportCsv: () => ipcRenderer.invoke('data:export-csv'),
+  dataImport: () => ipcRenderer.invoke('data:import'),
+  dataRestoreBackup: (name) =>
+    ipcRenderer.invoke('data:restore-backup', { name: typeof name === 'string' ? name : '' }),
+  dataDeleteAll: () => ipcRenderer.invoke('data:delete-all'),
+  onDataEvent: (handler) => {
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on('data:event', listener);
+    return () => ipcRenderer.removeListener('data:event', listener);
+  },
 });

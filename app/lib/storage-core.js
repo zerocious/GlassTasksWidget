@@ -99,12 +99,31 @@ function readJson(filePath, fallback) {
 }
 
 /**
+ * After «delete all my data» nothing may re-create a file before the app restarts
+ * (a late settings save or cache flush would bring back personal data).
+ */
+let writesFrozen = false;
+
+function freezeWrites() {
+  writesFrozen = true;
+}
+
+/** Test hook. */
+function unfreezeWritesForTests() {
+  writesFrozen = false;
+}
+
+/**
  * Crash-safe write: temp file in the same directory, then rename over the target.
  * @param {string} filePath
  * @param {string} body
  * @param {fs.WriteFileOptions} [opts]
  */
 function writeFileAtomic(filePath, body, opts = 'utf8') {
+  if (writesFrozen) {
+    console.warn(`[config] write to ${path.basename(filePath)} skipped: storage is frozen`);
+    return;
+  }
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, body, opts);
@@ -129,6 +148,34 @@ function writeFileAtomic(filePath, body, opts = 'utf8') {
 
 function writeJson(filePath, data) {
   writeFileAtomic(filePath, JSON.stringify(data, null, 2), 'utf8');
+}
+
+/**
+ * Delete `*.tmp` files left behind by a crash in the middle of writeFileAtomic.
+ * Only files older than `maxAgeMs` (a write in progress is never touched).
+ * @returns {string[]} removed file names
+ */
+function removeStaleTempFiles(dir, maxAgeMs = 60 * 60 * 1000) {
+  const removed = [];
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    if (!name.endsWith('.tmp')) continue;
+    const file = path.join(dir, name);
+    try {
+      if (Date.now() - fs.statSync(file).mtimeMs >= maxAgeMs) {
+        fs.unlinkSync(file);
+        removed.push(name);
+      }
+    } catch {
+      /* gone or locked: leave it */
+    }
+  }
+  return removed;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -295,8 +342,8 @@ function setSafeStorageForTests(impl) {
   safeStorageOverride = impl;
 }
 
-/** Test hook: drop in-memory secrets and the "already reported" markers. */
-function resetSecretMemoryForTests() {
+/** Drop in-memory secrets and the "already reported" markers (wipe, tests). */
+function forgetSecretMemory() {
   secretMemory.clear();
   reportedPlaintext.clear();
 }
@@ -311,6 +358,9 @@ module.exports = {
   readJson,
   writeJson,
   writeFileAtomic,
+  freezeWrites,
+  unfreezeWritesForTests,
+  removeStaleTempFiles,
   readSecretJson,
   writeSecretJson,
   deleteSecretJson,
@@ -318,5 +368,5 @@ module.exports = {
   canEncrypt,
   plaintextSecretsAllowed,
   setSafeStorageForTests,
-  resetSecretMemoryForTests,
+  forgetSecretMemory,
 };
