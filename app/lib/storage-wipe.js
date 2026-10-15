@@ -32,8 +32,12 @@ const OWN_FILES = new Set([
   'tokens.json',
   'credentials.json',
 ]);
-/** Copies the storage layer makes next to a file: last good, migration, unread, quarantine, temp. */
-const OWN_SUFFIX_RE = /^(?:\.bak|\.v\d+\.bak|\.unread-\d+\.bak|\.corrupt-\d+|\.\d+\.\d+\.tmp)?$/;
+/**
+ * Copies the storage layer makes next to a file, possibly chained: last good / migration /
+ * unread copy, then a quarantine stamp, then a temp suffix (e.g. settings.json.bak.corrupt-1,
+ * streaks.json.bak.123.456.tmp).
+ */
+const OWN_SUFFIX_RE = /^(?:\.bak|\.v\d+\.bak|\.unread-\d+\.bak)?(?:\.corrupt-\d+)?(?:\.\d+\.\d+\.tmp)?$/;
 const BACKUP_FILE_RE = /^backup-\d{8}-\d{6}-(?:weekly|manual|pre-import)(?:-\d+)?\.json(?:\.\d+\.\d+\.tmp)?$/;
 
 function isOwnDataFile(name) {
@@ -114,12 +118,42 @@ async function wipeAllData(opts = {}) {
     }
   }
 
-  const unlink = (full, label) => {
+  // Antivirus / indexers lock files for a moment on Windows: retry like rmSync did.
+  const RETRY_CODES = new Set(['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY']);
+  const withRetry = async (fn) => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return fn();
+      } catch (err) {
+        if (!err || !RETRY_CODES.has(err.code) || attempt >= 3) throw err;
+        await new Promise((r) => setTimeout(r, 150 * (attempt + 1)));
+      }
+    }
+  };
+  const unlink = async (full, label) => {
     try {
-      fs.unlinkSync(full);
+      await withRetry(() => fs.unlinkSync(full));
       removed.push(label);
     } catch (err) {
-      if (err && err.code !== 'ENOENT') failed.push({ path: label, error: err.code || String(err) });
+      if (err && err.code === 'ENOENT') return;
+      // A secret that cannot be deleted is at least emptied. Written directly: writes through
+      // the storage layer are frozen by now.
+      if (/^(?:tokens|credentials)\.json$/.test(path.basename(full))) {
+        try {
+          fs.writeFileSync(full, '{}');
+        } catch {
+          /* reported below */
+        }
+      }
+      failed.push({ path: label, error: (err && err.code) || String(err) });
+    }
+  };
+  const rmdir = async (dir, label) => {
+    try {
+      await withRetry(() => fs.rmdirSync(dir));
+      removed.push(label);
+    } catch {
+      /* foreign files remain: the folder stays */
     }
   };
   let entries = [];
@@ -132,30 +166,25 @@ async function wipeAllData(opts = {}) {
   for (const entry of entries) {
     const full = path.join(root, entry.name);
     if (entry.isFile() && isOwnDataFile(entry.name)) {
-      unlink(full, entry.name);
+      await unlink(full, entry.name);
     } else if (entry.isDirectory() && entry.name === 'backups') {
-      for (const b of fs.readdirSync(full, { withFileTypes: true })) {
-        if (b.isFile() && BACKUP_FILE_RE.test(b.name)) unlink(path.join(full, b.name), `backups/${b.name}`);
+      let backups = [];
+      try {
+        backups = fs.readdirSync(full, { withFileTypes: true });
+      } catch (err) {
+        // Keep going: the .env and Chromium steps below must still run.
+        failed.push({ path: 'backups', error: (err && err.code) || String(err) });
+      }
+      for (const b of backups) {
+        if (b.isFile() && BACKUP_FILE_RE.test(b.name)) await unlink(path.join(full, b.name), `backups/${b.name}`);
         else kept.push(`backups/${b.name}`);
       }
-      try {
-        fs.rmdirSync(full);
-        removed.push('backups');
-      } catch {
-        /* still holds foreign files */
-      }
+      await rmdir(full, 'backups');
     } else {
       kept.push(entry.name);
     }
   }
-  if (rootExists) {
-    try {
-      fs.rmdirSync(root);
-      removed.push(root);
-    } catch {
-      /* foreign files remain: the folder stays */
-    }
-  }
+  if (rootExists) await rmdir(root, root);
 
   // Keys an older version wrote to userData/.env. Never the developer's app/.env.
   const envPath = getCredentialsEnvPath();

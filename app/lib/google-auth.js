@@ -213,7 +213,9 @@ async function revokeAtGoogle(token) {
   } catch (err) {
     const status = err && err.response && err.response.status;
     // 400 invalid_token: Google no longer honours it — the goal of revoking is reached.
-    if (status === 400) return;
+    // Any other 400 (e.g. a proxy refusing CONNECT) means Google never saw the request.
+    const data = err && err.response && err.response.data;
+    if (status === 400 && data && data.error === 'invalid_token') return;
     const reason = status ? `HTTP ${status}` : (err && (err.code || err.name)) || 'error';
     throw codedError(`revoke failed (${/^[\w .-]{1,40}$/.test(String(reason)) ? reason : 'error'})`, 'revoke_failed');
   } finally {
@@ -226,15 +228,18 @@ async function revokeAtGoogle(token) {
  * Never throws: logout must work offline too.
  * @returns {Promise<'revoked' | 'failed' | 'none' | 'locked'>}
  *   failed: the grant may still be valid at Google (offline, timeout, server error);
- *   locked: an encrypted token exists but safeStorage cannot open it, so it was not revoked.
+ *   locked: a token file exists but could not be read (safeStorage unavailable or failing,
+ *     file locked), so nothing was revoked.
  *   For both, the user should remove access at https://myaccount.google.com/permissions.
  */
 async function revokeAndClearTokens() {
   const stored = describeSecretFile(tokensFile());
   const saved = loadSavedTokens();
   const token = saved && (saved.refresh_token || saved.access_token);
+  // A token file exists but gave no token (DPAPI unavailable, key changed after a profile
+  // move, file locked): it could not be revoked, so say so instead of «nothing to revoke».
   /** @type {'revoked' | 'failed' | 'none' | 'locked'} */
-  let result = stored === 'locked' ? 'locked' : 'none';
+  let result = stored === 'missing' || stored === 'memory' ? 'none' : 'locked';
   if (token) {
     try {
       await revokeAtGoogle(token);

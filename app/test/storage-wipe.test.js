@@ -156,3 +156,45 @@ test('wipe reports whether the Google grant was revoked', async () => {
   freshDataRoot();
   assert.equal((await wipeAllData({ freeze: false })).revoke, 'none');
 });
+
+test('wipe also removes the storage layer\'s chained copies (bak.corrupt, bak.tmp, …)', async () => {
+  const root = freshDataRoot();
+  const chained = [
+    'settings.json.bak.corrupt-17',
+    'streaks.json.bak.123.1700000000000.tmp',
+    'offline-cache.json.v0.bak.12.1700000000000.tmp',
+    'offline-cache.json.unread-5.bak.1.2.tmp',
+    'streaks.json.corrupt-9.3.4.tmp',
+  ];
+  for (const name of chained) fs.writeFileSync(path.join(root, name), 'x');
+  fs.writeFileSync(path.join(root, 'settings.json.backup-mine'), 'not ours');
+  const result = await wipeAllData({ freeze: false });
+  assert.deepEqual(fs.readdirSync(root), ['settings.json.backup-mine']);
+  assert.deepEqual(result.kept, ['settings.json.backup-mine']);
+});
+
+test('wipe retries files locked for a moment and survives an unreadable backups folder', async (t) => {
+  const root = freshDataRoot();
+  settingsStore.saveSettings({ theme: 'light' });
+  fs.mkdirSync(path.join(root, 'backups'));
+  const target = path.join(root, 'settings.json');
+  const realUnlink = fs.unlinkSync;
+  const realReaddir = fs.readdirSync;
+  let busy = 2;
+  t.mock.method(fs, 'unlinkSync', function (p, ...rest) {
+    if (p === target && busy-- > 0) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    return realUnlink.call(this, p, ...rest);
+  });
+  t.mock.method(fs, 'readdirSync', function (p, ...rest) {
+    if (p === path.join(root, 'backups')) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+    return realReaddir.call(this, p, ...rest);
+  });
+  const calls = [];
+  const result = await wipeAllData({
+    freeze: false,
+    session: { clearStorageData: async () => calls.push('storage'), clearCache: async () => calls.push('cache') },
+  });
+  assert.equal(fs.existsSync(target), false, 'deleted on a retry');
+  assert.deepEqual(result.failed, [{ path: 'backups', error: 'EACCES' }]);
+  assert.deepEqual(calls, ['storage', 'cache'], 'later steps still ran');
+});

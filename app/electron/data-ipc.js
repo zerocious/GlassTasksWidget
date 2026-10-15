@@ -30,7 +30,8 @@ const BACKUP_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const GOOGLE_PERMISSIONS_URL = 'https://myaccount.google.com/permissions';
 
 /** The only page allowed to use these channels. */
-const WIDGET_PAGE_URL = pathToFileURL(path.join(__dirname, '..', 'src', 'index.html')).href;
+const WIDGET_PAGE = path.join(__dirname, '..', 'src', 'index.html');
+const WIDGET_PAGE_URL = pathToFileURL(WIDGET_PAGE).href;
 
 function errorResult(err) {
   return { ok: false, message: err && err.message ? err.message : String(err) };
@@ -47,9 +48,28 @@ function isTrustedSender(event, win, isWindows = process.platform === 'win32') {
   if (!win || event.sender !== win.webContents) return false;
   const frame = event.senderFrame;
   if (!frame || frame !== win.webContents.mainFrame) return false;
-  const url = String(frame.url).split('#')[0];
-  // Windows paths are case-insensitive (drive letter, folder names): compare accordingly.
-  return isWindows ? url.toLowerCase() === WIDGET_PAGE_URL.toLowerCase() : url === WIDGET_PAGE_URL;
+  return samePageUrl(String(frame.url).split('#')[0], WIDGET_PAGE_URL, isWindows);
+}
+
+/**
+ * Decode valid %XX runs as UTF-8 and leave anything else as is. Chromium keeps «~ [ ] %»
+ * unescaped in file URLs where pathToFileURL escapes them (8.3 names like ADMINI~1,
+ * «Programs [x64]»), so both sides are brought to the same form before comparing.
+ * @param {string} url
+ */
+function decodeLoose(url) {
+  return url.replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => Buffer.from(run.replace(/%/g, ''), 'hex').toString('utf8'));
+}
+
+/**
+ * @param {string} a
+ * @param {string} b
+ * @param {boolean} [isWindows] Windows paths are case-insensitive (drive letter, folders)
+ */
+function samePageUrl(a, b, isWindows = process.platform === 'win32') {
+  const x = decodeLoose(a);
+  const y = decodeLoose(b);
+  return isWindows ? x.toLowerCase() === y.toLowerCase() : x === y;
 }
 
 /**
@@ -246,4 +266,4 @@ function registerDataIpc(deps) {
   app.on('will-quit', flushAllDocs);
 }
 
-module.exports = { registerDataIpc, isTrustedSender, WIDGET_PAGE_URL };
+module.exports = { registerDataIpc, isTrustedSender, samePageUrl, WIDGET_PAGE, WIDGET_PAGE_URL };

@@ -340,3 +340,75 @@ test('startup removes temp files left by a crash mid-write (they may hold old pl
   assert.equal(fs.existsSync(stale), false);
   assert.equal(fs.existsSync(fresh), true, 'a write in progress is not touched');
 });
+
+test('a locked .bak gets retries too when the main file is locked at startup', (t) => {
+  const root = freshDataRoot();
+  const doc = testDoc({ lastGood: true });
+  doc.write({ items: ['mine'] });
+  const realRead = fs.readFileSync;
+  let bakFailures = 2; // locked a little longer than one attempt
+  t.mock.method(fs, 'readFileSync', function (p, ...rest) {
+    if (p === doc.file()) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    if (p === doc.bakFile() && bakFailures-- > 0) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    return realRead.call(this, p, ...rest);
+  });
+  assert.deepEqual(doc.read(), { items: ['mine'] }, 'last good copy used, not defaults');
+  assert.ok(fs.existsSync(path.join(root, doc.spec.name)));
+});
+
+test('after a lock clears and the file is read, the next write makes no «unread» copy', (t) => {
+  const root = freshDataRoot();
+  const doc = testDoc();
+  writeRaw(root, doc.spec.name, { schemaVersion: 2, items: ['x'] });
+  const realRead = fs.readFileSync;
+  const lock = t.mock.method(fs, 'readFileSync', function (p, ...rest) {
+    if (p === doc.file()) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    return realRead.call(this, p, ...rest);
+  });
+  doc.read();
+  lock.mock.restore();
+  assert.deepEqual(doc.read(), { items: ['x'] });
+  doc.write({ items: ['y'] });
+  assert.equal(names(root).some((n) => n.includes('.unread-')), false);
+});
+
+test('encrypted doc copies: an existing envelope (any key order) is not wrapped twice; encryption errors never escape read()', () => {
+  const root = freshDataRoot();
+  const doc = testDoc({ encrypt: true });
+  doc.write({ items: ['a'] });
+  const env = JSON.parse(fs.readFileSync(doc.file(), 'utf8'));
+  // A newer app version wrote the envelope with another key order and a higher schema.
+  fs.writeFileSync(doc.file(), JSON.stringify({ data: env.data, schemaVersion: 2, format: env.format }, null, 2));
+  const inner = JSON.parse(Buffer.from(Buffer.from(env.data, 'base64').toString('utf8').slice(4), 'base64').toString('utf8'));
+  inner.schemaVersion = 9;
+  fs.writeFileSync(
+    doc.file(),
+    JSON.stringify({ data: `${Buffer.from(`enc:${Buffer.from(JSON.stringify(inner)).toString('base64')}`).toString('base64')}`, format: env.format })
+  );
+  doc.read();
+  const copy = names(root).find((n) => n.includes('.v9.bak'));
+  const copied = JSON.parse(fs.readFileSync(path.join(root, copy), 'utf8'));
+  assert.equal(copied.format, env.format);
+  assert.equal(copied.schemaVersion, undefined, 'kept as written, not re-wrapped');
+
+  const doc2 = testDoc({ encrypt: true });
+  writeRaw(root, doc2.spec.name, '{"broken": ');
+  require('../lib/config').setSafeStorageForTests({
+    isEncryptionAvailable: () => true,
+    encryptString: () => {
+      throw new Error('DPAPI failure');
+    },
+    decryptString: () => '',
+  });
+  assert.doesNotThrow(() => doc2.read());
+});
+
+test('startup removes quarantined secret copies left by older versions (possibly plaintext)', () => {
+  const root = freshDataRoot();
+  for (const name of ['tokens.json.corrupt-1700000000000', 'credentials.json.corrupt-1700000000001']) {
+    fs.writeFileSync(path.join(root, name), '{"refresh_token": "1//0gCutOff');
+  }
+  fs.writeFileSync(path.join(root, 'streaks.json.corrupt-1700000000002'), 'kept: may hold history');
+  require('../lib/storage-doc').migrateAllDocs();
+  assert.deepEqual(names(root).filter((n) => n.includes('.corrupt-')), ['streaks.json.corrupt-1700000000002']);
+});

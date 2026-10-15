@@ -48,7 +48,7 @@ test('streaks.json without schemaVersion (v0 dates lists) migrates losslessly', 
 
 test('encode/decode round-trip covers month edges and leap days', () => {
   const dates = ['2024-02-29', '2025-01-01', '2025-01-31', '2025-12-31', '2026-03-15'];
-  const encoded = streaks.encodeStore({ habits: { h: { dates } } }, '2026-10-14');
+  const encoded = streaks.encodeStore({ habits: { h: { dates } } });
   assert.deepEqual(encoded.habits.h.months['2025-01'], 1 | (1 << 30));
   assert.deepEqual(streaks.decodeStore(encoded).habits.h.dates, dates);
 });
@@ -62,15 +62,18 @@ test('decode unions months and a dates list (file touched by an older build)', (
   assert.deepEqual(streaks.decodeStore({ habits: { h: { months: { '2026-13': 1, x: 1, '2026-01': -5 } } } }).habits.h.dates, []);
 });
 
-test('growth limit: history older than 10 years is dropped on save', () => {
-  const today = '2026-10-14';
-  const encoded = streaks.encodeStore(
-    { habits: { old: { dates: ['2015-01-01', '2016-10-31'] }, mixed: { dates: ['2016-10-31', '2016-11-01', '2026-10-14'] } } },
-    today
-  );
+test('growth limit: each habit keeps its newest 120 months with marks, whatever the date', () => {
+  const months = [];
+  for (let i = 0; i < 130; i += 1) {
+    const d = new Date(2010, i, 5);
+    months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-05`);
+  }
+  const encoded = streaks.encodeStore({ habits: { busy: { dates: months }, sparse: { dates: ['1990-01-01', '2000-06-15'] } } });
   assert.equal(streaks.HISTORY_MONTHS, 120);
-  assert.equal(encoded.habits.old, undefined, 'a habit with nothing left in the window disappears');
-  assert.deepEqual(Object.keys(encoded.habits.mixed.months), ['2016-11', '2026-10']);
+  const kept = Object.keys(encoded.habits.busy.months);
+  assert.equal(kept.length, 120);
+  assert.equal(kept[0], months[10].slice(0, 7), 'the 10 oldest months go');
+  assert.deepEqual(Object.keys(encoded.habits.sparse.months), ['1990-01', '2000-06'], 'few marks: nothing to trim');
 });
 
 test('growth: 10 years of daily habits stay small (vs ~1.5 MB as a dates list)', () => {
@@ -134,22 +137,41 @@ test('habit ids that name Object.prototype members are stored as plain entries',
   assert.equal(Object.hasOwn(readRaw(root, 'streaks.json').habits, 'valueOf'), false);
 });
 
-test('days outside the kept window (older than 120 months, or in the future) are never loaded', () => {
-  const today = '2026-10-14';
-  const store = streaks.decodeStore(
-    {
-      habits: {
-        h: {
-          months: { '9999-12': 0x7fffffff, '2026-11': 1, '2026-10': 0x7fffffff, '2010-01': 1 },
-          dates: ['2026-10-15', '2026-10-16', '3000-01-01', '2016-10-31'],
-        },
+test('imports only accept days in the 120-month window up to tomorrow', () => {
+  const raw = {
+    habits: {
+      h: {
+        months: { '9999-12': 0x7fffffff, '2026-11': 1, '2026-10': 0x7fffffff, '2010-01': 1 },
+        dates: ['2026-10-15', '2026-10-16', '3000-01-01', '2016-10-31'],
       },
     },
-    today
-  );
-  const dates = store.habits.h.dates;
+  };
+  const dates = streaks.decodeStore(raw, { range: streaks.importRange('2026-10-14') }).habits.h.dates;
   assert.ok(dates.every((d) => d >= '2016-11-01' && d <= '2026-10-15'), dates.join(','));
   assert.ok(dates.includes('2026-10-15'), 'tomorrow tolerated (time zones)');
   assert.equal(dates.includes('2026-10-16'), false);
-  assert.equal(streaks.encodeStore({ habits: { h: { dates: ['2027-01-01', '2026-10-14'] } } }, today).habits.h.months['2027-01'], undefined);
+  // The user's own file is never filtered by date.
+  assert.ok(streaks.decodeStore(raw).habits.h.dates.includes('9999-12-31'));
+});
+
+test('a wrong PC clock never costs history (behind: «future» days kept; ahead: nothing evicted)', (t) => {
+  const root = freshDataRoot();
+  const real = lastDays(400, '2026-10-14');
+  writeRaw(root, 'streaks.json', { schemaVersion: 1, ...streaks.encodeStore({ habits: { h: { dates: real } } }) });
+
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2021, 0, 10, 12) }); // CMOS reset: 5 years behind
+  streaks.resetStreakCache();
+  streaks.markCompleted('h');
+  t.mock.timers.reset();
+  streaks.resetStreakCache();
+  let dates = streaks.loadStore().habits.h.dates;
+  assert.ok(real.every((d) => dates.includes(d)), 'history survives a clock that is behind');
+
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(2041, 0, 10, 12) }); // 15 years ahead
+  streaks.resetStreakCache();
+  streaks.markCompleted('h');
+  t.mock.timers.reset();
+  streaks.resetStreakCache();
+  dates = streaks.loadStore().habits.h.dates;
+  assert.ok(real.every((d) => dates.includes(d)), 'history survives a clock that is ahead');
 });

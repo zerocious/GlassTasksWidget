@@ -61,14 +61,31 @@ test('a failed revoke never logs the token and reports «failed»', async (t) =>
   assert.equal(auth.loadSavedTokens(), null, 'still signed out locally');
 });
 
-test('an already invalid token (HTTP 400) counts as revoked', async (t) => {
-  signedInProfile();
+test('only Google\'s «invalid_token» 400 counts as revoked; other 400s and 5xx are failures', async (t) => {
+  const reply = { status: 400, data: { error: 'invalid_token' } };
   t.mock.method(transporterProto(), 'request', async () => {
-    const err = new Error('invalid_token');
-    err.response = { status: 400, data: { error: 'invalid_token' } };
+    const err = new Error('request failed');
+    err.response = reply;
     throw err;
   });
-  assert.equal(await auth.revokeAndClearTokens(), 'revoked');
+  signedInProfile();
+  assert.equal(await auth.revokeAndClearTokens(), 'revoked', 'already revoked at Google');
+  for (const [status, data] of [[400, ''], [400, { error: 'invalid_request' }], [503, {}], [407, {}]]) {
+    reply.status = status;
+    reply.data = data;
+    signedInProfile();
+    assert.equal(await auth.revokeAndClearTokens(), 'failed', `HTTP ${status} ${JSON.stringify(data)}`);
+  }
+});
+
+test('a revoke that never answers gives up after ~5.5 s («failed») and clears the timer', async (t) => {
+  signedInProfile();
+  t.mock.method(transporterProto(), 'request', () => new Promise(() => {}));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = auth.revokeAndClearTokens();
+  t.mock.timers.tick(5600);
+  assert.equal(await pending, 'failed');
+  assert.equal(auth.loadSavedTokens(), null);
 });
 
 test('revoke works without saved client keys (the endpoint needs only the token)', async (t) => {
@@ -84,10 +101,22 @@ test('revoke works without saved client keys (the endpoint needs only the token)
   assert.equal(called, 1);
 });
 
-test('nothing to revoke: «none»; encrypted token that cannot be opened: «locked»', async () => {
+test('nothing to revoke: «none»; a token file that cannot be read: «locked»', async () => {
   const root = freshDataRoot();
   assert.equal(await auth.revokeAndClearTokens(), 'none');
   config.writeSecretJson(path.join(root, 'tokens.json'), { refresh_token: REFRESH });
   config.setSafeStorageForTests(null);
-  assert.equal(await auth.revokeAndClearTokens(), 'locked');
+  assert.equal(await auth.revokeAndClearTokens(), 'locked', 'safeStorage unavailable');
+
+  freshDataRoot();
+  config.writeSecretJson(config.dataPath('tokens.json'), { refresh_token: REFRESH });
+  // Profile moved to another PC / user: safeStorage works but this ciphertext is not ours.
+  config.setSafeStorageForTests({
+    isEncryptionAvailable: () => true,
+    encryptString: (s) => Buffer.from(s),
+    decryptString: () => {
+      throw new Error('Error while decrypting the ciphertext provided to safeStorage.decryptString.');
+    },
+  });
+  assert.equal(await auth.revokeAndClearTokens(), 'locked', 'decrypt failure');
 });
