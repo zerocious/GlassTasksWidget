@@ -127,6 +127,9 @@ const NAMED_KEYS = Object.fromEntries(
   ].map((k) => [k.toLowerCase(), k])
 );
 
+/** Punctuation keys Electron accepts as a single character (e.g. the «Control+`» console toggle). */
+const PUNCTUATION_KEYS = new Set(['`', '-', '=', '[', ']', '\\', ';', "'", ',', '.', '/']);
+
 /**
  * Global shortcuts swallow the key in every application (RegisterHotKey): never take
  * clipboard / undo / select-all or the Windows system combos, whatever the spelling.
@@ -153,7 +156,7 @@ function normalizeAccelerator(value) {
   let key = null;
   for (const part of parts) {
     const token = part.trim();
-    if (!/^[A-Za-z0-9]+$/.test(token)) return null;
+    if (!/^[A-Za-z0-9]+$/.test(token) && !PUNCTUATION_KEYS.has(token)) return null;
     const lower = token.toLowerCase();
     if (Object.hasOwn(MODIFIERS, lower)) {
       const mod = MODIFIERS[lower];
@@ -162,7 +165,7 @@ function normalizeAccelerator(value) {
       continue;
     }
     if (key) return null;
-    if (/^[a-z0-9]$/.test(lower)) key = lower.toUpperCase();
+    if (/^[a-z0-9]$/.test(lower) || PUNCTUATION_KEYS.has(token)) key = token.toUpperCase();
     else if (/^f([1-9]|1[0-9]|2[0-4])$/.test(lower)) key = lower.toUpperCase();
     else if (NAMED_KEYS[lower]) key = NAMED_KEYS[lower];
     else return null;

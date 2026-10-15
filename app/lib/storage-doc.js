@@ -43,11 +43,14 @@ const { reportStorageIssue } = require('./storage-events');
  *   compact?: boolean,
  *   backupBeforeMigrate?: boolean,
  *   debounceMs?: number,
+ *   rereadsEveryTime?: boolean,
  * }} DocSpec
  *   name: file under data/; label: Russian noun for messages («история привычек»);
  *   lastGood: keep `<name>.bak` (copy of the last successful save) and restore from it;
  *   encrypt: safeStorage, memory-only when unavailable; compact: no indentation;
- *   backupBeforeMigrate: default true, except for encrypted docs (a plain copy would leak them).
+ *   backupBeforeMigrate: default true, except for encrypted docs (a plain copy would leak them);
+ *   rereadsEveryTime: the owner reads the file before every write and keeps no copy, so a
+ *   successful read lifts the «file was never read» overwrite guard.
  */
 
 /** @type {Map<string, ReturnType<typeof createJsonDoc>>} */
@@ -249,8 +252,10 @@ function createJsonDoc(spec) {
     const recentlyLocked = unreadableAt && Date.now() - unreadableAt < UNREADABLE_COOLDOWN_MS;
     const main = parseDocFile(file(), recentlyLocked ? 0 : READ_RETRIES);
     if (main.status !== 'unreadable') unreadableAt = 0;
-    // Read (or found absent) after all: no blind overwrite to guard against any more.
-    if (main.status === 'ok' || main.status === 'missing') unreadOnDisk = false;
+    // Only for docs whose owner re-reads before every write: a caching owner (settings,
+    // streaks) still holds the defaults it got while the file was locked, so its next write
+    // must keep preserving the real file even though this read worked.
+    if (spec.rereadsEveryTime && (main.status === 'ok' || main.status === 'missing')) unreadOnDisk = false;
     if (main.status === 'ok') return accept(main, file(), false);
     if (main.status === 'missing') return spec.defaults();
     if (main.status === 'locked') {
