@@ -115,3 +115,41 @@ test('mark / unmark / remove still persist through the new format', () => {
   streaks.removeHabit('gone');
   assert.equal(readRaw(root, 'streaks.json').habits.gone, undefined);
 });
+
+test('habit ids that name Object.prototype members are stored as plain entries', () => {
+  const root = freshDataRoot();
+  for (const id of ['toString', 'hasOwnProperty', 'valueOf', '__defineGetter__']) {
+    streaks.markCompleted(id, '2026-10-01');
+  }
+  const merged = streaks.mergeHistory({ habits: { isPrototypeOf: { dates: ['2026-10-02'] } } });
+  assert.deepEqual(merged, { habits: 1, daysAdded: 1 });
+  assert.equal(Object.prototype.toString.dates, undefined, 'built-ins untouched');
+  assert.equal(Object.prototype.hasOwnProperty.dates, undefined);
+  assert.equal({}.dates, undefined);
+  streaks.resetStreakCache();
+  const habits = readRaw(root, 'streaks.json').habits;
+  assert.deepEqual(Object.keys(habits).sort(), ['__defineGetter__', 'hasOwnProperty', 'isPrototypeOf', 'toString', 'valueOf']);
+  assert.equal(streaks.getHabitStats('toString').completedDates.length, 1);
+  streaks.removeHabit('valueOf');
+  assert.equal(Object.hasOwn(readRaw(root, 'streaks.json').habits, 'valueOf'), false);
+});
+
+test('days outside the kept window (older than 120 months, or in the future) are never loaded', () => {
+  const today = '2026-10-14';
+  const store = streaks.decodeStore(
+    {
+      habits: {
+        h: {
+          months: { '9999-12': 0x7fffffff, '2026-11': 1, '2026-10': 0x7fffffff, '2010-01': 1 },
+          dates: ['2026-10-15', '2026-10-16', '3000-01-01', '2016-10-31'],
+        },
+      },
+    },
+    today
+  );
+  const dates = store.habits.h.dates;
+  assert.ok(dates.every((d) => d >= '2016-11-01' && d <= '2026-10-15'), dates.join(','));
+  assert.ok(dates.includes('2026-10-15'), 'tomorrow tolerated (time zones)');
+  assert.equal(dates.includes('2026-10-16'), false);
+  assert.equal(streaks.encodeStore({ habits: { h: { dates: ['2027-01-01', '2026-10-14'] } } }, today).habits.h.months['2027-01'], undefined);
+});

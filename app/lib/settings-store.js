@@ -93,9 +93,80 @@ const settingsDoc = createJsonDoc({
   defaults: () => ({}),
 });
 
+/** Electron modifier names (any case) → canonical name, in canonical order. */
+const MODIFIERS = {
+  control: 'Control',
+  ctrl: 'Control',
+  cmdorctrl: 'Control', // Windows: CmdOrCtrl = Control
+  commandorcontrol: 'Control',
+  alt: 'Alt',
+  option: 'Alt',
+  altgr: 'AltGr',
+  shift: 'Shift',
+  super: 'Super',
+  meta: 'Super',
+  command: 'Super',
+  cmd: 'Super',
+};
+const MODIFIER_ORDER = ['Control', 'Alt', 'AltGr', 'Shift', 'Super'];
+
+/** Non-letter keys a hotkey may use (lower-case → canonical). */
+const NAMED_KEYS = Object.fromEntries(
+  [
+    'Tab', 'Space', 'Backspace', 'Delete', 'Insert', 'Return', 'Enter', 'Escape', 'Esc',
+    'Up', 'Down', 'Left', 'Right', 'Home', 'End', 'PageUp', 'PageDown', 'PrintScreen',
+    'num0', 'num1', 'num2', 'num3', 'num4', 'num5', 'num6', 'num7', 'num8', 'num9',
+    'numadd', 'numsub', 'nummult', 'numdiv', 'numdec',
+  ].map((k) => [k.toLowerCase(), k])
+);
+
+/**
+ * Global shortcuts swallow the key in every application (RegisterHotKey): never take
+ * clipboard / undo / select-all or the Windows system combos, whatever the spelling.
+ */
+const RESERVED_ACCELERATORS = new Set([
+  'Control+C', 'Control+V', 'Control+X', 'Control+Z', 'Control+Y', 'Control+A', 'Control+Insert',
+  'Control+Escape', 'Control+Esc', 'Control+Alt+Delete', 'Control+Shift+Escape', 'Control+Shift+Esc',
+  'Alt+F4', 'Alt+Tab', 'Alt+Escape', 'Alt+Esc', 'Alt+Space',
+]);
+
+/**
+ * Canonical, safe accelerator or null. Requires Control, Alt, AltGr or Super (Shift alone
+ * still types), exactly one key, and no reserved system combo; F13–F24 may stand alone.
+ * @param {unknown} value e.g. "ctrl+alt+w"
+ * @returns {string | null} e.g. "Control+Alt+W"
+ */
+function normalizeAccelerator(value) {
+  if (typeof value !== 'string' || value.length > 64) return null;
+  const parts = value.trim().split('+');
+  /** @type {Set<string>} */
+  const mods = new Set();
+  /** @type {string | null} */
+  let key = null;
+  for (const part of parts) {
+    const token = part.trim();
+    if (!/^[A-Za-z0-9]+$/.test(token)) return null;
+    const lower = token.toLowerCase();
+    if (MODIFIERS[lower]) {
+      if (mods.has(MODIFIERS[lower]) || key) return null;
+      mods.add(MODIFIERS[lower]);
+      continue;
+    }
+    if (key) return null;
+    if (/^[a-z0-9]$/.test(lower)) key = lower.toUpperCase();
+    else if (/^f([1-9]|1[0-9]|2[0-4])$/.test(lower)) key = lower.toUpperCase();
+    else if (NAMED_KEYS[lower]) key = NAMED_KEYS[lower];
+    else return null;
+  }
+  if (!key) return null;
+  const bareOk = /^F(1[3-9]|2[0-4])$/.test(key);
+  if (!bareOk && !['Control', 'Alt', 'AltGr', 'Super'].some((m) => mods.has(m))) return null;
+  const accel = [...MODIFIER_ORDER.filter((m) => mods.has(m)), key].join('+');
+  return RESERVED_ACCELERATORS.has(accel) ? null : accel;
+}
+
 function normalizeHotkey(value, fallback) {
-  if (typeof value !== 'string' || !value.trim()) return fallback;
-  return value.trim();
+  return normalizeAccelerator(value) || fallback;
 }
 
 /**
@@ -192,6 +263,7 @@ module.exports = {
   DEFAULT_SWITCH_HOTKEY,
   SIZE_PRESETS,
   DEFAULTS,
+  normalizeAccelerator,
   loadSettings,
   saveSettings,
   resetSettingsCache,

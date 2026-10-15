@@ -12,7 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { app, ipcMain, dialog, shell, session } = require('electron');
+const { pathToFileURL } = require('url');
 const { getDataRoot } = require('../lib/config');
 const { flushAllDocs, migrateAllDocs } = require('../lib/storage-doc');
 const { onStorageIssue } = require('../lib/storage-events');
@@ -27,8 +27,29 @@ const { todayIso } = require('../lib/dates');
 const FIRST_BACKUP_DELAY_MS = 60 * 1000;
 const BACKUP_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+const GOOGLE_PERMISSIONS_URL = 'https://myaccount.google.com/permissions';
+
+/** The only page allowed to use these channels. */
+const WIDGET_PAGE_URL = pathToFileURL(path.join(__dirname, '..', 'src', 'index.html')).href;
+
 function errorResult(err) {
   return { ok: false, message: err && err.message ? err.message : String(err) };
+}
+
+/**
+ * The call must come from the widget window's main frame while it shows the widget page:
+ * not from a subframe, another webContents, or a page the window navigated to.
+ * @param {{ sender: unknown, senderFrame?: { url: string } | null }} event
+ * @param {{ webContents: { mainFrame: { url: string } } } | null} win
+ * @param {boolean} [isWindows]
+ */
+function isTrustedSender(event, win, isWindows = process.platform === 'win32') {
+  if (!win || event.sender !== win.webContents) return false;
+  const frame = event.senderFrame;
+  if (!frame || frame !== win.webContents.mainFrame) return false;
+  const url = String(frame.url).split('#')[0];
+  // Windows paths are case-insensitive (drive letter, folder names): compare accordingly.
+  return isWindows ? url.toLowerCase() === WIDGET_PAGE_URL.toLowerCase() : url === WIDGET_PAGE_URL;
 }
 
 /**
@@ -40,6 +61,9 @@ function errorResult(err) {
  *   imported settings and to switch autostart off before a wipe.
  */
 function registerDataIpc(deps) {
+  // Required here, not at the top: tests load this file without the Electron binary.
+  const { app, ipcMain, dialog, shell, session } = require('electron');
+
   // storage-status loaded every store: bring all files to the current schema now.
   migrateAllDocs();
 
@@ -51,8 +75,7 @@ function registerDataIpc(deps) {
   /** @param {string} channel @param {(payload: any) => any} fn */
   const handle = (channel, fn) =>
     ipcMain.handle(channel, async (event, payload) => {
-      const w = win();
-      if (!w || event.sender !== w.webContents) throw new Error('Unauthorized');
+      if (!isTrustedSender(event, win())) throw new Error('Unauthorized');
       try {
         return await fn(payload);
       } catch (err) {
@@ -74,7 +97,7 @@ function registerDataIpc(deps) {
     return { ...status, lines: describeStorageStatus(status) };
   });
 
-  handle('data:export-json', async () => {
+  handle('data:export-json', async (payload) => {
     const picked = await dialog.showSaveDialog(win(), {
       title: 'Экспорт данных Glass Tasks',
       defaultPath: path.join(app.getPath('documents'), `glass-tasks-export-${todayIso()}.json`),
@@ -88,6 +111,7 @@ function registerDataIpc(deps) {
     const result = backup.exportJson(picked.filePath, {
       habitTitles,
       logsDir: path.join(app.getPath('userData'), 'logs'),
+      includeLogs: Boolean(payload && payload.includeLogs === true),
     });
     return { ok: true, ...result };
   });
@@ -112,11 +136,8 @@ function registerDataIpc(deps) {
       properties: ['openFile'],
     });
     if (picked.canceled || !picked.filePaths.length) return { canceled: true };
-    const file = picked.filePaths[0];
-    if (fs.statSync(file).size > backup.MAX_IMPORT_BYTES) {
-      return { ok: false, message: 'Файл слишком большой для экспорта Glass Tasks.' };
-    }
-    const report = backup.importData(fs.readFileSync(file, 'utf8'), {
+    const text = await backup.readFileCapped(picked.filePaths[0], backup.MAX_IMPORT_BYTES);
+    const report = backup.importData(text, {
       applySettings: deps.applySettingsPatch,
     });
     resetStreakCache();
@@ -145,7 +166,8 @@ function registerDataIpc(deps) {
       message: 'Удалить все данные Glass Tasks на этом компьютере?',
       detail:
         'Будут удалены вход Google и ключи, кэш задач, история привычек, настройки, напоминания, ' +
-        'резервные копии и хранилище браузера виджета. Задачи в самом Google Tasks не пострадают.\n\n' +
+        'резервные копии и хранилище браузера виджета. Задачи в самом Google Tasks не пострадают. ' +
+        'Журнал работы (папка logs) не удаляется.\n\n' +
         'Отменить это нельзя. Если история привычек нужна, сначала сделайте экспорт.\n\n' +
         'После удаления виджет перезапустится.',
       buttons: ['Отмена', 'Удалить всё'],
@@ -166,12 +188,37 @@ function registerDataIpc(deps) {
       session: session.defaultSession,
       resets: [invalidateListCache, invalidatePayloadCache],
     });
+    if (result.revoke === 'failed' || result.revoke === 'locked') {
+      // The local copy is gone, but Google may still honour the grant (offline, timeout,
+      // DPAPI locked): tell the user before the restart, where the renderer cannot.
+      const { response: open } = await dialog.showMessageBox(win(), {
+        type: 'warning',
+        title: 'Доступ Google не отозван',
+        message: 'Данные удалены, но отозвать доступ виджета в Google не удалось.',
+        detail:
+          'Скорее всего, нет сети. Откройте страницу «Сторонние приложения с доступом к аккаунту» ' +
+          'и удалите там доступ Glass Tasks вручную, иначе сохранённая где-то копия входа продолжит работать.',
+        buttons: ['Открыть страницу Google', 'Позже'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (open === 0) {
+        shell.openExternal(GOOGLE_PERMISSIONS_URL).catch(() => {});
+      }
+    }
     // Restart from a clean state; writes stay frozen until then.
     setTimeout(() => {
       app.relaunch();
       app.exit(0);
     }, 300);
-    return { ok: result.failed.length === 0, relaunching: true, failed: result.failed };
+    return {
+      ok: result.failed.length === 0,
+      relaunching: true,
+      revoke: result.revoke,
+      kept: result.kept,
+      failed: result.failed,
+    };
   });
 
   // Warnings (restored backup, reset file, secrets in memory only…) go to the widget as they
@@ -199,4 +246,4 @@ function registerDataIpc(deps) {
   app.on('will-quit', flushAllDocs);
 }
 
-module.exports = { registerDataIpc };
+module.exports = { registerDataIpc, isTrustedSender, WIDGET_PAGE_URL };
