@@ -276,3 +276,67 @@ test('a file still locked at save time is not overwritten', () => {
   assert.throws(() => doc.write({ items: ['x'] }), /still locked/);
   assert.ok(fs.statSync(path.join(root, doc.spec.name)).isDirectory());
 });
+
+test('a file that stays locked is retried once, then read without blocking waits', (t) => {
+  const root = freshDataRoot();
+  const doc = testDoc();
+  writeRaw(root, doc.spec.name, { schemaVersion: 2, items: ['x'] });
+  const realRead = fs.readFileSync;
+  let attempts = 0;
+  t.mock.method(fs, 'readFileSync', function (p, ...rest) {
+    if (p === doc.file()) {
+      attempts += 1;
+      throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    }
+    return realRead.call(this, p, ...rest);
+  });
+  let started = process.hrtime.bigint();
+  doc.read();
+  const firstMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(firstMs < 400, `first read blocked ${firstMs} ms`);
+  const firstAttempts = attempts;
+  started = process.hrtime.bigint();
+  doc.read();
+  doc.read();
+  const laterMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(laterMs < 30, `later reads blocked ${laterMs} ms`);
+  assert.equal(attempts, firstAttempts + 2, 'one attempt per later read');
+});
+
+test('encrypted doc: unread and corrupt copies of a plaintext legacy file are stored encrypted', (t) => {
+  const root = freshDataRoot();
+  const doc = testDoc({ encrypt: true });
+  writeRaw(root, doc.spec.name, { list: ['Личная заметка'] }); // legacy plaintext, readable later
+  const realRead = fs.readFileSync;
+  const lock = t.mock.method(fs, 'readFileSync', function (p, ...rest) {
+    if (p === doc.file()) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    return realRead.call(this, p, ...rest);
+  });
+  doc.read();
+  lock.mock.restore();
+  doc.write({ items: ['new'] });
+  const plainLeft = () =>
+    names(root).filter((n) => fs.statSync(path.join(root, n)).isFile() && fs.readFileSync(path.join(root, n), 'utf8').includes('Личная'));
+  assert.deepEqual(plainLeft(), [], 'no plaintext copy of the unread file');
+  assert.ok(names(root).some((n) => n.includes('.unread-')));
+
+  const doc2 = testDoc({ encrypt: true });
+  writeRaw(root, doc2.spec.name, '{"list": ["Личная задача", '); // corrupt plaintext
+  assert.deepEqual(doc2.read(), { items: [] });
+  assert.deepEqual(plainLeft(), [], 'no plaintext quarantine copy');
+  const quarantined = names(root).find((n) => n.startsWith(`${doc2.spec.name}.corrupt-`));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, quarantined), 'utf8')).format, 'glass-tasks/safeStorage@1');
+});
+
+test('startup removes temp files left by a crash mid-write (they may hold old plaintext)', () => {
+  const root = freshDataRoot();
+  const stale = path.join(root, 'tokens.json.4242.1700000000000.tmp');
+  const fresh = path.join(root, 'settings.json.4243.1700000000001.tmp');
+  fs.writeFileSync(stale, '{"refresh_token":"1//old"}');
+  fs.writeFileSync(fresh, '{}');
+  const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  fs.utimesSync(stale, hourAgo, hourAgo);
+  require('../lib/storage-doc').migrateAllDocs();
+  assert.equal(fs.existsSync(stale), false);
+  assert.equal(fs.existsSync(fresh), true, 'a write in progress is not touched');
+});

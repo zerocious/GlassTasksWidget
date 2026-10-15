@@ -65,7 +65,8 @@ test('wipe touches only the data folder (never the developer .env in the source 
   const result = await wipeAllData({ freeze: false });
   // Outside Electron the «app-written .env» path is app/.env, which belongs to the developer.
   assert.equal(config.getCredentialsEnvPath(), path.join(config.ROOT, '.env'));
-  assert.deepEqual(result.removed, [root]);
+  assert.ok(result.removed.includes(root));
+  assert.equal(result.removed.some((p) => path.isAbsolute(p) && p !== root), false, 'nothing outside the data folder');
   assert.deepEqual(result.failed, []);
 });
 
@@ -93,4 +94,65 @@ test('storage status is ok when everything is encrypted and healthy', () => {
   const status = getStorageStatus();
   assert.equal(status.secrets.tokens, 'encrypted');
   assert.equal(status.ok, true);
+});
+
+test('storage status never prints the absolute profile path (Windows user name)', () => {
+  const { displayPath } = require('../lib/storage-status');
+  const env = { APPDATA: 'C:\\Users\\ivan.petrov\\AppData\\Roaming', USERPROFILE: 'C:\\Users\\ivan.petrov' };
+  const win = require('path').win32;
+  assert.equal(
+    displayPath('C:\\Users\\ivan.petrov\\AppData\\Roaming\\glass-tasks-widget\\data', { env, pathApi: win }),
+    '%APPDATA%\\glass-tasks-widget\\data'
+  );
+  assert.equal(displayPath('c:\\users\\IVAN.PETROV\\proj\\data', { env, pathApi: win }), '%USERPROFILE%\\proj\\data');
+  const unc = displayPath('\\\\fs01\\Redirected$\\ivan.petrov\\AppData\\Roaming\\glass-tasks-widget\\data', { env: {}, pathApi: win });
+  assert.equal(unc, '…\\glass-tasks-widget\\data');
+  const status = getStorageStatus();
+  assert.equal(status.dataRoot.includes(require('os').tmpdir()), false);
+  assert.match(describeStorageStatus(status)[0], /^Папка данных: (…|%)/);
+});
+
+test('wipe deletes only files the app owns; foreign files in a shared «data» folder stay', async () => {
+  const root = freshDataRoot();
+  settingsStore.saveSettings({ theme: 'light' });
+  streaks.markCompleted('h', '2026-10-01');
+  backup.createBackup({ reason: 'manual' });
+  for (const name of ['streaks.json.corrupt-123', 'settings.json.v0.bak', 'offline-cache.json.unread-5.bak', 'tokens.json.77.1700000000000.tmp']) {
+    fs.writeFileSync(path.join(root, name), 'x');
+  }
+  fs.writeFileSync(path.join(root, 'thesis.docx'), 'not ours');
+  fs.mkdirSync(path.join(root, 'photos'));
+  fs.writeFileSync(path.join(root, 'photos', 'a.jpg'), 'not ours');
+  fs.writeFileSync(path.join(root, 'backups', 'my-notes.txt'), 'not ours');
+
+  const result = await wipeAllData({ freeze: false });
+  assert.deepEqual(fs.readdirSync(root).sort(), ['backups', 'photos', 'thesis.docx']);
+  assert.deepEqual(fs.readdirSync(path.join(root, 'backups')), ['my-notes.txt']);
+  assert.deepEqual(result.kept.sort(), ['backups/my-notes.txt', 'photos', 'thesis.docx']);
+  assert.deepEqual(result.failed, []);
+});
+
+test('wipe refuses a data folder that is a symlink / junction', async (t) => {
+  const real = path.join(require('./helpers/storage').tmpDir(), 'elsewhere');
+  fs.mkdirSync(real);
+  fs.writeFileSync(path.join(real, 'settings.json'), '{}');
+  const link = path.join(require('./helpers/storage').tmpDir(), 'data');
+  try {
+    fs.symlinkSync(real, link, 'junction');
+  } catch {
+    t.skip('symlinks not permitted here');
+    return;
+  }
+  config.setDataRootForTests(link);
+  await assert.rejects(wipeAllData({ freeze: false }), /Refusing/);
+  assert.ok(fs.existsSync(path.join(real, 'settings.json')));
+});
+
+test('wipe reports whether the Google grant was revoked', async () => {
+  freshDataRoot();
+  assert.equal((await wipeAllData({ freeze: false, revoke: async () => 'failed' })).revoke, 'failed');
+  freshDataRoot();
+  assert.equal((await wipeAllData({ freeze: false, revoke: async () => 'revoked' })).revoke, 'revoked');
+  freshDataRoot();
+  assert.equal((await wipeAllData({ freeze: false })).revoke, 'none');
 });

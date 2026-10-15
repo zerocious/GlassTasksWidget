@@ -51,3 +51,14 @@ test('README «Где лежат данные» lists every data file the app wr
   const files = [...listDocs().map((d) => d.spec.name), 'tokens.json', 'credentials.json', 'backups'];
   for (const name of files) assert.ok(section.includes(`\`${name}`), `README does not mention ${name}`);
 });
+
+test('uninstaller removes the autostart entry on a real uninstall (not on updates)', () => {
+  const nsh = fs.readFileSync(path.join(APP, 'build', 'installer.nsh'), 'utf8');
+  const notification = fs.readFileSync(path.join(APP, 'electron', 'notifications.js'), 'utf8');
+  const aumid = /APP_USER_MODEL_ID = '([^']+)'/.exec(notification)[1];
+  const body = nsh.slice(nsh.indexOf('${ifNot} ${isUpdated}'));
+  for (const key of ['Software\\Microsoft\\Windows\\CurrentVersion\\Run', 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run']) {
+    assert.ok(body.includes(`DeleteRegValue HKCU "${key}" "${aumid}"`), key);
+  }
+  assert.ok(nsh.indexOf('DeleteRegValue') > nsh.indexOf('${ifNot} ${isUpdated}'), 'only inside the not-updated branch');
+});

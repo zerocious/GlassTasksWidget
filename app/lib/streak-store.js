@@ -48,12 +48,32 @@ function oldestKeptMonth(today = todayIso()) {
 }
 
 /**
+ * Days a habit can legitimately have: the retention window up to tomorrow (time zones).
+ * Anything else (a hostile import of far-future months, a corrupted clock) is ignored.
+ * @param {string} today
+ */
+function keptRange(today) {
+  const lastDay = addDaysIso(today, 1);
+  return { firstMonth: oldestKeptMonth(today), lastMonth: lastDay.slice(0, 7), lastDay };
+}
+
+/**
  * @param {Record<string, any>} raw file content (schema 0 or 1, without schemaVersion)
+ * @param {string} [today] reference day for the kept window
+ * @param {{ maxDays?: number }} [limits] throw a RangeError as soon as more days than this
+ *   were decoded (imports: bounds the work a hostile file can cause)
  * @returns {StreakStore}
  */
-function decodeStore(raw) {
-  /** @type {StreakStore} */
-  const store = { habits: {} };
+function decodeStore(raw, today = todayIso(), limits = {}) {
+  const range = keptRange(today);
+  const maxDays = limits.maxDays || Infinity;
+  let total = 0;
+  const count = (n) => {
+    total += n;
+    if (total > maxDays) throw new RangeError('too many days');
+  };
+  /** @type {StreakStore} null prototype: ids like «toString» must not hit Object.prototype */
+  const store = { habits: Object.create(null) };
   const habits = raw && raw.habits && typeof raw.habits === 'object' ? raw.habits : {};
   for (const [habitId, entry] of Object.entries(habits)) {
     if (!habitId || UNSAFE_KEYS.has(habitId) || !entry || typeof entry !== 'object') continue;
@@ -63,15 +83,21 @@ function decodeStore(raw) {
       for (const [key, mask] of Object.entries(entry.months)) {
         const m = MONTH_KEY_RE.exec(key);
         if (!m || !Number.isInteger(mask) || mask <= 0) continue;
+        if (key < range.firstMonth || key > range.lastMonth) continue;
         const last = daysInMonth(Number(m[1]), Number(m[2]));
         for (let day = 1; day <= last; day += 1) {
-          if (mask & (1 << (day - 1))) days.add(`${key}-${String(day).padStart(2, '0')}`);
+          if (!(mask & (1 << (day - 1)))) continue;
+          const iso = `${key}-${String(day).padStart(2, '0')}`;
+          if (iso <= range.lastDay) days.add(iso);
         }
       }
     }
     if (Array.isArray(entry.dates)) {
-      for (const d of entry.dates) if (isIsoDay(d)) days.add(d);
+      for (const d of entry.dates) {
+        if (isIsoDay(d) && d.slice(0, 7) >= range.firstMonth && d <= range.lastDay) days.add(d);
+      }
     }
+    count(days.size);
     store.habits[habitId] = { dates: [...days].sort() };
   }
   return store;
@@ -83,16 +109,16 @@ function decodeStore(raw) {
  * @returns {{ habits: Record<string, { months: Record<string, number> }> }}
  */
 function encodeStore(store, today = todayIso()) {
-  const oldest = oldestKeptMonth(today);
+  const range = keptRange(today);
   /** @type {Record<string, { months: Record<string, number> }>} */
   const habits = {};
   for (const [habitId, entry] of Object.entries((store && store.habits) || {})) {
     /** @type {Record<string, number>} */
     const months = {};
     for (const d of (entry && Array.isArray(entry.dates) ? entry.dates : [])) {
-      if (!isIsoDay(d)) continue;
+      if (!isIsoDay(d) || d > range.lastDay) continue;
       const key = d.slice(0, 7);
-      if (key < oldest) continue;
+      if (key < range.firstMonth) continue;
       months[key] = (months[key] || 0) | (1 << (Number(d.slice(8)) - 1));
     }
     const keys = Object.keys(months).sort();
@@ -158,9 +184,10 @@ function mergeHistory(incoming) {
 }
 
 function ensureHabit(store, habitId) {
-  if (!store.habits[habitId]) store.habits[habitId] = { dates: [] };
-  if (!Array.isArray(store.habits[habitId].dates)) store.habits[habitId].dates = [];
-  return store.habits[habitId];
+  if (!Object.hasOwn(store.habits, habitId)) store.habits[habitId] = { dates: [] };
+  const habit = store.habits[habitId];
+  if (!Array.isArray(habit.dates)) habit.dates = [];
+  return habit;
 }
 
 /**
@@ -267,7 +294,7 @@ function enrichHabits(habits) {
 function removeHabit(habitId) {
   if (!habitId) return;
   const store = loadStore();
-  if (!store.habits[habitId]) return;
+  if (!Object.hasOwn(store.habits, habitId)) return;
   delete store.habits[habitId];
   saveStore(store);
 }
