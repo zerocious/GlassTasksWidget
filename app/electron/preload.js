@@ -73,7 +73,8 @@ contextBridge.exposeInMainWorld('widgetApi', {
   reportError: (payload) => ipcRenderer.send('widget:log', payload),
   // Data & storage (electron/data-ipc.js)
   getStorageStatus: () => ipcRenderer.invoke('data:storage-status'),
-  exportData: () => ipcRenderer.invoke('data:export-json'),
+  exportData: (opts) =>
+    ipcRenderer.invoke('data:export-json', { includeLogs: Boolean(opts && opts.includeLogs) }),
   exportTasksCsv: () => ipcRenderer.invoke('data:export-tasks-csv'),
   importData: () => ipcRenderer.invoke('data:import-json'),
   backupNow: () => ipcRenderer.invoke('data:backup-now'),

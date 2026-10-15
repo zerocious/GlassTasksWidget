@@ -32,12 +32,19 @@ const BACKUP_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 const BACKUP_NAME_RE = /^backup-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-(weekly|manual|pre-import)(?:-\d+)?\.json$/;
 
 const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
-const MAX_IMPORT_HABITS = 5000;
+const MAX_IMPORT_HABITS = 500;
+/** ~110 daily habits over the whole 10-year window: far beyond real use, small enough to stay fast. */
+const MAX_IMPORT_DAYS = 400_000;
 const HABIT_ID_RE = /^[\x21-\x7E]{1,256}$/;
 const MAX_LOG_BYTES = 1024 * 1024;
 
-/** Settings that describe this PC rather than the user's preferences. */
+/** Settings that describe this PC rather than the user's preferences (not exported). */
 const MACHINE_SETTINGS = new Set(['pos', 'lastHabitsResetDate', 'onboardingSkipped']);
+/**
+ * Never taken from a file: system-wide effects the user did not choose on this PC
+ * (a global hotkey swallows that key in every program; autostart runs at every login).
+ */
+const NON_IMPORTABLE_SETTINGS = new Set([...MACHINE_SETTINGS, 'autostart', 'toggleHotkey', 'switchViewHotkey']);
 
 const REDACTED = '[скрыто]';
 
@@ -76,7 +83,8 @@ function exportableSettings() {
 
 /**
  * @param {{ format: string, now?: Date, reason?: string,
- *   habitTitles?: Record<string, string> | null, logsDir?: string | null }} opts
+ *   habitTitles?: Record<string, string> | null, logsDir?: string | null, includeLogs?: boolean }} opts
+ *   includeLogs: logs may hold task text from error messages, so only on request.
  */
 function buildSnapshot(opts) {
   const now = opts.now || new Date();
@@ -98,7 +106,7 @@ function buildSnapshot(opts) {
     settings: exportableSettings(),
     habits,
   };
-  if (opts.logsDir) snapshot.logs = readLogs(opts.logsDir);
+  if (opts.includeLogs && opts.logsDir) snapshot.logs = readLogs(opts.logsDir);
   return snapshot;
 }
 
@@ -138,7 +146,10 @@ function readLogs(dir) {
       } finally {
         fs.closeSync(fd);
       }
-      out.push({ name: f.name, modifiedAt: new Date(f.mtime).toISOString(), truncated: take < f.size, text: buf.toString('utf8') });
+      let text = buf.toString('utf8');
+      // A tail cut mid-line could start inside a token: begin at the next full line.
+      if (take < f.size) text = text.slice(text.indexOf('\n') + 1);
+      out.push({ name: f.name, modifiedAt: new Date(f.mtime).toISOString(), truncated: take < f.size, text });
       budget -= take;
     } catch {
       /* locked by the logger — skip */
@@ -164,13 +175,31 @@ function knownSecrets() {
   return values.filter((v) => v.length >= 8);
 }
 
+const KEYS = 'refresh_token|access_token|id_token|client_secret|clientSecret|code_verifier';
 const SECRET_PATTERNS = [
-  // "refresh_token": "…" and friends, in JSON or in a logged object
-  /("(?:refresh_token|access_token|id_token|client_secret|clientSecret|code_verifier)"\s*:\s*")[^"]*(")/g,
+  // "refresh_token": "…" (JSON) — keep the key and the quotes
+  new RegExp(`("(?:${KEYS})"\\s*:\\s*")[^"]*(")`, 'g'),
+  // refresh_token: '…' / refresh_token=… (util.inspect, form bodies, logged objects)
+  new RegExp(`((?:${KEYS})\\s*[:=]\\s*['"]?)[^'"\\s,&}]+`, 'g'),
+  // ?token=… &code=… in logged URLs
+  /([?&](?:token|code|refresh_token|access_token|id_token|client_secret|code_verifier)=)[^&\s"']+/g,
+  /(\bBearer\s+)[A-Za-z0-9._~+/-]+=*/g,
+  /\beyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g, // JWT (id_token carries the e-mail)
   /\bya29\.[0-9A-Za-z_-]+/g, // Google access token
-  /\b1\/\/[0-9A-Za-z_-]{20,}/g, // Google refresh token
+  /\b1(?:\/\/|%2F%2F)[0-9A-Za-z_-]{20,}/gi, // Google refresh token, plain or URL-encoded
+  /\b4(?:\/|%2F)0[0-9A-Za-z_-]{10,}/gi, // OAuth authorization code
   /\bGOCSPX-[0-9A-Za-z_-]+/g, // OAuth client secret
 ];
+
+/** Length of the secret fragments that count as a leak (a log tail may start mid-token). */
+const SECRET_WINDOW = 16;
+
+/** @param {string} secret @returns {Set<string>} every SECRET_WINDOW-long slice of it */
+function secretWindows(secret) {
+  const out = new Set();
+  for (let i = 0; i + SECRET_WINDOW <= secret.length; i += 1) out.add(secret.slice(i, i + SECRET_WINDOW));
+  return out;
+}
 
 /**
  * Remove anything secret-looking from export text. Throws if a live secret survives.
@@ -180,24 +209,36 @@ const SECRET_PATTERNS = [
 function redactSecrets(text, secrets = knownSecrets()) {
   let out = text;
   for (const re of SECRET_PATTERNS) {
-    // Patterns with groups keep the JSON key and quotes; the others are replaced whole.
-    out = out.replace(re, (match, pre, post) => (typeof pre === 'string' ? `${pre}${REDACTED}${post}` : REDACTED));
+    // Patterns with groups keep the key / quotes; the others are replaced whole.
+    out = out.replace(re, (match, pre, post) =>
+      typeof pre === 'string' ? `${pre}${REDACTED}${typeof post === 'string' ? post : ''}` : REDACTED
+    );
+  }
+  const forms = (secret) => [...new Set([secret, JSON.stringify(secret).slice(1, -1), encodeURIComponent(secret)])];
+  for (const secret of secrets) {
+    for (const form of forms(secret)) out = out.split(form).join(REDACTED);
+  }
+  // Fragments of a live secret (a cut-off log line, a token without its prefix).
+  const windows = new Set();
+  for (const secret of secrets) for (const w of secretWindows(secret)) windows.add(w);
+  if (windows.size) {
+    out = out.replace(/[A-Za-z0-9_\-./%]{16,}/g, (token) => {
+      for (let i = 0; i + SECRET_WINDOW <= token.length; i += 1) {
+        if (windows.has(token.slice(i, i + SECRET_WINDOW))) return REDACTED;
+      }
+      return token;
+    });
   }
   for (const secret of secrets) {
-    for (const form of new Set([secret, JSON.stringify(secret).slice(1, -1)])) {
-      out = out.split(form).join(REDACTED);
-    }
-  }
-  for (const secret of secrets) {
-    if (out.includes(secret)) throw new Error('Экспорт остановлен: в данных найден секрет.');
+    if (forms(secret).some((form) => out.includes(form))) throw new Error('Экспорт остановлен: в данных найден секрет.');
   }
   return out;
 }
 
 /**
- * Write the JSON export (settings, habit history, logs) to a user-chosen file.
+ * Write the JSON export (settings, habit history, logs on request) to a user-chosen file.
  * @param {string} filePath
- * @param {{ habitTitles?: Record<string, string> | null, logsDir?: string | null, now?: Date }} [opts]
+ * @param {{ habitTitles?: Record<string, string> | null, logsDir?: string | null, includeLogs?: boolean, now?: Date }} [opts]
  */
 function exportJson(filePath, opts = {}) {
   const snapshot = buildSnapshot({ format: EXPORT_FORMAT, ...opts });
@@ -215,11 +256,18 @@ function exportJson(filePath, opts = {}) {
 
 const CSV_SEPARATOR = ';'; // what Excel expects with Russian regional settings
 
-/** RFC 4180 quoting; a leading = + - @ is neutralised so Excel never runs it as a formula. */
+/**
+ * RFC 4180 quoting plus formula neutralising. Excel splits on the Windows list separator
+ * («;» in Russian locales, «,» in English ones) and starts a new row at a newline inside a
+ * quoted value, so a formula prefix (= + - @) gets a leading apostrophe not only at the start
+ * of the cell but after every «,», «;», tab or newline, wherever Excel could begin a field.
+ * Inside a multi-line note this leaves a visible «'» before such lines: the CSV is a view,
+ * the JSON export is the exact copy.
+ */
 function csvCell(value) {
   let s = value === null || value === undefined ? '' : String(value);
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
-  if (/[";\r\n,]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
+  s = s.replace(/(^|[\r\n,;\t])([ \t"]*)([=+\-@])/g, "$1$2'$3");
+  if (/[";\r\n,\t]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
   return s;
 }
 
@@ -273,6 +321,42 @@ function exportTasksCsv(filePath, payload) {
 
 // ── Import ─────────────────────────────────────────────────────────────────
 
+const READ_CHUNK = 64 * 1024;
+
+/**
+ * Read a user-picked file without trusting its reported size (a file still being written,
+ * a network share): one handle, read until EOF, stop as soon as the cap is exceeded.
+ * @param {string} file
+ * @param {number} maxBytes
+ * @returns {Promise<string>} UTF-8 text
+ */
+async function readFileCapped(file, maxBytes) {
+  let handle;
+  try {
+    handle = await fs.promises.open(file, 'r');
+  } catch (err) {
+    if (err && err.code === 'EISDIR') throw new Error('Выбран не файл.', { cause: err });
+    throw err;
+  }
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error('Выбран не файл.');
+    /** @type {Buffer[]} */
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const buf = Buffer.alloc(READ_CHUNK);
+      const { bytesRead } = await handle.read(buf, 0, READ_CHUNK, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > maxBytes) throw new Error('Файл слишком большой для экспорта Glass Tasks.');
+      chunks.push(buf.subarray(0, bytesRead));
+    }
+    return Buffer.concat(chunks, total).toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
  * Validate an export / backup file. Throws a Russian message on anything unexpected.
  * @param {string} text
@@ -297,31 +381,43 @@ function parseImport(text) {
   const rawHabits = doc.habits || {};
   if (Object.keys(rawHabits).length > MAX_IMPORT_HABITS) throw new Error('В файле слишком много привычек — это не похоже на экспорт Glass Tasks.');
   /** @type {Record<string, any>} */
-  const habits = {};
+  const habits = Object.create(null);
   let offered = 0;
   for (const [id, entry] of Object.entries(rawHabits)) {
     if (!HABIT_ID_RE.test(id)) continue;
     habits[id] = entry;
     if (isPlainObject(entry) && Array.isArray(entry.dates)) offered += entry.dates.length;
   }
-  const incoming = decodeStore({ habits });
+  let incoming;
+  try {
+    incoming = decodeStore({ habits }, undefined, { maxDays: MAX_IMPORT_DAYS });
+  } catch (err) {
+    if (err instanceof RangeError) {
+      throw new Error('В файле слишком много отметок привычек — это не похоже на экспорт Glass Tasks.', { cause: err });
+    }
+    throw err;
+  }
   const accepted = Object.values(incoming.habits).reduce((n, h) => n + h.dates.length, 0);
+  const createdAt =
+    typeof doc.createdAt === 'string' && doc.createdAt.length <= 40 && !Number.isNaN(Date.parse(doc.createdAt))
+      ? doc.createdAt
+      : null;
   return {
     format: doc.format,
-    createdAt: typeof doc.createdAt === 'string' ? doc.createdAt : null,
+    createdAt,
     incoming,
     settings: doc.settings || null,
     invalidDates: Math.max(0, offered - accepted),
   };
 }
 
-/** Known, non machine-specific keys only; values are re-validated by normalizeSettings. */
+/** Known preference keys only; values are re-validated by normalizeSettings. */
 function importableSettings(settings) {
   /** @type {Record<string, any>} */
   const patch = {};
   if (!settings) return patch;
   for (const key of Object.keys(SETTINGS_DEFAULTS)) {
-    if (MACHINE_SETTINGS.has(key) || !(key in settings)) continue;
+    if (NON_IMPORTABLE_SETTINGS.has(key) || !Object.hasOwn(settings, key)) continue;
     patch[key] = settings[key];
   }
   return patch;
@@ -453,6 +549,7 @@ module.exports = {
   csvCell,
   parseImport,
   importData,
+  readFileCapped,
   redactSecrets,
   listBackups,
   createBackup,

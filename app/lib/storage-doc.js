@@ -53,8 +53,10 @@ const { reportStorageIssue } = require('./storage-events');
 /** @type {Map<string, ReturnType<typeof createJsonDoc>>} */
 const registry = new Map();
 
-const READ_RETRIES = 4;
-const READ_RETRY_MS = 60;
+const READ_RETRIES = 3;
+const READ_RETRY_MS = 40;
+/** After a file proved unreadable, later reads try once, without blocking waits, for this long. */
+const UNREADABLE_COOLDOWN_MS = 60 * 1000;
 
 function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -62,15 +64,17 @@ function sleepSync(ms) {
 
 /**
  * Read a file, riding out short locks (antivirus, indexer, sync tools on Windows).
+ * The waits block the main thread (≤ 240 ms in total), so callers pass retries = 0 for a
+ * file that is already known to stay locked.
  * @returns {{ status: 'ok', text: string } | { status: 'missing' } | { status: 'unreadable', error: any }}
  */
-function readTextWithRetry(filePath) {
+function readTextWithRetry(filePath, retries = READ_RETRIES) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return { status: 'ok', text: fs.readFileSync(filePath, 'utf8') };
     } catch (error) {
       if (error && error.code === 'ENOENT') return { status: 'missing' };
-      if ((error && error.code === 'EISDIR') || attempt >= READ_RETRIES) return { status: 'unreadable', error };
+      if ((error && error.code === 'EISDIR') || attempt >= retries) return { status: 'unreadable', error };
       sleepSync(READ_RETRY_MS * (attempt + 1));
     }
   }
@@ -82,8 +86,8 @@ function readTextWithRetry(filePath) {
  *   | { status: 'missing' } | { status: 'locked' }
  *   | { status: 'corrupt', error: any } | { status: 'unreadable', error: any }}
  */
-function parseDocFile(filePath) {
-  const read = readTextWithRetry(filePath);
+function parseDocFile(filePath, retries = READ_RETRIES) {
+  const read = readTextWithRetry(filePath, retries);
   if (read.status !== 'ok') return read;
   let raw;
   try {
@@ -132,21 +136,65 @@ function createJsonDoc(spec) {
   let timer = null;
   /** The file could not be read this session: its content was never loaded, so never overwrite it blindly. */
   let unreadOnDisk = false;
+  /** When the file last proved unreadable (0 = never): skip the blocking retries for a while. */
+  let unreadableAt = 0;
 
   const file = () => dataPath(spec.name);
   const bakFile = () => `${file()}.bak`;
+
+  /**
+   * Bytes of `src` as they may be kept next to an encrypted doc: an old plaintext file is
+   * wrapped in the encryption envelope, so no copy ever holds personal data in clear.
+   * @returns {string | null} null = cannot be stored safely (or read) right now
+   */
+  function protectedCopyBody(src) {
+    let text;
+    try {
+      text = fs.readFileSync(src, 'utf8');
+    } catch {
+      return null;
+    }
+    if (text.startsWith(`{"format":"${SECRET_ENVELOPE}"`)) return text;
+    if (!canEncrypt()) return null;
+    return JSON.stringify({ format: SECRET_ENVELOPE, schemaVersion: null, data: encryptText(text) });
+  }
 
   /** Copy `src` to `<name>.<suffix>` once (an existing copy is the older, more valuable one). */
   function copyAside(src, suffix) {
     const target = `${file()}.${suffix}`;
     if (statSafe(target)) return target;
     try {
-      fs.copyFileSync(src, target);
+      if (spec.encrypt) {
+        const body = protectedCopyBody(src);
+        if (body === null) return null;
+        writeFileAtomic(target, body);
+      } else {
+        fs.copyFileSync(src, target);
+      }
       return target;
     } catch (err) {
       console.warn(`[storage] could not copy ${spec.name} to ${target}:`, err && err.message ? err.message : err);
       return null;
     }
+  }
+
+  /** Move an unparseable file aside; for encrypted docs the kept copy is encrypted too. */
+  function quarantine(src, error) {
+    if (spec.encrypt) {
+      const body = protectedCopyBody(src);
+      if (body !== null) {
+        const target = `${src}.corrupt-${Date.now()}`;
+        try {
+          writeFileAtomic(target, body);
+          fs.unlinkSync(src);
+          console.warn(`[storage] corrupt ${spec.name} moved to ${path.basename(target)} (encrypted)`);
+          return target;
+        } catch {
+          /* fall back to a plain rename below */
+        }
+      }
+    }
+    return quarantineCorruptFile(src, error);
   }
 
   /**
@@ -189,7 +237,9 @@ function createJsonDoc(spec) {
   function read() {
     if (pending !== undefined) return clone(pending);
     if (memory !== undefined) return clone(memory);
-    const main = parseDocFile(file());
+    const recentlyLocked = unreadableAt && Date.now() - unreadableAt < UNREADABLE_COOLDOWN_MS;
+    const main = parseDocFile(file(), recentlyLocked ? 0 : READ_RETRIES);
+    if (main.status !== 'unreadable') unreadableAt = 0;
     if (main.status === 'ok') return accept(main, file(), false);
     if (main.status === 'missing') return spec.defaults();
     if (main.status === 'locked') {
@@ -203,7 +253,8 @@ function createJsonDoc(spec) {
     if (main.status === 'unreadable') {
       // Locked by another program: leave it alone, fall back to the last good copy if any.
       unreadOnDisk = true;
-      const bak = spec.lastGood ? parseDocFile(bakFile()) : null;
+      unreadableAt = Date.now();
+      const bak = spec.lastGood ? parseDocFile(bakFile(), 0) : null;
       reportStorageIssue({
         kind: 'unreadable',
         file: spec.name,
@@ -215,7 +266,7 @@ function createJsonDoc(spec) {
       return bak && bak.status === 'ok' ? migrate(bak.raw, spec).data : spec.defaults();
     }
     // Corrupt: quarantine, then try the last good copy.
-    const movedTo = quarantineCorruptFile(file(), main.error);
+    const movedTo = quarantine(file(), main.error);
     if (spec.lastGood) {
       const bak = parseDocFile(bakFile());
       if (bak.status === 'ok') {
@@ -230,7 +281,7 @@ function createJsonDoc(spec) {
         });
         return data;
       }
-      if (bak.status === 'corrupt') quarantineCorruptFile(bakFile(), bak.error);
+      if (bak.status === 'corrupt') quarantine(bakFile(), bak.error);
     }
     reportStorageIssue({
       kind: 'reset-corrupt',
@@ -311,7 +362,7 @@ function createJsonDoc(spec) {
       kind: 'unread-preserved',
       file: spec.name,
       repeat: true,
-      message: `${capitalize(spec.label)}: файл, который не удалось прочитать при запуске, сохранён как ${path.basename(copy)} перед перезаписью. Его можно вернуть через импорт или вручную.`,
+      message: `${capitalize(spec.label)}: файл, который не удалось прочитать при запуске, сохранён как ${path.basename(copy)} перед перезаписью. Его можно вернуть вручную: закройте виджет и переименуйте копию обратно.`,
     });
   }
 
@@ -409,11 +460,42 @@ function listDocs() {
   return [...registry.values()];
 }
 
+const TEMP_FILE_RE = /\.\d+\.\d+\.tmp$/;
+const STALE_TEMP_MS = 10 * 60 * 1000;
+
+/**
+ * Temp files from a write interrupted by a crash or power cut: never valid data, and an
+ * older version's may hold secrets in clear. Fresh ones may belong to a write in progress.
+ */
+function removeStaleTempFiles() {
+  for (const dir of [dataPath(), dataPath('backups')]) {
+    let names;
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!TEMP_FILE_RE.test(name)) continue;
+      const full = path.join(dir, name);
+      const st = statSafe(full);
+      if (st && st.isFile() && Date.now() - st.mtimeMs > STALE_TEMP_MS) {
+        try {
+          fs.unlinkSync(full);
+        } catch {
+          /* next start */
+        }
+      }
+    }
+  }
+}
+
 /**
  * Read every registered document once, so old files are migrated (and backed up) at startup
  * instead of whenever a feature first touches them. Call after the stores are loaded.
  */
 function migrateAllDocs() {
+  removeStaleTempFiles();
   for (const doc of registry.values()) {
     try {
       doc.read();

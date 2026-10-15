@@ -22,11 +22,44 @@ const { resetSettingsCache } = require('./settings-store');
 const { resetStreakCache } = require('./streak-store');
 const { resetOfflineCacheMemory } = require('./offline-cache');
 
-/** Refuse to recursively delete anything that is not our own `…/data` folder. */
+/** Data files the app writes; anything else in the folder is left alone. */
+const OWN_FILES = new Set([
+  'settings.json',
+  'streaks.json',
+  'reminders.json',
+  'offline-cache.json',
+  'mock-items.json',
+  'tokens.json',
+  'credentials.json',
+]);
+/** Copies the storage layer makes next to a file: last good, migration, unread, quarantine, temp. */
+const OWN_SUFFIX_RE = /^(?:\.bak|\.v\d+\.bak|\.unread-\d+\.bak|\.corrupt-\d+|\.\d+\.\d+\.tmp)?$/;
+const BACKUP_FILE_RE = /^backup-\d{8}-\d{6}-(?:weekly|manual|pre-import)(?:-\d+)?\.json(?:\.\d+\.\d+\.tmp)?$/;
+
+function isOwnDataFile(name) {
+  for (const base of new Set([...OWN_FILES, ...listDocs().map((d) => d.spec.name)])) {
+    if (name.startsWith(base) && OWN_SUFFIX_RE.test(name.slice(base.length))) return true;
+  }
+  return false;
+}
+
+/**
+ * Refuse anything that is not our own `…/data` folder, and never follow a symlink or
+ * junction out of it.
+ */
 function assertDataRoot(root) {
   const resolved = path.resolve(root);
   if (path.basename(resolved) !== 'data' || path.dirname(resolved) === resolved) {
     throw new Error(`Refusing to delete unexpected data folder: ${resolved}`);
+  }
+  let st = null;
+  try {
+    st = fs.lstatSync(resolved);
+  } catch {
+    /* nothing there yet */
+  }
+  if (st && (st.isSymbolicLink() || !st.isDirectory())) {
+    throw new Error(`Refusing to delete through a link: ${resolved}`);
   }
   return resolved;
 }
@@ -38,21 +71,30 @@ function assertDataRoot(root) {
  *   resets?: Array<() => unknown>,
  *   freeze?: boolean,
  * }} [opts]
- *   revoke: sign out at Google first (best effort); session: Electron session to clear;
- *   resets: extra in-memory caches to drop; freeze: block all writes until restart (default).
- * @returns {Promise<{ removed: string[], failed: Array<{ path: string, error: string }>, chromiumCleared: boolean }>}
+ *   revoke: sign out at Google first (best effort; its string result is reported as `revoke`);
+ *   session: Electron session to clear; resets: extra in-memory caches to drop;
+ *   freeze: block all writes until restart (default).
+ * @returns {Promise<{ removed: string[], kept: string[], failed: Array<{ path: string, error: string }>,
+ *   chromiumCleared: boolean, revoke: string }>}
+ *   kept: entries in the data folder that the app did not create (left untouched).
  */
 async function wipeAllData(opts = {}) {
   /** @type {string[]} */
   const removed = [];
+  /** @type {string[]} */
+  const kept = [];
   /** @type {Array<{ path: string, error: string }>} */
   const failed = [];
+  const root = assertDataRoot(getDataRoot());
 
+  let revoke = 'none';
   if (opts.revoke) {
     try {
-      await opts.revoke();
+      const result = await opts.revoke();
+      if (typeof result === 'string') revoke = result;
     } catch (err) {
-      console.warn('[wipe] revoke failed:', err && err.message ? err.message : err);
+      revoke = 'failed';
+      console.warn('[wipe] revoke failed:', err && err.code ? err.code : 'error');
     }
   }
 
@@ -72,12 +114,47 @@ async function wipeAllData(opts = {}) {
     }
   }
 
-  const root = assertDataRoot(getDataRoot());
+  const unlink = (full, label) => {
+    try {
+      fs.unlinkSync(full);
+      removed.push(label);
+    } catch (err) {
+      if (err && err.code !== 'ENOENT') failed.push({ path: label, error: err.code || String(err) });
+    }
+  };
+  let entries = [];
+  let rootExists = true;
   try {
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 150 });
-    removed.push(root);
-  } catch (err) {
-    failed.push({ path: root, error: err && err.code ? err.code : String(err) });
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    rootExists = false;
+  }
+  for (const entry of entries) {
+    const full = path.join(root, entry.name);
+    if (entry.isFile() && isOwnDataFile(entry.name)) {
+      unlink(full, entry.name);
+    } else if (entry.isDirectory() && entry.name === 'backups') {
+      for (const b of fs.readdirSync(full, { withFileTypes: true })) {
+        if (b.isFile() && BACKUP_FILE_RE.test(b.name)) unlink(path.join(full, b.name), `backups/${b.name}`);
+        else kept.push(`backups/${b.name}`);
+      }
+      try {
+        fs.rmdirSync(full);
+        removed.push('backups');
+      } catch {
+        /* still holds foreign files */
+      }
+    } else {
+      kept.push(entry.name);
+    }
+  }
+  if (rootExists) {
+    try {
+      fs.rmdirSync(root);
+      removed.push(root);
+    } catch {
+      /* foreign files remain: the folder stays */
+    }
   }
 
   // Keys an older version wrote to userData/.env. Never the developer's app/.env.
@@ -103,7 +180,7 @@ async function wipeAllData(opts = {}) {
   }
 
   clearStorageIssues();
-  return { removed, failed, chromiumCleared };
+  return { removed, kept, failed, chromiumCleared, revoke };
 }
 
-module.exports = { wipeAllData, assertDataRoot };
+module.exports = { wipeAllData, assertDataRoot, isOwnDataFile };

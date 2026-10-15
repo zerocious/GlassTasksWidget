@@ -31,7 +31,7 @@ test('export JSON: settings, habit history with titles and logs — never tokens
   const logs = tmpDir('gt-logs-');
   fs.writeFileSync(path.join(logs, 'main.log'), `boot ok\nrefresh ${REFRESH}\n{"access_token":"${ACCESS}"}\nsecret=${CLIENT_SECRET}\n`);
   const out = path.join(tmpDir(), 'export.json');
-  const result = backup.exportJson(out, { habitTitles: { 'habit-1': 'Бег' }, logsDir: logs });
+  const result = backup.exportJson(out, { habitTitles: { 'habit-1': 'Бег' }, logsDir: logs, includeLogs: true });
   const text = fs.readFileSync(out, 'utf8');
   for (const secret of [REFRESH, ACCESS, CLIENT_SECRET, 'GOCSPX-', 'ya29.']) {
     assert.equal(text.includes(secret), false, `${secret} leaked`);
@@ -151,4 +151,121 @@ test('import ignores prototype keys and odd habit ids', () => {
   const many = { format: 'glass-tasks-export', habits: {} };
   for (let i = 0; i <= 5000; i += 1) many.habits[`h${i}`] = { dates: [] };
   assert.throws(() => backup.parseImport(JSON.stringify(many)), /слишком много привычек/);
+});
+
+test('import never changes autostart or global hotkeys, with or without applySettings', () => {
+  freshDataRoot();
+  settingsStore.saveSettings({ theme: 'dark', autostart: false });
+  const file = JSON.stringify({
+    format: 'glass-tasks-export',
+    settings: { theme: 'light', autostart: true, toggleHotkey: 'Alt+Q', switchViewHotkey: 'Control+V' },
+  });
+  const viaMain = [];
+  const report = backup.importData(file, { applySettings: (p) => viaMain.push(p) });
+  assert.deepEqual(report.settingsApplied, ['theme']);
+  assert.deepEqual(viaMain, [{ theme: 'light' }]);
+  backup.importData(file); // default path: saveSettings directly
+  const s = settingsStore.loadSettings();
+  assert.equal(s.theme, 'light');
+  assert.equal(s.autostart, false);
+  assert.equal(s.toggleHotkey, settingsStore.DEFAULT_TOGGLE_HOTKEY);
+  assert.equal(s.switchViewHotkey, settingsStore.DEFAULT_SWITCH_HOTKEY);
+});
+
+test('hostile import cannot blow up the history: future days dropped, totals capped, createdAt checked', () => {
+  freshDataRoot();
+  const months = {};
+  for (let y = 2027; y < 2200; y += 1) for (let m = 1; m <= 12; m += 1) months[`${y}-${String(m).padStart(2, '0')}`] = 0x7fffffff;
+  const habits = {};
+  for (let i = 0; i < 50; i += 1) habits[`h${i}`] = { months };
+  const started = process.hrtime.bigint();
+  const report = backup.importData(JSON.stringify({ format: 'glass-tasks-export', createdAt: 'x'.repeat(1000), habits }));
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.equal(report.daysAdded, 0, 'nothing from the future');
+  assert.equal(report.createdAt, null, 'unexpected createdAt is not echoed back');
+  assert.ok(ms < 3000, `import took ${ms} ms`);
+
+  const many = {};
+  const day = (i) => new Date(Date.UTC(2017, 0, 1) + i * 86400000).toISOString().slice(0, 10);
+  const dates = Array.from({ length: 3000 }, (_, i) => day(i));
+  for (let i = 0; i < 400; i += 1) many[`m${i}`] = { dates };
+  assert.throws(
+    () => backup.importData(JSON.stringify({ format: 'glass-tasks-export', habits: many })),
+    /слишком много отметок/
+  );
+});
+
+test('CSV: formula starts are neutralised wherever Excel could begin a field or row', () => {
+  const cell = backup.csvCell;
+  // Split on «,» (en-US list separator), «;», tab, or a newline inside a quoted value.
+  assert.equal(cell('Invoice 42,=HYPERLINK("x"),see'), `"Invoice 42,'=HYPERLINK(""x""),see"`);
+  assert.equal(cell('agenda\n=1+1,'), `"agenda\n'=1+1,"`);
+  assert.equal(cell('a;  +cmd|calc'), `"a;  '+cmd|calc"`);
+  assert.equal(cell('x\t@SUM(1)'), `"x\t'@SUM(1)"`);
+  assert.equal(cell('-2+3'), `'-2+3`);
+  assert.equal(cell('price - 5'), 'price - 5', 'operators mid-text are fine');
+  assert.equal(cell('e-mail, re: x'), '"e-mail, re: x"');
+  assert.equal(cell('a,"=1+1'), `"a,""'=1+1"`, 'a quote before the formula does not help it');
+  // Every field Excel could see after splitting on «,» starts safely.
+  const line = backup.tasksToCsv({ tasks: [{ id: 't', title: 'a,=1,+2,-3,@4' }] }).text.split('\r\n')[1];
+  for (const field of line.split(',')) assert.doesNotMatch(field.replace(/^"/, ''), /^\s*[=+\-@]/, field);
+});
+
+test('redactSecrets: encoded, truncated and JWT/Bearer/code forms are removed too', () => {
+  const live = '1//0gLiveRefreshTokenValue_abcdefghij';
+  const jwt = 'eyJhbGciOiJSUzI1NiJ9.eyJlbWFpbCI6Iml2YW5AZXhhbXBsZS5jb20ifQ.c2lnbmF0dXJlLXNpZ25hdHVyZQ';
+  const input = [
+    `revoke?token=${encodeURIComponent(live)}`,
+    `body refresh_token=${encodeURIComponent(live)}&x=1`,
+    `id_token ${jwt}`,
+    'Authorization: Bearer ya29.a0AfH6SMBx',
+    'Authorization: Bearer abc.def-ghi_jkl',
+    'code=4/0AY0e-g7abcdefghijklmnop&scope=x',
+    "{ refresh_token: 'not-a-1slash-token-value' }",
+    `tail cut: ${live.slice(9)}`, // log tail started inside the token
+  ].join('\n');
+  const out = backup.redactSecrets(input, [live]);
+  for (const leak of [live, encodeURIComponent(live), live.slice(9), jwt, 'a0AfH6SMBx', 'abc.def-ghi_jkl', '4/0AY0e', 'not-a-1slash']) {
+    assert.equal(out.includes(leak), false, `${leak} survived:\n${out}`);
+  }
+  assert.match(out, /x=1/, 'harmless text stays');
+});
+
+test('export log tails start at a line boundary', () => {
+  freshDataRoot();
+  const logs = tmpDir('gt-logs-');
+  const line = 'x'.repeat(100);
+  fs.writeFileSync(path.join(logs, 'main.log'), `${line}\n`.repeat(20_000)); // ~2 MB > 1 MB budget
+  const out = path.join(tmpDir(), 'e.json');
+  backup.exportJson(out, { logsDir: logs, includeLogs: true });
+  const text = JSON.parse(fs.readFileSync(out, 'utf8')).logs[0].text;
+  assert.ok(text.startsWith(line), 'no partial first line');
+});
+
+test('import stops decoding as soon as the day cap is exceeded (bounded work and memory)', () => {
+  freshDataRoot();
+  const months = {};
+  for (let i = 0; i < 119; i += 1) {
+    const d = new Date(2026, 9 - i, 1);
+    months[`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`] = 0x7fffffff;
+  }
+  const habits = {};
+  for (let i = 0; i < 500; i += 1) habits[`h${i}`] = { months };
+  const started = process.hrtime.bigint();
+  assert.throws(() => backup.parseImport(JSON.stringify({ format: 'glass-tasks-export', habits })), /слишком много отметок/);
+  const ms = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(ms < 1500, `took ${ms} ms`);
+  habits.h500 = { months };
+  assert.throws(() => backup.parseImport(JSON.stringify({ format: 'glass-tasks-export', habits })), /слишком много привычек/);
+});
+
+test('export includes logs only when asked', () => {
+  freshDataRoot();
+  const logs = tmpDir('gt-logs-');
+  fs.writeFileSync(path.join(logs, 'main.log'), 'line\n');
+  const out = path.join(tmpDir(), 'e.json');
+  backup.exportJson(out, { logsDir: logs });
+  assert.equal('logs' in JSON.parse(fs.readFileSync(out, 'utf8')), false);
+  backup.exportJson(out, { logsDir: logs, includeLogs: true });
+  assert.equal(JSON.parse(fs.readFileSync(out, 'utf8')).logs.length, 1);
 });
