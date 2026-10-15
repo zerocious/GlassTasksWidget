@@ -66,11 +66,11 @@ function dueKindFor(due, completed) {
 
 /** Managed time line written by the widget UI («время HH:MM»). */
 const MANAGED_TIME_LINE_RE =
-  /^(?:время|Время|time)\s*[:-]?\s*\d{1,2}[:.]\d{2}\s*$/i;
+  /^(?:время|Время|time)\s*(?:[:-]\s*)?\d{1,2}[:.]\d{2}\s*$/i;
 
 /** Managed recurrence line («повтор: ежедневно|будни|еженедельно»). */
 const MANAGED_REPEAT_LINE_RE =
-  /^(?:повтор|Повтор|repeat)\s*[:-]?\s*(ежедневно|будни|еженедельно|daily|weekdays|weekly)\s*$/i;
+  /^(?:повтор|Повтор|repeat)\s*(?:[:-]\s*)?(ежедневно|будни|еженедельно|daily|weekdays|weekly)\s*$/i;
 
 /** @type {Record<string, 'daily' | 'weekdays' | 'weekly'>} */
 const REPEAT_ALIAS = {
@@ -123,6 +123,19 @@ function normalizeRecurrenceInput(value) {
 }
 
 /**
+ * Strip leading / trailing newlines. A loop, not /\n+$/: that regex is quadratic on a long
+ * run of newlines, and notes come from Google (anyone who can put a task in the list).
+ * @param {string} text
+ */
+function trimNewlines(text) {
+  let start = 0;
+  let end = text.length;
+  while (start < end && text.charCodeAt(start) === 10) start += 1;
+  while (end > start && text.charCodeAt(end - 1) === 10) end -= 1;
+  return text.slice(start, end);
+}
+
+/**
  * Upsert/clear managed «повтор: …» line in notes.
  * @param {string | null | undefined} notes
  * @param {'daily' | 'weekdays' | 'weekly' | null} recurrence
@@ -130,7 +143,7 @@ function normalizeRecurrenceInput(value) {
 function applyRecurrenceToNotes(notes, recurrence) {
   const lines = String(notes || '').split(/\r?\n/);
   const kept = lines.filter((line) => !MANAGED_REPEAT_LINE_RE.test(String(line).trim()));
-  let rest = kept.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
+  let rest = trimNewlines(kept.join('\n'));
   if (!recurrence) return rest;
   const marker = REPEAT_MARKER[recurrence];
   return rest ? `${marker}\n${rest}` : marker;
@@ -228,7 +241,7 @@ function normalizeDueTimeInput(value) {
 function applyDueTimeToNotes(notes, dueTime) {
   const lines = String(notes || '').split(/\r?\n/);
   const kept = lines.filter((line) => !MANAGED_TIME_LINE_RE.test(String(line).trim()));
-  let rest = kept.join('\n').replace(/^\n+/, '').replace(/\n+$/, '');
+  let rest = trimNewlines(kept.join('\n'));
 
   if (dueTime == null || dueTime === '') {
     // Drop standalone time-only lines so Clear fully removes resolvable time.
@@ -241,9 +254,8 @@ function applyDueTimeToNotes(notes, dueTime) {
         if (/^\d{1,2}:\d{2}$/.test(t)) return false;
         return true;
       })
-      .join('\n')
-      .replace(/^\n+/, '')
-      .replace(/\n+$/, '');
+      .join('\n');
+    rest = trimNewlines(rest);
     return rest;
   }
 
@@ -306,7 +318,7 @@ function timeFromNotes(notes) {
   if (!notes) return null;
   const text = String(notes);
   const patterns = [
-    /(?:^|[\s,;|(])(?:в|В|at|time|время|Время)\s*[:-]?\s*(\d{1,2})[:.](\d{2})\b/i,
+    /(?:^|[\s,;|(])(?:в|В|at|time|время|Время)\s*(?:[:-]\s*)?(\d{1,2})[:.](\d{2})\b/i,
     /\b(\d{1,2}):(\d{2})\b/,
   ];
   for (const re of patterns) {
