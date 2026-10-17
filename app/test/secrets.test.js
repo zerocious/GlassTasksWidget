@@ -227,3 +227,32 @@ test('encrypted keys that cannot be read yet are retried instead of being report
   assert.equal(config.hasGoogleCredentials(), true);
   assert.equal(config.getGoogleClientSecret(), 'S3');
 });
+
+test('an encrypted file that cannot be decrypted is reported once instead of failing silently', () => {
+  const file = path.join(env.dir, 'tokens.json');
+  config.setSafeStorageForTests(fakeSafeStorage);
+  config.writeSecretJson(file, { refresh_token: 'r' });
+  // e.g. the data folder was copied from another Windows account: DPAPI cannot open it
+  config.setSafeStorageForTests({
+    isEncryptionAvailable: () => true,
+    encryptString: fakeSafeStorage.encryptString,
+    decryptString: () => {
+      throw new Error('The data is invalid');
+    },
+  });
+  assert.equal(config.readSecretJson(file, null), null);
+  assert.equal(config.readSecretJson(file, null), null);
+  assert.deepEqual(kinds(), ['decrypt-failed']);
+  assert.equal(getStorageEvents()[0].file, 'tokens.json');
+  assert.equal(exists(env.dir, 'tokens.json'), true, 'the file is left alone');
+});
+
+test('an encrypted file with safeStorage unavailable is reported once', () => {
+  const file = path.join(env.dir, 'offline-cache.json');
+  config.setSafeStorageForTests(fakeSafeStorage);
+  config.writeSecretJson(file, { a: 1 });
+  config.setSafeStorageForTests(null);
+  assert.equal(config.readSecretJson(file, null), null);
+  assert.equal(config.readSecretJson(file, null), null);
+  assert.deepEqual(kinds(), ['secrets-unavailable']);
+});

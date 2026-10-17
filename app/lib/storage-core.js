@@ -221,8 +221,15 @@ function plaintextSecretsAllowed() {
  * @type {Map<string, string>}
  */
 const secretMemory = new Map();
-/** Plaintext secret files already reported this session (one event per file). */
-const reportedPlaintext = new Set();
+/** `<kind>:<file>` pairs already reported this session (one event per problem and file). */
+const reported = new Set();
+
+function reportOnce(kind, filePath) {
+  const key = `${kind}:${filePath}`;
+  if (reported.has(key)) return;
+  reported.add(key);
+  recordStorageEvent(kind, path.basename(filePath));
+}
 
 function isEnvelope(raw) {
   return Boolean(raw && typeof raw === 'object' && raw.format === SECRET_ENVELOPE);
@@ -297,6 +304,7 @@ function readSecretJson(filePath, fallback) {
   if (isEnvelope(raw)) {
     if (!canEncrypt()) {
       console.warn(`[config] cannot decrypt ${path.basename(filePath)}: safeStorage unavailable`);
+      reportOnce('secrets-unavailable', filePath);
       return fallback;
     }
     try {
@@ -304,6 +312,7 @@ function readSecretJson(filePath, fallback) {
       return JSON.parse(plain);
     } catch (err) {
       console.warn(`[config] decrypt ${path.basename(filePath)} failed:`, err && err.message ? err.message : err);
+      reportOnce('decrypt-failed', filePath);
       return fallback;
     }
   }
@@ -314,9 +323,8 @@ function readSecretJson(filePath, fallback) {
       } catch {
         /* keep plaintext; retry next read */
       }
-    } else if (!reportedPlaintext.has(filePath)) {
-      reportedPlaintext.add(filePath);
-      recordStorageEvent('plaintext-secrets', path.basename(filePath));
+    } else {
+      reportOnce('plaintext-secrets', filePath);
     }
   }
   return raw;
@@ -345,7 +353,7 @@ function setSafeStorageForTests(impl) {
 /** Drop in-memory secrets and the "already reported" markers (wipe, tests). */
 function forgetSecretMemory() {
   secretMemory.clear();
-  reportedPlaintext.clear();
+  reported.clear();
 }
 
 module.exports = {
