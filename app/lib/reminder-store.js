@@ -42,10 +42,15 @@ function loadReminderState() {
  * @param {ReminderState} state
  */
 function saveReminderState(state) {
-  saveDoc(REMINDERS_SPEC, {
-    date: state.date || todayIso(),
-    notifiedIds: [...new Set(state.notifiedIds || [])],
-  });
+  try {
+    saveDoc(REMINDERS_SPEC, {
+      date: state.date || todayIso(),
+      notifiedIds: [...new Set(state.notifiedIds || [])],
+    });
+  } catch (err) {
+    // Disposable data: a toast may repeat, but a storage problem must not break reminders.
+    console.warn('[reminders] could not save state:', err && err.message ? err.message : err);
+  }
 }
 
 /**

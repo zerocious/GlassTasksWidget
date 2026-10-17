@@ -219,8 +219,13 @@ function attachTokenSaver(oauth2) {
   const generation = authGeneration;
   oauth2.on('tokens', (tokens) => {
     if (generation !== authGeneration) return;
-    const merged = { ...(loadSavedTokens() || {}), ...tokens };
-    saveTokens(merged);
+    try {
+      const merged = { ...(loadSavedTokens() || {}), ...tokens };
+      saveTokens(merged);
+    } catch (err) {
+      // Keep the refreshed token in memory (oauth2 holds it); a storage problem must not fail the API call.
+      console.warn('[auth] could not save refreshed tokens:', err && err.message ? err.message : err);
+    }
   });
 }
 

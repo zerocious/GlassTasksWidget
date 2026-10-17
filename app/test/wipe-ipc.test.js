@@ -408,3 +408,33 @@ test('registerDataIpc wires channels, event push, quit flush and housekeeping', 
   for (const fn of listeners['before-quit']) fn();
   assert.equal(exists(env.dir, 'offline-cache.json'), true);
 });
+
+test('ipc: the default relaunch quits normally (before-quit hooks run) instead of exiting hard', async () => {
+  const calls = [];
+  const { handlers, queue } = fakeIpc({
+    relaunch: undefined,
+    app: {
+      getPath: () => env.dir,
+      getVersion: () => '1.0.0',
+      setLoginItemSettings: () => {},
+      relaunch: () => calls.push('relaunch'),
+      quit: () => calls.push('quit'),
+      exit: () => calls.push('exit'),
+    },
+  });
+  streaks.markCompleted('h1', '2026-03-01');
+  const text = backup.serializeBundle(backup.buildBundle());
+  const holder = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-imp-'));
+  const file = path.join(holder, 'import.json');
+  fs.writeFileSync(file, text);
+  try {
+    queue.open.push({ canceled: false, filePaths: [file] });
+    queue.message.push(0);
+    const res = await handlers['data:import'](OK);
+    assert.equal(res.restarting, true);
+    await wait(400);
+    assert.deepEqual(calls, ['relaunch', 'quit']);
+  } finally {
+    fs.rmSync(holder, { recursive: true, force: true });
+  }
+});

@@ -21,6 +21,9 @@ let configCache = null;
 let googleCreds = null;
 /** @type {string | null} */
 let dataRootOverride = null;
+/** When credentials.json could not be decrypted: earliest time to try again (0 = no retry pending). */
+let retryAfter = 0;
+const RETRY_NOT_READY_MS = 5000;
 /** @type {Record<string, string> | undefined} */
 let shellEnvSnapshot;
 
@@ -53,6 +56,7 @@ function setDataRootForTests(dir) {
   dataRootOverride = dir ? path.resolve(dir) : null;
   googleCreds = null;
   envLoaded = false;
+  retryAfter = 0;
   shellEnvSnapshot = undefined;
 }
 
@@ -230,19 +234,24 @@ function readDevEnvCredentials() {
  * are the fallback.
  */
 function loadEnvFile({ force = false } = {}) {
-  if (envLoaded && !force) return;
+  if (envLoaded && !force && !(retryAfter && Date.now() >= retryAfter)) return;
   envLoaded = true;
+  retryAfter = 0;
   takeShellEnv(); // scrub before anything else can spawn a child process
   migrateAppWrittenEnv();
   googleCreds = readStoredCredentials() || readDevEnvCredentials();
-  // Encrypted keys exist but cannot be read yet (safeStorage not ready): ask again next time
-  // instead of reporting «not configured» for the whole session.
-  if (!googleCreds && !core.canEncrypt() && fs.existsSync(getCredentialsJsonPath())) envLoaded = false;
+  // Encrypted keys exist but cannot be read yet (safeStorage not ready): look again in a few
+  // seconds instead of reporting «not configured» for the whole session. The pause keeps a
+  // machine where safeStorage never comes up from re-reading the files on every call.
+  if (!googleCreds && !core.canEncrypt() && fs.existsSync(getCredentialsJsonPath())) {
+    retryAfter = Date.now() + RETRY_NOT_READY_MS;
+  }
 }
 
 /** Force re-read of credentials on next check. */
 function resetEnvCache() {
   envLoaded = false;
+  retryAfter = 0;
   googleCreds = null;
 }
 
@@ -405,6 +414,7 @@ const {
 
 module.exports = {
   ROOT,
+  APP_ENV_MARKER,
   loadEnvFile,
   resetEnvCache,
   readJson,

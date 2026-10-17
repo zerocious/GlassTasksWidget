@@ -96,7 +96,7 @@ function saveOfflineCache(payload) {
  */
 function loadOfflineCache() {
   if (memoryCache !== undefined) return memoryCache;
-  const raw = loadDoc(OFFLINE_SPEC).data;
+  const { data: raw, status } = loadDoc(OFFLINE_SPEC);
   // Require google mode so a wiped/placeholder file is not treated as a real cache.
   if (
     !raw ||
@@ -104,7 +104,7 @@ function loadOfflineCache() {
     !Array.isArray(raw.tasks) ||
     !Array.isArray(raw.habits)
   ) {
-    memoryCache = null;
+    if (status !== 'unreadable') memoryCache = null; // retry later if the file was only locked
     return null;
   }
   memoryCache = raw;

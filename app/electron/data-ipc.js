@@ -25,6 +25,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getDataRoot } = require('../lib/config');
+const { todayIso } = require('../lib/dates');
 const { removeStaleTempFiles } = require('../lib/storage-core');
 const { onStorageEvent } = require('../lib/storage-status');
 const { getStorageReport } = require('../lib/storage-report');
@@ -37,11 +38,6 @@ const WEEKLY_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
 
 function errorMessage(err) {
   return err && err.message ? String(err.message) : String(err);
-}
-
-function isoDay(now) {
-  const p = (n) => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }
 
 /**
@@ -66,11 +62,12 @@ function isoDay(now) {
 function createDataHandlers(deps) {
   const { app, dialog, isFromWidget, getMainWindow } = deps;
   const now = deps.now || (() => new Date());
+  // app.quit() (not app.exit()) so before-quit / will-quit run: pending cache write, tray, hotkeys.
   const relaunch =
     deps.relaunch ||
     (() => {
       app.relaunch();
-      app.exit(0);
+      app.quit();
     });
   const getWidgetData = deps.getWidgetData || (() => require('../lib/google-tasks').getWidgetData());
   const parent = () => {
@@ -157,7 +154,7 @@ function createDataHandlers(deps) {
     'data:export-json': guarded(async (payload) => {
       const picked = await saveDialog(
         'Экспорт данных',
-        `glass-tasks-export-${isoDay(now())}.json`,
+        `glass-tasks-export-${todayIso(now())}.json`,
         'json',
         'JSON'
       );
@@ -171,7 +168,7 @@ function createDataHandlers(deps) {
     }),
 
     'data:export-csv': guarded(async () => {
-      const picked = await saveDialog('Экспорт задач в CSV', `glass-tasks-${isoDay(now())}.csv`, 'csv', 'CSV');
+      const picked = await saveDialog('Экспорт задач в CSV', `glass-tasks-${todayIso(now())}.csv`, 'csv', 'CSV');
       if (picked.canceled || !picked.filePath) return { ok: true, canceled: true };
       const data = await getWidgetData();
       const csv = backup.tasksToCsv(data);

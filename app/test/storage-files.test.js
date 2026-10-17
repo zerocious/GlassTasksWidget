@@ -197,3 +197,88 @@ test('deleteDoc removes the file and its .bak', () => {
   deleteDoc(spec());
   assert.deepEqual(fs.readdirSync(env.dir), []);
 });
+
+// ---- a file that exists but cannot be read must never be rebuilt from defaults ---------------
+
+/** Make reads of `name` fail with `code` for the duration of fn. */
+function withReadError(name, code, fn) {
+  const orig = fs.readFileSync;
+  fs.readFileSync = function failing(file, ...rest) {
+    if (String(file).endsWith(name)) throw Object.assign(new Error(`${code}: simulated`), { code });
+    return orig.call(this, file, ...rest);
+  };
+  try {
+    return fn();
+  } finally {
+    fs.readFileSync = orig;
+  }
+}
+
+test('a locked file is "unreadable": not missing, not quarantined, and saving over it is refused', () => {
+  saveDoc(spec(), { items: [{ name: 'real data' }], count: 1 });
+  const before = read(env.dir, 'doc.json');
+  withReadError('doc.json', 'EBUSY', () => {
+    assert.deepEqual(loadDoc(spec()), { data: null, status: 'unreadable' });
+    assert.throws(() => saveDoc(spec(), { items: [], count: 0 }), /недоступен для чтения/);
+  });
+  assert.equal(read(env.dir, 'doc.json'), before, 'main file untouched');
+  assert.equal(read(env.dir, 'doc.json.bak'), before, 'last good copy untouched');
+  assert.deepEqual(fs.readdirSync(env.dir).sort(), ['doc.json', 'doc.json.bak']);
+  assert.deepEqual(kinds(), ['read-failed']);
+  // once the file can be read again everything works and the refusal is lifted
+  assert.equal(loadDoc(spec()).status, 'ok');
+  assert.doesNotThrow(() => saveDoc(spec(), { items: [], count: 0 }));
+});
+
+test('a transient read error is retried and succeeds', () => {
+  saveDoc(spec(), { items: [], count: 0 });
+  const orig = fs.readFileSync;
+  let failures = 1;
+  fs.readFileSync = function flaky(file, ...rest) {
+    if (String(file).endsWith('doc.json') && failures > 0) {
+      failures -= 1;
+      throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+    }
+    return orig.call(this, file, ...rest);
+  };
+  try {
+    assert.equal(loadDoc(spec()).status, 'ok');
+  } finally {
+    fs.readFileSync = orig;
+  }
+  assert.deepEqual(kinds(), []);
+});
+
+test('only ENOENT counts as missing: other errors such as EISDIR are unreadable', () => {
+  fs.mkdirSync(path.join(env.dir, 'doc.json')); // a directory where the file should be
+  assert.equal(loadDoc(spec()).status, 'unreadable');
+});
+
+// ---- newer files are not rewritten, odd versions are not guessed -----------------------------
+
+test('a file from a newer app is never rewritten by this one (saves are skipped, data kept)', () => {
+  write(env.dir, 'doc.json', { schemaVersion: 9, items: ['future'], extra: 'unknown field' });
+  const before = read(env.dir, 'doc.json');
+  assert.equal(loadDoc(spec()).status, 'newer');
+  assert.deepEqual(saveDoc(spec(), { items: [], count: 0 }), { persisted: false });
+  assert.equal(read(env.dir, 'doc.json'), before);
+  assert.equal(exists(env.dir, 'doc.json.bak'), false);
+});
+
+test('a non-integer schemaVersion is treated as damage, not as version 0', () => {
+  for (const bad of ['"1"', '1.5', 'null', '-2', 'true']) {
+    write(env.dir, 'doc.json', `{"schemaVersion": ${bad}, "items": [{"name": "x"}], "count": 1}`);
+    const res = loadDoc(spec({ keepBak: false }));
+    assert.deepEqual(res, { data: null, status: 'reset' }, bad);
+    assert.ok(fs.readdirSync(env.dir).some((n) => n.startsWith('doc.json.corrupt-')), `${bad}: original kept`);
+    for (const n of fs.readdirSync(env.dir)) if (n.startsWith('doc.json.corrupt-')) fs.unlinkSync(path.join(env.dir, n));
+  }
+});
+
+test('a damaged schemaVersion is restored from the last good copy when there is one', () => {
+  saveDoc(spec(), { items: [{ name: 'good' }], count: 1 });
+  write(env.dir, 'doc.json', '{"schemaVersion": "2", "items": []}');
+  const res = loadDoc(spec());
+  assert.deepEqual(res.data.items, [{ name: 'good' }]);
+  assert.equal(res.status, 'restored');
+});

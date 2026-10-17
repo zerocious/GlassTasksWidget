@@ -217,15 +217,37 @@ test('google-auth builds the OAuth client from the module, and fails clearly wit
   assert.equal(auth.hasGoogleCredentials(), false);
 });
 
-test('encrypted keys that cannot be read yet are retried instead of being reported as missing for the session', () => {
+test('encrypted keys that cannot be read yet are retried, but not on every call', () => {
   config.setSafeStorageForTests(fakeSafeStorage);
   config.saveGoogleCredentials({ clientId: CLIENT_ID, clientSecret: 'S3' });
   config.resetEnvCache();
   config.setSafeStorageForTests(null); // e.g. keyring not unlocked / app not ready yet
-  assert.equal(config.hasGoogleCredentials(), false);
-  config.setSafeStorageForTests(fakeSafeStorage); // becomes available
-  assert.equal(config.hasGoogleCredentials(), true);
-  assert.equal(config.getGoogleClientSecret(), 'S3');
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => clock;
+  try {
+    // many calls in a row read the file once, not once per call
+    let reads = 0;
+    const origRead = fs.readFileSync;
+    fs.readFileSync = function counting(file, ...rest) {
+      if (String(file).endsWith('credentials.json')) reads += 1;
+      return origRead.call(this, file, ...rest);
+    };
+    try {
+      for (let i = 0; i < 30; i += 1) assert.equal(config.hasGoogleCredentials(), false);
+    } finally {
+      fs.readFileSync = origRead;
+    }
+    assert.ok(reads <= 3, `credentials.json was read ${reads} times for 30 calls`);
+    // safeStorage comes up, but within the pause the answer is still the cached «no»
+    config.setSafeStorageForTests(fakeSafeStorage);
+    assert.equal(config.hasGoogleCredentials(), false);
+    clock += 6000; // after the pause it looks again
+    assert.equal(config.hasGoogleCredentials(), true);
+    assert.equal(config.getGoogleClientSecret(), 'S3');
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 test('an encrypted file that cannot be decrypted is reported once instead of failing silently', () => {
@@ -255,4 +277,69 @@ test('an encrypted file with safeStorage unavailable is reported once', () => {
   assert.equal(config.readSecretJson(file, null), null);
   assert.equal(config.readSecretJson(file, null), null);
   assert.deepEqual(kinds(), ['secrets-unavailable']);
+});
+
+test('a failing disk write is not mistaken for missing encryption: it throws and leaves the old file alone', () => {
+  config.setSafeStorageForTests(fakeSafeStorage);
+  // the parent of the target is a regular file, so the write must fail
+  write(env.dir, 'blocker', 'x');
+  const file = path.join(env.dir, 'blocker', 'tokens.json');
+  assert.throws(() => config.writeSecretJson(file, { refresh_token: 'r' }));
+  assert.deepEqual(core.memoryOnlySecretFiles(), []);
+  assert.deepEqual(kinds(), [], 'no misleading «safeStorage unavailable» event');
+});
+
+test('a legacy plaintext file is not deleted when the encrypted write fails', () => {
+  config.setSafeStorageForTests(fakeSafeStorage);
+  write(env.dir, 'tokens.json', { refresh_token: 'legacy' });
+  const orig = fs.writeFileSync;
+  fs.writeFileSync = function failing(file, ...rest) {
+    if (String(file).includes('tokens.json')) throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+    return orig.call(this, file, ...rest);
+  };
+  try {
+    assert.throws(() => config.writeSecretJson(path.join(env.dir, 'tokens.json'), { refresh_token: 'new' }), /ENOSPC/);
+  } finally {
+    fs.writeFileSync = orig;
+  }
+  assert.equal(JSON.parse(read(env.dir, 'tokens.json')).refresh_token, 'legacy');
+});
+
+test('while writes are frozen (after delete-all) secrets stay in memory and nothing is touched on disk', () => {
+  config.setSafeStorageForTests(fakeSafeStorage);
+  const file = path.join(env.dir, 'tokens.json');
+  config.writeSecretJson(file, { refresh_token: 'before' });
+  const onDisk = read(env.dir, 'tokens.json');
+  core.freezeWrites();
+  assert.deepEqual(config.writeSecretJson(file, { refresh_token: 'after' }), { persisted: false, encrypted: false });
+  assert.equal(read(env.dir, 'tokens.json'), onDisk);
+  assert.equal(config.readSecretJson(file, null).refresh_token, 'after');
+});
+
+test('a damaged secrets file is deleted, not kept as a *.corrupt copy with partial tokens', () => {
+  config.setSafeStorageForTests(fakeSafeStorage);
+  write(env.dir, 'tokens.json', '{"refresh_token": "partial-secret-val');
+  assert.equal(config.readSecretJson(path.join(env.dir, 'tokens.json'), null), null);
+  assert.deepEqual(fs.readdirSync(env.dir), []);
+  assert.deepEqual(kinds(), ['corrupt-reset']);
+});
+
+test('a secrets file that is locked right now is reported as unreadable, never as «no tokens»', () => {
+  config.setSafeStorageForTests(fakeSafeStorage);
+  auth._test.saveTokens({ refresh_token: 'keep-me' });
+  const orig = fs.readFileSync;
+  fs.readFileSync = function locked(file, ...rest) {
+    if (String(file).endsWith('tokens.json')) throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
+    return orig.call(this, file, ...rest);
+  };
+  try {
+    assert.equal(auth.loadSavedTokens(), null);
+    // the OAuth client's «tokens» event must not overwrite the real file with a refresh-token-less merge
+    assert.throws(() => auth._test.saveTokens({ access_token: 'a' }), /недоступен для чтения/);
+    assert.deepEqual(kinds(), ['read-failed']);
+  } finally {
+    fs.readFileSync = orig;
+  }
+  assert.equal(auth.loadSavedTokens().refresh_token, 'keep-me', 'the file is intact and readable again');
+  assert.doesNotThrow(() => auth._test.saveTokens({ refresh_token: 'keep-me', access_token: 'a' }));
 });

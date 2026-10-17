@@ -151,8 +151,11 @@ function normalizeSettings(raw) {
  */
 function loadSettings() {
   if (settingsCache) return settingsCache;
-  settingsCache = normalizeSettings(loadDoc(SETTINGS_SPEC).data || {});
-  return settingsCache;
+  const { data, status } = loadDoc(SETTINGS_SPEC);
+  const loaded = normalizeSettings(data || {});
+  // An unreadable file is retried next time instead of being cached as «all defaults».
+  if (status !== 'unreadable') settingsCache = loaded;
+  return loaded;
 }
 
 /**

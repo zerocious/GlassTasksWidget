@@ -152,8 +152,12 @@ function migrateStreaksToV1(data) {
   const old = isPlainObject(data.habits) ? data.habits : {};
   for (const [id, entry] of Object.entries(old)) {
     if (!isValidHabitId(id) || !isPlainObject(entry)) continue;
-    const runs = datesToRuns(cleanDates(entry.dates));
-    if (runs.length) habits[id] = { runs };
+    // Idempotent: an entry that is already in the v1 shape ({ runs, archive }) keeps everything.
+    const dates = [...new Set([...runsToDates(entry.runs), ...cleanDates(entry.dates)])].sort();
+    const runs = datesToRuns(dates);
+    const archive = cleanArchive(entry.archive);
+    if (!runs.length && !Object.keys(archive).length) continue;
+    habits[id] = Object.keys(archive).length ? { runs, archive } : { runs };
   }
   return { habits };
 }
@@ -199,9 +203,11 @@ function toDisk(store) {
 
 function loadStore() {
   if (storeCache) return storeCache;
-  const { data } = loadDoc(STREAKS_SPEC);
-  storeCache = data ? fromDisk(data) : { habits: {} };
-  return storeCache;
+  const { data, status } = loadDoc(STREAKS_SPEC);
+  const store = data ? fromDisk(data) : { habits: {} };
+  // An unreadable file is retried next time; caching an empty history would hide the real one.
+  if (status !== 'unreadable') storeCache = store;
+  return store;
 }
 
 function saveStore(store) {
@@ -384,6 +390,9 @@ function mergeHistory(raw) {
   let datesAdded = 0;
   let changed = false;
   for (const [id, inc] of Object.entries(incoming)) {
+    // Days older than the retention window live in the monthly archive, exactly as for local
+    // history; adding them as day-level dates would count them a second time on every import.
+    compactHabit(inc);
     const existed = Boolean(store.habits[id]) && (store.habits[id].dates.length > 0 || Object.keys(store.habits[id].archive).length > 0);
     const habit = ensureHabit(store, id);
     const before = habit.dates.length;

@@ -232,3 +232,71 @@ test('mock: a fresh demo session builds its payload and seeds a streak history (
   assert.ok(payload.habits.some((h) => h.completedDates.length > 0), 'demo habits start with some history');
   assert.equal(readJsonFile(env.dir, 'streaks.json').schemaVersion, 1);
 });
+
+// ---- review follow-ups -----------------------------------------------------------------------------
+
+test('settings: an unreadable file is not cached as defaults and a save cannot overwrite it', () => {
+  settings.saveSettings({ theme: 'light', size: 'compact' });
+  settings.resetSettingsCache();
+  const before = read(env.dir, 'settings.json');
+  const orig = fs.readFileSync;
+  fs.readFileSync = function locked(f, ...rest) {
+    if (String(f).endsWith('settings.json')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    return orig.call(this, f, ...rest);
+  };
+  try {
+    assert.equal(settings.loadSettings().theme, 'dark', 'defaults while the file cannot be read');
+    assert.throws(() => settings.saveSettings({ theme: 'light' }), /недоступен для чтения/);
+  } finally {
+    fs.readFileSync = orig;
+  }
+  assert.equal(read(env.dir, 'settings.json'), before);
+  assert.equal(settings.loadSettings().theme, 'light', 'the real settings are back once readable');
+});
+
+test('settings: a file from a newer app is not rewritten by window moves and the like', () => {
+  write(env.dir, 'settings.json', { schemaVersion: 4, theme: 'light', somethingNew: true });
+  const before = read(env.dir, 'settings.json');
+  settings.saveSettings({ pos: { x: 1, y: 2 } });
+  assert.equal(read(env.dir, 'settings.json'), before);
+});
+
+test('reminders: a storage problem never breaks reminder handling', () => {
+  write(env.dir, 'blocker', 'x');
+  config.setDataRootForTests(path.join(env.dir, 'blocker', 'sub')); // parent is a file: every write fails
+  assert.doesNotThrow(() => reminders.markNotified(['a']));
+  config.setDataRootForTests(env.dir);
+});
+
+test('mock: seeding the demo history writes the history once, not once per day', () => {
+  const writes = [];
+  const orig = fs.writeFileSync;
+  fs.writeFileSync = function counting(f, ...rest) {
+    if (String(f).includes('streaks.json')) writes.push(String(f));
+    return orig.call(this, f, ...rest);
+  };
+  try {
+    mock.getMockPayload({ tasksListName: 'T', habitsListName: 'H', accentColor: '#C4122E' });
+  } finally {
+    fs.writeFileSync = orig;
+  }
+  assert.ok(writes.length <= 2, `streaks.json was written ${writes.length} times (file + .bak expected)`);
+  assert.ok(writes.length >= 1);
+});
+
+test('mock: an unreadable demo file is not replaced by the default lists', () => {
+  mock.addMockItem('tasks', 'Precious demo task');
+  const before = read(env.dir, 'mock-items.json');
+  const orig = fs.readFileSync;
+  fs.readFileSync = function locked(f, ...rest) {
+    if (String(f).endsWith('mock-items.json')) throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+    return orig.call(this, f, ...rest);
+  };
+  try {
+    assert.ok(mock.loadMockStore().tasks.length > 0, 'the demo still shows something');
+    assert.throws(() => mock.addMockItem('tasks', 'another'), /недоступен для чтения/);
+  } finally {
+    fs.readFileSync = orig;
+  }
+  assert.equal(read(env.dir, 'mock-items.json'), before);
+});

@@ -11,8 +11,11 @@
  *    documents: a legacy secrets file may be plaintext, and a copy would outlive the encryption);
  *  - a damaged file is moved aside (`*.corrupt-<ts>`) and, when the document keeps a last
  *    good copy (`keepBak`), restored from `<file>.bak`;
- *  - a file written by a NEWER widget is copied to `backups/migrations/` once before this
- *    older widget can overwrite it (non-secret documents);
+ *  - a file written by a NEWER widget is copied to `backups/migrations/` once and then never
+ *    rewritten by this older widget (changes to it are not saved);
+ *  - a file that exists but cannot be read right now (locked by an antivirus, no access) is
+ *    'unreadable': nothing is rebuilt from defaults and saving over it is refused;
+ *  - a `schemaVersion` that is not a non-negative integer is treated as damage, not as version 0;
  *  - every notable event is recorded for the diagnostics report (storage-status.js).
  *
  * Secret documents (`secret: true`) go through safeStorage via storage-core.
@@ -43,7 +46,7 @@ const MIGRATION_BACKUPS_KEEP = 3;
  *
  * @typedef {{
  *   data: Record<string, any> | null,
- *   status: 'missing' | 'ok' | 'migrated' | 'restored' | 'reset' | 'newer',
+ *   status: 'missing' | 'ok' | 'migrated' | 'restored' | 'reset' | 'newer' | 'unreadable',
  *   migratedFrom?: number,
  * }} LoadResult
  */
@@ -54,6 +57,12 @@ function isPlainObject(v) {
 
 /** Files for which a "newer schema" copy was already made this session. */
 const newerHandled = new Set();
+/** Files written by a newer widget: this older one reads them but never rewrites them. */
+const newerFiles = new Set();
+/** Files that exist but could not be read last time; saving over them is refused. */
+const unreadableFiles = new Set();
+/** Valid `schemaVersion`: a non-negative integer. */
+const isValidVersion = (v) => Number.isInteger(v) && v >= 0;
 
 function migrationDir(file) {
   return path.join(path.dirname(file), 'backups', 'migrations');
@@ -103,35 +112,73 @@ function restoreFromBak(spec) {
 }
 
 /**
+ * Move a damaged non-secret document aside and bring back the last good copy if there is one.
+ * @param {DocSpec} spec
+ * @param {unknown} err why it is considered damaged
+ * @returns {Record<string, any> | null} the restored document, or null when the data was reset
+ */
+function recoverDamaged(spec, err) {
+  if (core.quarantineCorruptFile(spec.file(), err)) recordStorageEvent('corrupt-quarantined', spec.name);
+  const restored = spec.keepBak ? restoreFromBak(spec) : null;
+  if (!restored || (Object.prototype.hasOwnProperty.call(restored, 'schemaVersion') && !isValidVersion(restored.schemaVersion))) {
+    recordStorageEvent('corrupt-reset', spec.name);
+    return null;
+  }
+  recordStorageEvent('restored-from-backup', spec.name);
+  return restored;
+}
+
+/** The file exists but cannot be read now: say so, and make sure nothing overwrites it. */
+function markUnreadable(spec, file) {
+  if (!unreadableFiles.has(file)) recordStorageEvent('read-failed', spec.name);
+  unreadableFiles.add(file);
+  return { data: null, status: /** @type {const} */ ('unreadable') };
+}
+
+/**
  * Read a document, migrating / recovering as described above.
  * @param {DocSpec} spec
  * @returns {LoadResult}
  */
 function loadDoc(spec) {
+  const result = loadDocInner(spec);
+  if (result.status !== 'unreadable') unreadableFiles.delete(spec.file());
+  if (result.status !== 'newer') newerFiles.delete(spec.file());
+  return result;
+}
+
+/** @param {DocSpec} spec @returns {LoadResult} */
+function loadDocInner(spec) {
   const file = spec.file();
   let raw;
   let status = /** @type {LoadResult['status']} */ ('ok');
 
   if (spec.secret) {
-    raw = core.readSecretJson(file, undefined);
+    try {
+      raw = core.readSecretJson(file, undefined);
+    } catch (err) {
+      if (err && err.code === 'EUNREADABLE') return markUnreadable(spec, file);
+      throw err;
+    }
     if (raw === undefined) return { data: null, status: 'missing' };
     if (!isPlainObject(raw)) return { data: null, status: 'reset' };
+    if (Object.prototype.hasOwnProperty.call(raw, 'schemaVersion') && !isValidVersion(raw.schemaVersion)) {
+      return { data: null, status: 'reset' };
+    }
   } else {
     const res = core.readJsonStrict(file);
     if (res.state === 'missing') return { data: null, status: 'missing' };
-    const bad =
-      res.state === 'corrupt' ||
-      !isPlainObject(res.value) ||
-      (spec.validate ? !spec.validate(res.value) : false);
-    if (bad) {
-      const err = res.state === 'corrupt' ? res.error : new Error('unexpected JSON shape');
-      if (core.quarantineCorruptFile(file, err)) recordStorageEvent('corrupt-quarantined', spec.name);
-      const restored = spec.keepBak ? restoreFromBak(spec) : null;
-      if (!restored) {
-        recordStorageEvent('corrupt-reset', spec.name);
-        return { data: null, status: 'reset' };
-      }
-      recordStorageEvent('restored-from-backup', spec.name);
+    if (res.state === 'unreadable') return markUnreadable(spec, file);
+    let damage = null;
+    if (res.state === 'corrupt') damage = res.error;
+    else if (!isPlainObject(res.value)) damage = new Error('unexpected JSON shape');
+    else if (Object.prototype.hasOwnProperty.call(res.value, 'schemaVersion') && !isValidVersion(res.value.schemaVersion)) {
+      // «1», 1.5, null...: not something this app wrote, so do not guess its format.
+      damage = new Error('invalid schemaVersion');
+    } else if (spec.validate && !spec.validate(res.value)) damage = new Error('failed validation');
+    if (damage) {
+      const restored = recoverDamaged(spec, damage);
+      if (!restored) return { data: null, status: 'reset' };
       raw = restored;
       status = 'restored';
     } else {
@@ -139,9 +186,10 @@ function loadDoc(spec) {
     }
   }
 
-  const version = Number.isInteger(raw.schemaVersion) && raw.schemaVersion >= 0 ? raw.schemaVersion : 0;
+  const version = isValidVersion(raw.schemaVersion) ? raw.schemaVersion : 0;
 
   if (version > spec.version) {
+    newerFiles.add(file);
     if (!newerHandled.has(file)) {
       newerHandled.add(file);
       // Secret documents get no copies: a legacy file may be plaintext and a copy would outlive encryption.
@@ -193,6 +241,13 @@ function loadDoc(spec) {
  */
 function saveDoc(spec, data) {
   const file = spec.file();
+  if (newerFiles.has(file)) {
+    // Written by a newer widget: rewriting it would drop fields this version does not know.
+    return { persisted: false };
+  }
+  if (unreadableFiles.has(file)) {
+    throw new Error(`Файл «${spec.name}» сейчас недоступен для чтения: сохранение отменено, чтобы не затереть данные.`);
+  }
   /** @type {Record<string, any>} */
   const out = { schemaVersion: spec.version };
   for (const [k, v] of Object.entries(data)) {
@@ -238,6 +293,8 @@ function deleteDoc(spec) {
 /** Test hook. */
 function resetStorageFilesForTests() {
   newerHandled.clear();
+  newerFiles.clear();
+  unreadableFiles.clear();
 }
 
 module.exports = {

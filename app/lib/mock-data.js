@@ -7,6 +7,7 @@ const {
   markCompleted,
   unmarkCompleted,
   removeHabit,
+  mergeHistory,
 } = require('./streak-store');
 const { todayIso } = require('./dates');
 const { dataPath } = require('./config');
@@ -101,7 +102,7 @@ const DEFAULT_HABITS = [
 ];
 
 function loadMockStore() {
-  const stored = loadDoc(MOCK_SPEC).data;
+  const { data: stored, status } = loadDoc(MOCK_SPEC);
   if (stored && Array.isArray(stored.tasks) && Array.isArray(stored.habits)) {
     return stored;
   }
@@ -109,7 +110,8 @@ function loadMockStore() {
     tasks: DEFAULT_TASKS.map((t) => ({ ...t })),
     habits: DEFAULT_HABITS.map((h) => ({ ...h })),
   };
-  saveDoc(MOCK_SPEC, fresh);
+  // A file that exists but is unreadable right now must not be replaced by the defaults.
+  if (status !== 'unreadable') saveDoc(MOCK_SPEC, fresh);
   return fresh;
 }
 
@@ -133,12 +135,22 @@ function seedDemoStreaks() {
     'mock-h7': [1, 2, 4, 5, 6, 9, 11, 12, 14, 16, 18, 19, 21],
   };
 
+  // One merge = one save (the demo history is ~130 days; saving per day wrote the file 130 times).
+  const habits = {};
   for (const [id, dayOffsets] of Object.entries(seeds)) {
-    for (const offset of dayOffsets) {
-      const d = new Date();
-      d.setDate(d.getDate() - offset);
-      markCompleted(id, todayIso(d));
-    }
+    habits[id] = {
+      dates: dayOffsets.map((offset) => {
+        const d = new Date();
+        d.setDate(d.getDate() - offset);
+        return todayIso(d);
+      }),
+    };
+  }
+  try {
+    mergeHistory({ habits });
+  } catch (err) {
+    // The demo history is cosmetic: never let a storage problem break the demo payload.
+    console.warn('[mock] could not seed demo streaks:', err && err.message ? err.message : err);
   }
 }
 

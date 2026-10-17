@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const { dataPath, getGoogleClientSecret } = require('./config');
 const { writeFileAtomic } = require('./storage-core');
+const { todayIso } = require('./dates');
 const { recordStorageEvent } = require('./storage-status');
 const { loadSettings, saveSettings } = require('./settings-store');
 const streaks = require('./streak-store');
@@ -244,11 +245,6 @@ function backupDir() {
 
 const BACKUP_NAME_RE = /^(weekly|manual|pre-import)-(\d{4}-\d{2}-\d{2})(?:-(\d{6}))?\.json$/;
 
-function localDate(now) {
-  const p = (n) => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
-}
-
 function localTime(now) {
   const p = (n) => String(n).padStart(2, '0');
   return `${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
@@ -300,7 +296,7 @@ function pruneBackups(kind) {
 function createBackup(opts = {}) {
   const kind = opts.kind || 'manual';
   const now = opts.now || new Date();
-  const name = kind === 'weekly' ? `weekly-${localDate(now)}.json` : `${kind}-${localDate(now)}-${localTime(now)}.json`;
+  const name = kind === 'weekly' ? `weekly-${todayIso(now)}.json` : `${kind}-${todayIso(now)}-${localTime(now)}.json`;
   try {
     const text = serializeBundle(buildBundle({ kind: 'backup', now, appVersion: opts.appVersion }));
     writeFileAtomic(path.join(backupDir(), name), text);

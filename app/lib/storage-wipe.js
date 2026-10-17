@@ -19,9 +19,6 @@ const { resetSettingsCache } = require('./settings-store');
 const { resetStreakCache } = require('./streak-store');
 const { recordStorageEvent } = require('./storage-status');
 
-/** Marker the old plaintext .env writer left in the files it created. */
-const APP_ENV_MARKER = 'Saved by the app UI';
-
 /**
  * Refuse to empty anything that does not look like an app data folder
  * (a filesystem root, the home directory, or a path with fewer than three segments).
@@ -68,7 +65,7 @@ function emptyFolder(dir) {
 function removeAppWrittenEnv() {
   const envPath = config.getCredentialsEnvPath();
   try {
-    if (fs.readFileSync(envPath, 'utf8').includes(APP_ENV_MARKER)) {
+    if (fs.readFileSync(envPath, 'utf8').includes(config.APP_ENV_MARKER)) {
       fs.unlinkSync(envPath);
       return true;
     }

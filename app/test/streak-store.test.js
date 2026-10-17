@@ -254,3 +254,78 @@ test('migrateStreaksToV1 is a pure function', () => {
   assert.deepEqual(migrateStreaksToV1(input), { habits: { h1: { runs: [['2026-01-01', '2026-01-02']] } } });
   assert.deepEqual(input, copy);
 });
+
+// ---- review follow-ups: idempotent migration, no double counting, unreadable file --------------
+
+test('migrateStreaksToV1 keeps entries that are already in the v1 shape (idempotent)', () => {
+  const v1 = { habits: { h1: { runs: [['2026-01-01', '2026-01-03']], archive: { '2019-03': 4 } } } };
+  assert.deepEqual(migrateStreaksToV1(v1), v1);
+  assert.deepEqual(migrateStreaksToV1(migrateStreaksToV1({ habits: { h1: { dates: ['2026-01-02', '2026-01-01'] } } })), {
+    habits: { h1: { runs: [['2026-01-01', '2026-01-02']] } },
+  });
+  // mixed: both a dates list and runs
+  assert.deepEqual(migrateStreaksToV1({ habits: { h1: { dates: ['2026-02-01'], runs: [['2026-01-01', '2026-01-01']] } } }), {
+    habits: { h1: { runs: [['2026-01-01', '2026-01-01'], ['2026-02-01', '2026-02-01']] } },
+  });
+});
+
+test('importing days older than the retention window does not inflate the archive, however often it is repeated', () => {
+  const old = ['2019-03-01', '2019-03-02', '2019-04-10'];
+  const incoming = { habits: { h1: { dates: [...old, '2026-03-01'] } } };
+  const first = streaks.mergeHistory(incoming);
+  assert.equal(first.datesAdded, 1, 'only the recent day is a new day-level date');
+  const archive = () => streaks.exportHistory().habits.h1.archive;
+  assert.deepEqual(archive(), { '2019-03': 2, '2019-04': 1 });
+  for (let i = 0; i < 3; i += 1) streaks.mergeHistory(incoming);
+  assert.deepEqual(archive(), { '2019-03': 2, '2019-04': 1 });
+  streaks.resetStreakCache();
+  assert.deepEqual(archive(), { '2019-03': 2, '2019-04': 1 });
+  assert.deepEqual(streaks.getHabitStats('h1').completedDates, ['2026-03-01']);
+  assert.deepEqual(streaks.mergeHistory(incoming), { habitsAdded: 0, habitsUpdated: 0, datesAdded: 0, rejected: 0 });
+});
+
+test('restoring a backup whose days have since crossed the retention cutoff does not double count them', () => {
+  const day = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  const edge = day(streaks.HISTORY_DAYS + 1); // already past the cutoff
+  const keep = day(5);
+  const dated = { habits: { h1: { dates: [edge, keep] } } };
+  streaks.mergeHistory(dated);
+  const before = JSON.stringify(streaks.exportHistory());
+  streaks.mergeHistory(dated);
+  streaks.resetStreakCache();
+  assert.equal(JSON.stringify(streaks.exportHistory()), before);
+});
+
+test('an unreadable streaks.json is not cached as an empty history and is never overwritten', () => {
+  streaks.markCompleted('h1', '2026-03-01');
+  streaks.markCompleted('h1', '2026-03-02');
+  streaks.resetStreakCache();
+  const file = path.join(env.dir, 'streaks.json');
+  const before = fs.readFileSync(file, 'utf8');
+  const orig = fs.readFileSync;
+  fs.readFileSync = function locked(f, ...rest) {
+    if (String(f).endsWith('streaks.json')) throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+    return orig.call(this, f, ...rest);
+  };
+  try {
+    assert.deepEqual(streaks.loadStore(), { habits: {} });
+    assert.throws(() => streaks.markCompleted('h1', '2026-03-03'), /недоступен для чтения/);
+  } finally {
+    fs.readFileSync = orig;
+  }
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+  assert.equal(fs.readFileSync(`${file}.bak`, 'utf8'), before);
+  // the lock is gone: the real history is back and saving works
+  assert.deepEqual(streaks.getHabitStats('h1').completedDates, ['2026-03-01', '2026-03-02']);
+  streaks.markCompleted('h1', '2026-03-03');
+  assert.deepEqual(streaks.getHabitStats('h1').completedDates, ['2026-03-01', '2026-03-02', '2026-03-03']);
+});
+
+test('streaks written by a newer app are kept as they are', () => {
+  const doc = { schemaVersion: 7, habits: { h1: { runs: [['2026-01-01', '2026-01-02']], futureField: { a: 1 } } } };
+  write(env.dir, 'streaks.json', doc);
+  const before = read(env.dir, 'streaks.json');
+  assert.deepEqual(streaks.getHabitStats('h1').completedDates, ['2026-01-01', '2026-01-02']);
+  streaks.markCompleted('h1', '2026-01-03');
+  assert.equal(read(env.dir, 'streaks.json'), before);
+});

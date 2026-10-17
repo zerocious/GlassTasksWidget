@@ -68,17 +68,42 @@ function quarantineCorruptFile(filePath, err) {
   return target;
 }
 
+/** Read errors that usually go away on their own (antivirus / indexer / sync client holding the file). */
+const TRANSIENT_READ_ERRORS = new Set(['EBUSY', 'EPERM', 'EACCES', 'EMFILE', 'ENFILE', 'EAGAIN']);
+const READ_ATTEMPTS = 3;
+const READ_RETRY_MS = 60;
+
+function sleepSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    /* no SharedArrayBuffer: retry immediately */
+  }
+}
+
 /**
  * Read and parse a JSON file without side effects.
+ * Only a file that does not exist is 'missing'. A file that exists but cannot be read right now
+ * (locked, no access) is 'unreadable': callers must not treat that as «start from scratch»,
+ * because the next save would overwrite the real data.
  * @param {string} filePath
- * @returns {{ state: 'missing' } | { state: 'ok', value: any, text: string } | { state: 'corrupt', error: unknown }}
+ * @returns {{ state: 'missing' } | { state: 'unreadable', error: any } | { state: 'ok', value: any, text: string } | { state: 'corrupt', error: unknown }}
  */
 function readJsonStrict(filePath) {
   let text;
-  try {
-    text = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return { state: 'missing' };
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      text = fs.readFileSync(filePath, 'utf8');
+      break;
+    } catch (error) {
+      const code = error && /** @type {any} */ (error).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return { state: 'missing' };
+      if (TRANSIENT_READ_ERRORS.has(code) && attempt < READ_ATTEMPTS) {
+        sleepSync(READ_RETRY_MS);
+        continue;
+      }
+      return { state: 'unreadable', error };
+    }
   }
   try {
     return { state: 'ok', value: JSON.parse(text), text };
@@ -94,6 +119,8 @@ function readJson(filePath, fallback) {
     if (quarantineCorruptFile(filePath, res.error)) {
       recordStorageEvent('corrupt-quarantined', path.basename(filePath));
     }
+  } else if (res.state === 'unreadable') {
+    console.warn(`[config] cannot read ${path.basename(filePath)}:`, res.error && res.error.message ? res.error.message : res.error);
   }
   return fallback;
 }
@@ -256,18 +283,28 @@ function removePlaintextSecretFile(filePath) {
  */
 function writeSecretJson(filePath, data) {
   const plain = JSON.stringify(data, null, 2);
+  if (writesFrozen) {
+    // After «delete all»: keep it for this process only, touch nothing on disk.
+    secretMemory.set(filePath, plain);
+    return { persisted: false, encrypted: false };
+  }
   if (canEncrypt()) {
+    let enc = null;
     try {
-      const enc = getSafeStorage().encryptString(plain).toString('base64');
+      enc = getSafeStorage().encryptString(plain).toString('base64');
+    } catch (err) {
+      console.warn(`[config] encrypt ${path.basename(filePath)} failed:`, err && err.message ? err.message : err);
+      // fall through to the memory-only path: never degrade to plain text on an error
+    }
+    if (enc !== null) {
+      // A failing disk write (full disk, no access) is NOT «encryption unavailable»: it throws,
+      // so the caller reports write-failed and the old file is left untouched.
       writeFileAtomic(filePath, JSON.stringify({ format: SECRET_ENVELOPE, data: enc }), {
         encoding: 'utf8',
         mode: 0o600,
       });
       secretMemory.delete(filePath);
       return { persisted: true, encrypted: true };
-    } catch (err) {
-      console.warn(`[config] encrypt ${path.basename(filePath)} failed:`, err && err.message ? err.message : err);
-      // fall through to the memory-only path: never degrade to plain text on an error
     }
   } else if (plaintextSecretsAllowed()) {
     writeFileAtomic(filePath, plain, { encoding: 'utf8', mode: 0o600 });
@@ -299,8 +336,24 @@ function readSecretJson(filePath, fallback) {
     }
     return value;
   }
-  const raw = readJson(filePath, undefined);
-  if (raw === undefined) return fallback;
+  const res = readJsonStrict(filePath);
+  if (res.state === 'missing') return fallback;
+  if (res.state === 'unreadable') {
+    // Locked or no access right now: the caller must not treat this as «no secrets».
+    throw Object.assign(new Error(`cannot read ${path.basename(filePath)}`), { code: 'EUNREADABLE', cause: res.error });
+  }
+  if (res.state === 'corrupt') {
+    // A damaged secrets file is useless; keeping it as *.corrupt-<ts> would only leave a partial
+    // plaintext token behind, so it is deleted instead of quarantined.
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      /* ignore */
+    }
+    recordStorageEvent('corrupt-reset', path.basename(filePath));
+    return fallback;
+  }
+  const raw = res.value;
   if (isEnvelope(raw)) {
     if (!canEncrypt()) {
       console.warn(`[config] cannot decrypt ${path.basename(filePath)}: safeStorage unavailable`);
