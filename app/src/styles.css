@@ -38,8 +38,8 @@
   --accent-soft: rgba(196, 18, 46, 0.22);
   --accent-glow: rgba(196, 18, 46, 0.35);
   --text: #f5f0f2;
-  --text-muted: #b8a8ae;
-  --text-dim: #8a7a80;
+  --text-muted: #c4b6bc;
+  --text-dim: #a99ba1;
   --glass-opacity: 0.72;
   --glass-opacity-strong: 0.82;
   --glass-fill: rgba(22, 12, 16, var(--glass-opacity));
@@ -321,11 +321,12 @@ body {
   contain: layout paint;
 }
 
-.panel::-webkit-scrollbar { width: 4px; }
+.panel::-webkit-scrollbar { width: 6px; }
 .panel::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.28);
+  border-radius: 6px;
 }
+.panel::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.45); }
 
 .section-head {
   display: flex;
@@ -437,6 +438,11 @@ body {
   stroke-width: 1.75;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+/* The UA `hidden` rule does not apply to SVG, so both eyes showed at once. */
+.hide-done-icon[hidden] {
+  display: none;
 }
 
 .list {
@@ -599,9 +605,10 @@ body.is-dnd .row {
   font-weight: 600;
 }
 
+/* Overdue is the common case for a backlog, so keep the card neutral and let the
+   date text and time badge carry the colour; only a thin edge marks the row. */
 .row.due-overdue {
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 85%, #000);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 .row.due-overdue .row-meta {
@@ -691,6 +698,12 @@ body.is-dnd .row {
   font-size: 14px;
   line-height: 1.25;
   transition: color 0.25s var(--ease);
+  /* Two lines at most; the full text is in the title tooltip. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .row.done .row-title {
@@ -2274,7 +2287,15 @@ html[data-simple-anim="true"] .undo-toast {
   padding: 0;
   background: rgba(255, 255, 255, 0.22);
   cursor: pointer;
+  position: relative;
   transition: transform 0.22s var(--ease-out), background 0.22s var(--ease);
+}
+
+/* 7px dot, ~19px hit area (Fitts's law). */
+.dot::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
 }
 
 .dot[aria-current="true"] {
@@ -2298,7 +2319,14 @@ html[data-simple-anim="true"] .undo-toast {
   display: none;
 }
 
-.status-banner.visible { display: block; }
+.status-banner.visible {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.status-banner .banner-action { margin-left: auto; }
 
 /* Always-visible reminder card inside the widget (OS banners may be off). */
 .in-app-toast {
