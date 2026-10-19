@@ -102,9 +102,9 @@ function classifyExchangeError(err) {
   return err instanceof Error ? err : new Error(String(err));
 }
 
-/** Lazy-load heavy googleapis only when OAuth is needed. */
+/** Lazy-load the Google client only when OAuth is needed (Tasks only, not the whole googleapis bundle). */
 function getGoogle() {
-  return require('googleapis').google;
+  return require('@googleapis/tasks');
 }
 
 function randomUrlSafe(bytes = 32) {
@@ -119,9 +119,9 @@ function tokensFile() {
   return dataPath('tokens.json');
 }
 
-/** @type {import('googleapis').Auth.OAuth2Client | null} */
+/** @type {import('google-auth-library').OAuth2Client | null} */
 let cachedClient = null;
-/** @type {Promise<import('googleapis').Auth.OAuth2Client> | null} */
+/** @type {Promise<import('google-auth-library').OAuth2Client> | null} */
 let loginInFlight = null;
 
 function escapeHtml(s) {

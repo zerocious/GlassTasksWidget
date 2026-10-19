@@ -148,9 +148,9 @@ async function listAllPages(listFn, params) {
   return items;
 }
 
-/** Lazy-load heavy googleapis only on first Google API use. */
+/** Lazy-load the Google client only on first Google API use. */
 function getGoogle() {
-  return require('googleapis').google;
+  return require('@googleapis/tasks');
 }
 
 /** Tasks API client whose calls retry rate limits / transient server errors. */
