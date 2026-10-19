@@ -913,6 +913,12 @@ function focusAddInput() {
   input?.focus();
 }
 
+/** Row title text; the tooltip carries the full text since the row clamps to two lines. */
+function setRowTitle(el, text) {
+  el.textContent = text;
+  el.title = text;
+}
+
 /**
  * @param {string} text
  * @param {{ label?: string, url?: string, onClick?: () => void } | null} [action]
@@ -1132,7 +1138,7 @@ function buildTaskRow(task) {
       </div>
     </div>
   `;
-  li.querySelector('.row-title').textContent = task.title;
+  setRowTitle(li.querySelector('.row-title'), task.title);
   li.querySelector('.row-meta').textContent = displayMeta(task.meta);
   syncRowA11y(li, task);
   const notesInd = li.querySelector('.row-notes-ind');
@@ -1174,7 +1180,7 @@ function buildHabitRow(habit) {
       <span class="streak-badge">${streak} <span class="unit">дн.</span></span>
     </div>
   `;
-  li.querySelector('.row-title').textContent = habit.title;
+  setRowTitle(li.querySelector('.row-title'), habit.title);
   li.querySelector('.row-meta').textContent = displayMeta(habit.meta) || 'Ежедневно';
   syncRowTimeChip(li, habit);
   syncRowA11y(li, habit);
@@ -1416,7 +1422,7 @@ function patchTaskRow(task) {
     const check = li.querySelector('.check');
     if (check) check.className = `check${task.completed ? ' done' : ''}`;
     const title = li.querySelector('.row-title');
-    if (title) title.textContent = task.title;
+    if (title) setRowTitle(title, task.title);
     let metaLine = li.querySelector('.row-meta-line');
     let meta = li.querySelector('.row-meta');
     if (!metaLine && meta) {
@@ -1482,7 +1488,7 @@ function patchHabitRow(habit) {
     const icon = li.querySelector('.habit-icon');
     if (icon) icon.innerHTML = habitIconHtml(habit.title);
     const title = li.querySelector('.row-title');
-    if (title) title.textContent = habit.title;
+    if (title) setRowTitle(title, habit.title);
     let metaLine = li.querySelector('.row-meta-line');
     let meta = li.querySelector('.row-meta');
     if (!metaLine && meta) {
@@ -1585,12 +1591,17 @@ function renderAll() {
   offlinePill.hidden = !state.offline;
 
   let banner = '';
+  let bannerAction = setupAction();
   if (state.offline) {
     banner = state.warning
       ? `Офлайн: ${state.warning}`
       : 'Офлайн — показаны последние загруженные данные.';
   } else if (state.mode === 'mock') {
-    banner = 'Демо-режим: UI на mock-данных. Подключите Google в настройках (Google API ключи).';
+    banner = 'Демо: тестовые данные';
+    bannerAction = {
+      label: 'Подключить Google',
+      onClick: () => syncCredentialsForm({ open: true, fromSettings: true }),
+    };
   } else if (state.mode === 'needs_auth') {
     banner =
       state.message ||
@@ -1608,7 +1619,7 @@ function renderAll() {
       banner = `В Google Tasks нет ${missing.length > 1 ? 'списков' : 'списка'} ${missing.join(' и ')}. Создайте ${missing.length > 1 ? 'их' : 'его'} (или переименуйте свой) и нажмите ↻.`;
     }
   }
-  setBanner(banner, setupAction());
+  setBanner(banner, bannerAction);
 
   btnAuth.textContent = signedIn() ? 'Выйти' : 'Google';
 }
