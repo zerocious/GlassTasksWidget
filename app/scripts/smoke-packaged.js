@@ -129,7 +129,16 @@ async function main() {
 
   try {
     const { ws, evaluate } = await connect(port);
-    await sleep(1500);
+    // A cold start (fresh install, antivirus scanning new files) can be slower than a fixed delay:
+    // wait until the first list has rendered, then give the rest of the UI a moment.
+    for (let i = 0; i < 30; i++) {
+      const ready = await evaluate(
+        `typeof state === 'object' && document.querySelectorAll('#list-tasks li.row').length > 0`,
+      ).catch(() => false);
+      if (ready) break;
+      await sleep(500);
+    }
+    await sleep(300);
     const page = await evaluate(`({
       title: document.title,
       csp: !!document.querySelector('meta[http-equiv="Content-Security-Policy"]'),
