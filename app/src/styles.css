@@ -2291,6 +2291,11 @@ html[data-simple-anim="true"] .undo-toast {
   transition: transform 0.22s var(--ease-out), background 0.22s var(--ease);
 }
 
+/* White at 22% is invisible on the light glass. */
+[data-theme="light"] .dot {
+  background: rgba(42, 26, 32, 0.28);
+}
+
 /* 7px dot, ~19px hit area (Fitts's law). */
 .dot::after {
   content: "";
