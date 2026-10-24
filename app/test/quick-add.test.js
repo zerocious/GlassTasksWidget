@@ -93,6 +93,21 @@ test('weekday words and abbreviations inside ordinary text are not dates', () =>
   });
 });
 
+test('title-case and capital weekday abbreviations still give the day', () => {
+  assert.deepEqual(ps('Пн созвон'), { title: 'созвон', dueKey: '2026-10-26', time: null, recurrence: null });
+  assert.equal(ps('Созвон Пт').dueKey, '2026-10-30');
+  assert.deepEqual(ps('Пт: сдать отчёт'), { title: 'сдать отчёт', dueKey: '2026-10-30', time: null, recurrence: null });
+  assert.equal(ps('ПТ сдать отчёт').dueKey, '2026-10-30');
+  assert.equal(ps('Отчёт ВТ').dueKey, '2026-10-27');
+  assert.equal(ps('Уборка Вс').dueKey, '2026-10-25');
+  assert.equal(ps('Созвон 18:00 вт').dueKey, '2026-10-27');
+  // Watts after a number in any case, the «ВС» / «СБ» acronyms and «пТ» stay in the title.
+  assert.deepEqual(ps('Купить лампу 60 вт'), plain('Купить лампу 60 вт'));
+  assert.deepEqual(ps('Купить лампу 60 ВТ'), plain('Купить лампу 60 ВТ'));
+  assert.deepEqual(ps('Согласовать с СБ'), plain('Согласовать с СБ'));
+  assert.deepEqual(ps('Созвон пТ'), plain('Созвон пТ'));
+});
+
 test('DD.MM.YY dates take the year', () => {
   assert.deepEqual(ps('Отчёт 01.11.27'), { title: 'Отчёт', dueKey: '2027-11-01', time: null, recurrence: null });
   assert.equal(ps('Сдать отчёт 15.11.26').title, 'Сдать отчёт');
@@ -107,6 +122,17 @@ test('decimal numbers are not dates', () => {
   assert.deepEqual(ps('Обновить до 2.5'), plain('Обновить до 2.5'));
   assert.deepEqual(ps('Купить 1.10 кг яблок'), plain('Купить 1.10 кг яблок'));
   assert.deepEqual(ps('Скидка 12.10%'), plain('Скидка 12.10%'));
+  assert.deepEqual(ps('Купить молоко 1.10 л'), plain('Купить молоко 1.10 л'));
+});
+
+test('a date before «м.» / «л.» and a name is still a date', () => {
+  assert.deepEqual(ps('Встреча 15.11 м. Пушкинская'), {
+    title: 'Встреча м. Пушкинская', dueKey: '2026-11-15', time: null, recurrence: null,
+  });
+  assert.equal(ps('Встреча 15.11 м Пушкинская').dueKey, '2026-11-15');
+  assert.equal(ps('Встреча 30.10 л. Толстого').dueKey, '2026-10-30');
+  assert.equal(ps('Встреча 5.11 м. Пушкинская').dueKey, '2026-11-05');
+  assert.deepEqual(ps('До 15.11 сдать отчёт'), { title: 'сдать отчёт', dueKey: '2026-11-15', time: null, recurrence: null });
 });
 
 test('«в» / «на» before a dotted date leave the title too', () => {

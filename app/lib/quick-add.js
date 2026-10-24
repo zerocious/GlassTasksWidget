@@ -13,17 +13,18 @@ const E = '(?![\\p{L}\\p{N}])';
 
 /**
  * JS getDay(): 0 = Sunday. `pl` is the «по …» form («по средам»).
- * `abbr` is matched in lower case only and never next to a hyphen: «60 Вт», «в ВС», «ср-во».
+ * `abbr` is «пт», «Пт» or «ПТ», never next to a hyphen («ср-во»). `noCaps`: «ВС», «СБ»
+ * are acronyms («в ВС», «с СБ»); `noNumber`: «60 Вт» is watts.
  * `prep`: only with «в» — a bare «среда» is usually the noun («среда разработки»).
  */
 const WEEKDAYS = [
   { day: 1, re: 'понедельник', abbr: 'пн', pl: 'понедельникам' },
-  { day: 2, re: 'вторник', abbr: 'вт', pl: 'вторникам' },
+  { day: 2, re: 'вторник', abbr: 'вт', pl: 'вторникам', noNumber: true },
   { day: 3, re: 'среду|среда', abbr: 'ср', pl: 'средам', prep: true },
   { day: 4, re: 'четверг', abbr: 'чт', pl: 'четвергам' },
   { day: 5, re: 'пятницу|пятница', abbr: 'пт', pl: 'пятницам' },
-  { day: 6, re: 'субботу|суббота', abbr: 'сб', pl: 'субботам' },
-  { day: 0, re: 'воскресенье', abbr: 'вс', pl: 'воскресеньям' },
+  { day: 6, re: 'субботу|суббота', abbr: 'сб', pl: 'субботам', noCaps: true },
+  { day: 0, re: 'воскресенье', abbr: 'вс', pl: 'воскресеньям', noCaps: true },
 ];
 
 const REPEATS = [
@@ -32,16 +33,22 @@ const REPEATS = [
   { rule: 'weekly', re: 'каждую неделю|еженедельно' },
 ];
 
-/** «2.5%», «1.10 кг»: a number with a unit, not a date. */
-const UNIT = `\\s*(?:%|(?:л|мл|кг|км|м|см|мм|шт|руб)${E}|₽)`;
+/**
+ * «2.5%», «1.10 кг»: a number with a unit, not a date. A capital after the letters means an
+ * abbreviated name: «15.11 м. Пушкинская», «30.10 л. Толстого» are dates.
+ */
+const UNIT = `\\s*(?:[%₽]|(?:л|мл|кг|км|м|см|мм|шт|руб)${E}(?!\\.?\\s*\\p{Lu}))`;
 
 function rx(body) {
   return new RegExp(`${B}(?:${body})${E}`, 'iu');
 }
 
-/** Case-sensitive, and a hyphen on either side means part of a word («ср-во»). */
-function abbrRx(body) {
-  return new RegExp(`(?<![\\p{L}\\p{N}-])(?:${body})(?![\\p{L}\\p{N}-])`, 'u');
+/** «(во) пт / Пт / ПТ»: case-sensitive, so «пТ» and the `noCaps` acronyms stay text. */
+function abbrRx(w) {
+  const forms = [w.abbr, w.abbr[0].toUpperCase() + w.abbr.slice(1)];
+  if (!w.noCaps) forms.push(w.abbr.toUpperCase());
+  const before = w.noNumber ? '(?<![\\p{L}\\p{N}-]|\\d\\s+)' : '(?<![\\p{L}\\p{N}-])';
+  return new RegExp(`${before}(?:[вВ]о?\\s+)?(?:${forms.join('|')})(?![\\p{L}\\p{N}-])`, 'u');
 }
 
 function weekdayOf(key) {
@@ -134,15 +141,17 @@ function parseQuickAdd(input, now = new Date()) {
         dueKey = nextWeekday(today, w.day);
       };
       const full = w.prep ? `(?:в|во)\\s+(?:${w.re})` : `(?:(?:в|во)\\s+)?(?:${w.re})`;
-      if (take(rx(full), hit) || take(abbrRx(`(?:[вВ]о?\\s+)?${w.abbr}`), hit)) break;
+      if (take(rx(full), hit) || take(abbrRx(w), hit)) break;
     }
   }
 
   if (!dueKey) {
     // «12.10», «12.10.2026», «12.10.26», «в / до / к / на 12.10»; a past day without a year
     // means next year. A one-digit month needs a year: «2.5%», «1.5 л», «до 2.5» are numbers.
+    // Not rx(): without the «i» flag UNIT can tell a capital («м. Пушкинская») from «м».
     const date = '(\\d{1,2})\\.(?:(\\d{1,2})\\.(\\d{4}|\\d{2})|(\\d{2}))(?!\\.\\d)';
-    take(rx(`(?:(?:до|к|в|на)\\s+)?${date}(?!${UNIT})`), (m) => {
+    const prep = '(?:[дД]о|[кК]|[вВ]|[нН]а)\\s+';
+    take(new RegExp(`${B}(?:${prep})?${date}(?!${UNIT})${E}`, 'u'), (m) => {
       const d = Number(m[1]);
       const mo = Number(m[2] || m[4]);
       const y0 = m[3] ? Number(m[3]) + (m[3].length === 2 ? 2000 : 0) : now.getFullYear();
@@ -154,7 +163,13 @@ function parseQuickAdd(input, now = new Date()) {
     });
   }
 
-  const title = text.replace(/\s{2,}/g, ' ').replace(/\s+([,.;:!?])/g, '$1').trim().replace(/[,;:\s-]+$/, '');
+  // «Пт: сдать отчёт» → «сдать отчёт»: no separator left at either end.
+  const title = text
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .trim()
+    .replace(/^[,;:]\s*/, '')
+    .replace(/[,;:\s-]+$/, '');
   if (!title) return { title: original, dueKey: null, time: null, recurrence: null };
 
   // A time or repeat rule without a day means «starting today» (Monday for «по будням» at a weekend).
