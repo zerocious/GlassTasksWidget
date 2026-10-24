@@ -115,16 +115,60 @@ test('automatic check: a failure (no network yet at login) is retried after 1, 2
   assert.equal(u.checks, 11);
 });
 
-test('automatic check: a failed download is retried like a failed check', async (t) => {
-  const u = startAutoUpdates(t, (n) => ({
+/** checkForUpdates() found 1.2.0 and started its download, which then failed. */
+function downloadFails(message = 'sha512 checksum mismatch') {
+  return {
     isUpdateAvailable: true,
     updateInfo: { version: '1.2.0' },
-    downloadPromise: n === 1 ? Promise.reject(new Error('socket hang up')) : Promise.resolve([]),
-  }));
+    downloadPromise: Promise.reject(new Error(message)),
+  };
+}
+
+test('automatic check: a failed download (the whole installer each time) is retried after 6, 12, then 24 h, not on wake', async (t) => {
+  // A release whose .exe fails verification, or a full disk: every attempt downloads ~100 MB and fails again.
+  const u = startAutoUpdates(t, () => downloadFails());
   await advance(t, 12_000);
   assert.equal(u.checks, 1);
   await advance(t, MIN);
-  assert.equal(u.checks, 2);
+  assert.equal(u.checks, 1, 'not retried a minute later like a failed check');
+  electronStub.powerMonitor.emit('resume');
+  await advance(t, MIN);
+  assert.equal(u.checks, 1, 'waking from sleep does not download it again sooner');
+  await advance(t, 6 * HOUR - 2 * MIN - 1);
+  assert.equal(u.checks, 1);
+  await advance(t, 1);
+  assert.equal(u.checks, 2, 'retried with the 6-hour re-check');
+  const retryHours = [12, 24, 24];
+  for (const [i, h] of retryHours.entries()) {
+    await advance(t, h * HOUR - 1);
+    assert.equal(u.checks, i + 2, `retry ${i + 2} not before ${h} h`);
+    await advance(t, 1);
+    assert.equal(u.checks, i + 3, `retry ${i + 2} after ${h} h`);
+  }
+});
+
+test('automatic check: download and check failures back off separately; a good check resets both', async (t) => {
+  const u = startAutoUpdates(t, (n) => {
+    if (n === 1 || n === 3 || n === 5) return downloadFails('socket hang up');
+    if (n === 2) throw new Error('getaddrinfo ENOTFOUND github.com');
+    return NO_UPDATE; // n === 4: the broken release was taken down
+  });
+  await advance(t, 12_000);
+  assert.equal(u.checks, 1);
+  await advance(t, 6 * HOUR);
+  assert.equal(u.checks, 2, 'download failed: next check 6 h later');
+  await advance(t, MIN);
+  assert.equal(u.checks, 3, 'that check failed: retried after a minute');
+  await advance(t, 12 * HOUR - 1);
+  assert.equal(u.checks, 3, 'second failed download in a row: 12 h');
+  await advance(t, 1);
+  assert.equal(u.checks, 4);
+  await advance(t, 6 * HOUR);
+  assert.equal(u.checks, 5, 'nothing to download: the usual 6 h');
+  await advance(t, 6 * HOUR - 1);
+  assert.equal(u.checks, 5);
+  await advance(t, 1);
+  assert.equal(u.checks, 6, 'a new failed download starts again at 6 h, not 24 h');
 });
 
 test('automatic check: waking from sleep checks 30 s later, unless a check succeeded within the hour', async (t) => {
