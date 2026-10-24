@@ -349,10 +349,26 @@ function replacePayloadKeepingAge(payload) {
   payloadCache = { at: payloadCache.at, payload };
 }
 
-function patchPayloadCache(listKind, taskId, patch, append = null) {
+/**
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string} taskId
+ * @param {object | null} patch   null = remove the item
+ * @param {object | null} [append] new item to put first
+ * @param {object | null} [base]  full item to re-add when the cached list no longer has it
+ *   (tasks keep only 5 done items: reopening one cut from them must not drop it)
+ */
+function patchPayloadCache(listKind, taskId, patch, append = null, base = null) {
   if (!payloadCache || !payloadCache.payload) return;
   const key = listKind === 'habits' ? 'habits' : 'tasks';
   const prev = payloadCache.payload;
+  if (
+    !append &&
+    patch &&
+    base &&
+    !(prev[key] || []).some((item) => item && item.id === taskId)
+  ) {
+    append = { ...base, ...patch, id: taskId };
+  }
   let list = applyItemPatch(prev[key], taskId, patch, append);
   if (append) {
     if (listKind === 'tasks') list = decorateTasks(list);
@@ -1015,7 +1031,7 @@ async function setTaskCompleted(listKind, taskId, completed) {
     );
 
     patchOfflineCache(listKind, taskId, itemPatch);
-    patchPayloadCache(listKind, taskId, itemPatch);
+    patchPayloadCache(listKind, taskId, itemPatch, null, cached);
 
     return {
       ok: true,
