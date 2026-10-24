@@ -21,15 +21,22 @@ const REMINDER_INTERVAL_MS = 45 * 60 * 1000;
 const REMINDER_STARTUP_DELAY_MS = 8 * 1000;
 /** Only schedule one-shot timers for due times within this horizon. */
 const EXACT_REMINDER_HORIZON_MS = 24 * 60 * 60 * 1000;
-/** Before this local hour the sweep toasts only while someone is at the PC. */
-const NIGHT_END_HOUR = 7;
 /** «At the PC» = input within this many seconds and the screen not locked. */
-const NIGHT_PRESENCE_IDLE_S = 10 * 60;
+const PRESENCE_IDLE_S = 10 * 60;
+/** While a sweep waits for the user, how often to look whether someone is back. */
+const PRESENCE_POLL_MS = 60 * 1000;
+/** When Windows cannot tell whether anyone is there, only hours before this one count as away. */
+const NIGHT_END_HOUR = 7;
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let reminderInterval = null;
 /** @type {ReturnType<typeof setTimeout> | null} */
 let reminderStartupTimer = null;
+/**
+ * Runs the sweep that waited once someone is back at the PC.
+ * @type {ReturnType<typeof setInterval> | null}
+ */
+let presencePoll = null;
 let reminderCheckInFlight = false;
 /** @type {Map<string, ReturnType<typeof setTimeout>>} */
 const exactReminderTimers = new Map();
@@ -142,18 +149,43 @@ function collectReminderCandidates(data) {
 }
 
 /**
- * The «already notified» set starts empty at midnight, so a sweep at 00:15 on a PC left on
- * overnight (interval, maintenance wake, a night restart) would toast every habit and today task
- * to an empty room and use them up for the whole day. At night the sweep waits for the user.
+ * Nobody at the PC: no input for 10 minutes, or the screen is locked. The «already notified» set
+ * starts empty at midnight, so a sweep on a PC left on overnight (the 45-min interval, which also
+ * lands once between 07:00 and 07:45 before anyone is up, a maintenance wake, a night restart)
+ * would toast every habit and today task to an empty room and use them up for the whole day.
+ * So the sweep toasts only while someone is there; if Windows cannot tell, only the night counts.
  * @returns {boolean}
  */
-function sweepWaitsForMorning() {
-  if (new Date().getHours() >= NIGHT_END_HOUR) return false;
+function nobodyAtThePc() {
+  let state = 'unknown';
   try {
-    return powerMonitor.getSystemIdleState(NIGHT_PRESENCE_IDLE_S) !== 'active';
+    state = powerMonitor.getSystemIdleState(PRESENCE_IDLE_S);
   } catch {
-    return true;
+    /* unknown */
   }
+  if (state === 'active') return false;
+  if (state === 'idle' || state === 'locked') return true;
+  return new Date().getHours() < NIGHT_END_HOUR;
+}
+
+function stopPresencePoll() {
+  if (presencePoll) {
+    clearInterval(presencePoll);
+    presencePoll = null;
+  }
+}
+
+/** Run the sweep that waited as soon as someone is back (input or unlock), not 45 min later. */
+function sweepWhenUserIsBack() {
+  if (presencePoll) return;
+  presencePoll = setInterval(() => {
+    if (nobodyAtThePc()) return;
+    stopPresencePoll();
+    runReminderCheck().catch((err) =>
+      console.warn('[reminders]', err && err.message ? err.message : err)
+    );
+  }, PRESENCE_POLL_MS);
+  if (typeof presencePoll.unref === 'function') presencePoll.unref();
 }
 
 /**
@@ -207,6 +239,7 @@ function stopRemindersScheduler() {
     clearInterval(reminderInterval);
     reminderInterval = null;
   }
+  stopPresencePoll();
   clearExactReminderTimers();
 }
 
@@ -389,13 +422,14 @@ async function runReminderCheck(opts = {}) {
 
     const candidates = collectReminderCandidates(data);
     scheduleExactReminders(data);
-    if (!opts.force && sweepWaitsForMorning()) {
+    if (!opts.force && nobodyAtThePc()) {
+      sweepWhenUserIsBack();
       return {
         ok: true,
         shown: false,
         count: 0,
-        reason: 'night',
-        message: 'Ночью напоминания ждут утра или пока вы не вернётесь к компьютеру.',
+        reason: 'away',
+        message: 'Напоминания ждут, пока вы вернётесь к компьютеру.',
         notificationsSupported,
       };
     }
