@@ -988,7 +988,8 @@ function taskHasNotes(task) {
   if (!task) return false;
   const text = String(task.notes || '').trim();
   if (!text) return false;
-  // Managed «время» / «повтор» lines alone are not real notes content.
+  // Managed «время» / «время: нет» / «повтор» lines alone are not real notes content
+  // (same lines as isManagedNotesLine in lib/task-parse.js).
   return text
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -996,6 +997,7 @@ function taskHasNotes(task) {
       (l) =>
         l &&
         !/^(?:время|Время|time)\s*[:-]?\s*\d{1,2}[:.]\d{2}$/i.test(l) &&
+        !/^(?:время|Время|time)\s*[:-]?\s*(?:нет|none)$/i.test(l) &&
         !/^(?:повтор|Повтор|repeat)\s*[:-]?\s*(ежедневно|будни|еженедельно|daily|weekdays|weekly)\s*$/i.test(
           l
         )

@@ -333,7 +333,7 @@ function dueTimeLabel(due) {
 }
 
 /**
- * Parse time from notes: «14:30», «в 14:30», «time: 9:05», «время 09.30».
+ * Parse time from notes: «14:30», «в 14:30», «в 9.05», «time: 9:05», «время 09.30».
  * A «время: нет» line means no time, whatever the text says.
  * @param {string | null | undefined} notes
  * @returns {string | null}
@@ -344,8 +344,9 @@ function timeFromNotes(notes) {
   if (text.split(/\r?\n/).some((line) => NO_TIME_LINE_RE.test(line.trim()))) return null;
   const patterns = [
     /(?:^|[\s,;|(])(?:time|время|Время)\s*(?:[:-]\s*)?(\d{1,2})[:.](\d{2})\b/i,
-    // «в 9.30» only when the part after the dot can't be a month: «перенесли в 10.11» is a date.
-    /(?:^|[\s,;|(])(?:в|В|at)\s*(?:[:-]\s*)?(\d{1,2})(?::(\d{2})|\.(00|1[3-9]|[2-5]\d))\b/i,
+    // «в 9.05», «в 10.30» are times; a two-digit day with a month («перенесли в 10.11»,
+    // «в 13.05») or a year after it («в 9.05.2026») is a date, as in quick-add.
+    /(?:^|[\s,;|(])(?:в|В|at)\s*(?:[:-]\s*)?(?!\d{2}\.(?:0[1-9]|1[0-2])\b)(\d{1,2})(?::(\d{2})|\.(\d{2})(?!\.\d))\b/i,
     /\b(\d{1,2}):(\d{2})\b/,
   ];
   for (const re of patterns) {

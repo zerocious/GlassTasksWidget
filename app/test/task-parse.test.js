@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -63,6 +66,22 @@ test('clearing a time that the notes text mentions leaves no time', () => {
   assert.equal(tp.applyDueTimeToNotes('время 15:00\nкупить хлеб', null), 'купить хлеб');
 });
 
+test('the renderer notes indicator skips the same managed lines', () => {
+  // src/app.js is a browser script: load just taskHasNotes from its source.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'app.js'), 'utf8');
+  const fn = src.match(/^function taskHasNotes\(task\) \{[\s\S]*?^\}/m);
+  assert.ok(fn, 'taskHasNotes not found in src/app.js');
+  const taskHasNotes = vm.runInNewContext(`(${fn[0]})`);
+  const cleared = tp.applyDueTimeToNotes('Созвон в 15:00', null);
+  assert.equal(taskHasNotes({ notes: cleared }), true);
+  // The text was deleted later in the notes editor: only the marker is left.
+  assert.equal(taskHasNotes({ notes: 'время: нет' }), false);
+  assert.equal(taskHasNotes({ notes: 'время: нет\nповтор: будни\n' }), false);
+  for (const line of ['время 10:00', 'время: нет', 'time - none', 'повтор: будни', 'Время 9.30', 'нет', 'в 15:00']) {
+    assert.equal(taskHasNotes({ notes: line }), !tp.isManagedNotesLine(line), line);
+  }
+});
+
 test('a dotted date after «в» is not a clock time', () => {
   assert.equal(tp.timeFromNotes('Срок сдачи перенесли в 10.11'), null);
   assert.equal(tp.resolveTaskDueAt({ due: dueOn('2026-11-10'), notes: 'Срок сдачи перенесли в 10.11' }), null);
@@ -72,6 +91,23 @@ test('a dotted date after «в» is not a clock time', () => {
   assert.equal(tp.timeFromNotes('время 10.11'), '10:11');
   assert.equal(tp.timeFromNotes('перенесли в 10.11, созвон в 15:00'), '15:00');
   assert.equal(tp.applyDueTimeToNotes('в 10.11\nтекст', null), 'в 10.11\nтекст');
+});
+
+test('«в H.MM» with a one-digit hour is still a clock time', () => {
+  assert.equal(tp.timeFromNotes('позвонить в 9.05'), '09:05');
+  assert.equal(tp.timeFromNotes('встреча в 8.10'), '08:10');
+  assert.equal(tp.timeFromNotes('в 7.12 выезд'), '07:12');
+  assert.equal(tp.timeFromNotes('at 9.05'), '09:05');
+  assert.equal(tp.timeFromNotes('в 13.30'), '13:30');
+  assert.equal(tp.timeFromNotes('в 13:05'), '13:05');
+  const at = tp.resolveTaskDueAt({ due: dueOn('2026-11-02'), notes: 'Позвонить в 9.05' });
+  assert.deepEqual([at.getDate(), at.getHours(), at.getMinutes()], [2, 9, 5]);
+  // A two-digit day with a month, or a year after it, reads as a date.
+  assert.equal(tp.timeFromNotes('в 13.05'), null);
+  assert.equal(tp.timeFromNotes('в 05.11'), null);
+  assert.equal(tp.timeFromNotes('перенесли в 9.05.2026'), null);
+  assert.equal(tp.timeFromNotes('перенесли в 10.11.26'), null);
+  assert.equal(tp.applyDueTimeToNotes('в 9.05\nтекст', null), 'текст');
 });
 
 test('normalizeDueTimeInput validates HH:MM', () => {
