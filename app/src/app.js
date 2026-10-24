@@ -1377,17 +1377,70 @@ function removeRowAnimated(li, done) {
   setTimeout(finish, 260);
 }
 
+/**
+ * Rows of `wanted` that can stay where they are: the longest run of them already in document
+ * order (`current`). Only the other rows need to move.
+ * @param {HTMLElement[]} wanted
+ * @param {HTMLElement[]} current
+ */
+function rowsInPlace(wanted, current) {
+  const pos = new Map(current.map((row, i) => [row, i]));
+  const seq = wanted.map((row) => pos.get(row));
+  // Longest increasing subsequence: tails[k] ends the best run of length k + 1.
+  const tails = [];
+  const prev = [];
+  for (let i = 0; i < seq.length; i += 1) {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (seq[tails[mid]] < seq[i]) lo = mid + 1;
+      else hi = mid;
+    }
+    prev[i] = lo > 0 ? tails[lo - 1] : -1;
+    tails[lo] = i;
+  }
+  const stay = new Set();
+  for (let i = tails.length ? tails[tails.length - 1] : -1; i >= 0; i = prev[i]) stay.add(wanted[i]);
+  return stay;
+}
+
+/** Element.moveBefore keeps focus on the moved row; insertBefore drops it to <body>. */
+function moveRow(listEl, row, before) {
+  if (typeof listEl.moveBefore === 'function') {
+    try {
+      listEl.moveBefore(row, before);
+      return;
+    } catch {
+      /* fall back to a plain move */
+    }
+  }
+  listEl.insertBefore(row, before);
+}
+
+/**
+ * Put the rows in `items` order and drop rows of items that are no longer shown. Only rows that
+ * are out of place move: a moved node loses focus (↑ ↓ / Space on a focused row stop working) and
+ * an open rename input inside it gets a blur, which saves the half-typed title.
+ */
 function syncListOrder(listEl, items) {
   const rows = new Map([...listEl.querySelectorAll('li.row')].map((row) => [row.dataset.id, row]));
-  const keep = new Set();
+  const wanted = [];
   for (const item of items) {
     const row = rows.get(item.id);
     if (!row) continue;
-    listEl.appendChild(row);
-    keep.add(item.id);
+    rows.delete(item.id);
+    wanted.push(row);
   }
-  for (const [id, row] of rows) {
-    if (!keep.has(id)) row.remove();
+  for (const row of rows.values()) row.remove();
+  const stay = rowsInPlace(wanted, [...listEl.querySelectorAll('li.row')]);
+  const active = document.activeElement;
+  for (let i = wanted.length - 1; i >= 0; i -= 1) {
+    if (!stay.has(wanted[i])) moveRow(listEl, wanted[i], wanted[i + 1] || null);
+  }
+  // The toggled row itself may have moved (done tasks go to the end): keep focus on it.
+  if (active && active !== document.activeElement && active.isConnected && listEl.contains(active)) {
+    active.focus({ preventScroll: true });
   }
 }
 
