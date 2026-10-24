@@ -29,6 +29,11 @@ const DERIVED_HABIT_FIELDS = ['habitId', 'streak', 'week', 'ring', 'completedTod
 
 /** @type {object | null | undefined} undefined = not loaded yet */
 let memoryCache = undefined;
+/**
+ * Bumped whenever the cache is dropped (logout, new OAuth client, wipe). A fetch that started
+ * before must not save the previous account's tasks back (lib/google-tasks.js checks it).
+ */
+let generation = 0;
 
 function slimHabit(habit) {
   if (!habit || typeof habit !== 'object') return habit;
@@ -80,6 +85,7 @@ function loadOfflineCache() {
 }
 
 function clearOfflineCache() {
+  generation += 1;
   memoryCache = null;
   if (!cacheDoc.remove()) {
     // Locked file: placeholder without mode:google so loadOfflineCache ignores it.
@@ -93,7 +99,13 @@ function clearOfflineCache() {
 
 /** Forget the in-memory copy (wipe / tests) without touching the file. */
 function resetOfflineCacheMemory() {
+  generation += 1;
   memoryCache = undefined;
+}
+
+/** Changes every time the cache is cleared or forgotten (see `generation`). */
+function offlineCacheGeneration() {
+  return generation;
 }
 
 /**
@@ -132,5 +144,6 @@ module.exports = {
   patchOfflineCache,
   reorderOfflineCache,
   resetOfflineCacheMemory,
+  offlineCacheGeneration,
   cacheDoc,
 };
