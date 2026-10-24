@@ -142,6 +142,8 @@ function createJsonDoc(spec) {
   let timer = null;
   /** The file could not be read this session: its content was never loaded, so never overwrite it blindly. */
   let unreadOnDisk = false;
+  /** …and the owner then got the defaults, not the last good copy (missing, damaged or locked too). */
+  let unreadWithoutBak = false;
   /** The file was damaged and its last good copy could not be read: never overwrite the copy blindly. */
   let bakUnread = false;
   /** When the file last proved unreadable (0 = never): skip the blocking retries for a while. */
@@ -254,6 +256,8 @@ function createJsonDoc(spec) {
    * @param {{ probe?: boolean }} [opts] probe: the caller throws the result away (startup
    *   migration). It migrates and repairs, but a locked file is left to the owner's own read:
    *   that read decides what the owner holds, so only it reports and arms the overwrite guard.
+   *   Nor does a probe restore a damaged file whose owner already holds the defaults: the
+   *   owner's next save would overwrite the restored data, so the restore waits for the next start.
    * @returns {Record<string, any>} document without `schemaVersion`
    */
   function read(opts = {}) {
@@ -284,6 +288,7 @@ function createJsonDoc(spec) {
       // Tools that lock a file at login often lock its sibling too: retry the copy as well,
       // unless it is a repeat within the cooldown.
       const bak = spec.lastGood ? parseDocFile(bakFile(), recentlyLocked ? 0 : READ_RETRIES) : null;
+      unreadWithoutBak = Boolean(bak) && bak.status !== 'ok';
       reportStorageIssue({
         kind: 'unreadable',
         file: spec.name,
@@ -298,8 +303,17 @@ function createJsonDoc(spec) {
     // until the restored data replaces it: if that write fails (disk full) or the copy cannot
     // be read yet (locked), the next start finds the file damaged again and retries the copy,
     // instead of taking a missing file for «reset» and overwriting the only good copy.
+    const wasUnread = unreadOnDisk;
+    if (unreadOnDisk) {
+      // Read at last, and damaged: its bytes are copied aside as `.corrupt`, they are not data
+      // to offer for a manual restore. An owner that got the defaults while the file was locked
+      // never read the last good copy either, so the guard moves to that copy.
+      unreadOnDisk = false;
+      if (unreadWithoutBak) bakUnread = true;
+    }
     const bak = spec.lastGood ? parseDocFile(bakFile()) : null;
-    if (bak && bak.status === 'ok') {
+    if (bak && bak.status === 'ok' && !(opts.probe && bakUnread)) {
+      bakUnread = false; // the owner gets the copy's data now
       const copiedTo = copyAside(file(), `corrupt-${Date.now()}`);
       const data = accept(bak, bakFile(), true);
       reportStorageIssue({
@@ -312,9 +326,14 @@ function createJsonDoc(spec) {
       });
       return data;
     }
-    if (bak && bak.status === 'unreadable') {
-      // Locked by another program: there is a good copy, it just cannot be opened right now.
-      if (opts.probe) return spec.defaults();
+    // A good copy that cannot be used now: locked by another program, or (a probe while the
+    // owner holds the defaults) left to the next start.
+    if (bak && (bak.status === 'unreadable' || bak.status === 'ok')) {
+      if (opts.probe) {
+        // An owner that read while the file was locked will not read it again: copy it aside here.
+        if (wasUnread) copyAside(file(), `corrupt-${Date.now()}`);
+        return spec.defaults();
+      }
       bakUnread = true;
       const copiedTo = copyAside(file(), `corrupt-${Date.now()}`);
       reportStorageIssue({

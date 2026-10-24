@@ -536,6 +536,91 @@ test('encrypted doc copies: an existing envelope (any key order) is not wrapped 
   assert.doesNotThrow(() => doc2.read());
 });
 
+/** Make readFileSync fail with EBUSY for the given paths until the returned mock is restored. */
+function lockReads(t, paths) {
+  const realRead = fs.readFileSync;
+  return t.mock.method(fs, 'readFileSync', function (p, ...rest) {
+    if (paths.includes(p)) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    return realRead.call(this, p, ...rest);
+  });
+}
+
+test('settings.json damaged and locked while the owner read it: the probe restores it, no «unread» copy of the garbage', (t) => {
+  const root = freshDataRoot();
+  const doc = settingsStore.settingsDoc;
+  settingsStore.saveSettings({ theme: 'light' });
+  writeRaw(root, 'settings.json', '\u0000\u0000\u0000'); // zero-filled by a power cut
+  settingsStore.resetSettingsCache();
+  const lock = lockReads(t, [doc.file()]);
+  assert.equal(settingsStore.loadSettings().theme, 'light', 'the owner gets the last good copy');
+  lock.mock.restore();
+
+  require('../lib/storage-doc').migrateAllDocs(); // lock gone: the probe finds the file damaged
+  assert.equal(readRaw(root, 'settings.json').theme, 'light', 'restored from the .bak');
+  assert.ok(kinds().includes('restored-from-backup'));
+  assert.equal(names(root).filter((n) => n.includes('.corrupt-')).length, 1, 'damaged bytes copied aside once');
+  assert.equal(names(root).some((n) => n.includes('.unread-')), false, 'no garbage offered for a manual restore');
+  assert.equal(kinds().includes('unread-preserved'), false);
+
+  settingsStore.saveSettings({ pos: { x: 5, y: 6 } });
+  assert.equal(readRaw(root, 'settings.json').theme, 'light');
+  assert.equal(names(root).some((n) => n.includes('.unread-')), false);
+});
+
+test('settings.json damaged, its .bak locked while the owner read it: the probe leaves the restore to the next start', (t) => {
+  const doc = settingsStore.settingsDoc;
+  const damagedWithLockedBak = () => {
+    const root = freshDataRoot();
+    settingsStore.saveSettings({ theme: 'light' });
+    writeRaw(root, 'settings.json', '{"theme": "li');
+    settingsStore.resetSettingsCache();
+    const lock = lockReads(t, [doc.bakFile()]);
+    assert.equal(settingsStore.loadSettings().theme, 'dark', 'defaults for now');
+    assert.ok(kinds().includes('backup-unreadable'));
+    lock.mock.restore();
+    require('../lib/storage-doc').migrateAllDocs(); // the lock lifted before the probe
+    assert.equal(kinds().includes('restored-from-backup'), false, 'not told it is restored while the owner holds defaults');
+    assert.throws(() => readRaw(root, 'settings.json'), SyntaxError, 'left damaged: the next start restores it');
+    assert.equal(names(root).some((n) => n.includes('.unread-')), false);
+    return root;
+  };
+
+  // Restart before any save: restored from the copy, as the message promised.
+  let root = damagedWithLockedBak();
+  settingsStore.resetSettingsCache();
+  assert.equal(settingsStore.loadSettings().theme, 'light');
+  assert.equal(readRaw(root, 'settings.json').theme, 'light');
+  assert.equal(names(root).some((n) => n.includes('.unread-')), false, 'the copy was read: nothing to keep');
+
+  // A save first (the window moved): the copy is kept before the defaults overwrite it.
+  root = damagedWithLockedBak();
+  settingsStore.saveSettings({ pos: { x: 5, y: 6 } });
+  const kept = names(root).find((n) => n.startsWith('settings.json.unread-'));
+  assert.ok(kept);
+  assert.equal(readRaw(root, kept).theme, 'light');
+  assert.ok(getStorageIssues().some((i) => i.kind === 'unread-preserved' && /последняя хорошая копия/.test(i.message)));
+});
+
+test('damaged file and its .bak both locked while the owner read it: the .bak, not the garbage, is kept', (t) => {
+  const root = freshDataRoot();
+  const doc = settingsStore.settingsDoc;
+  settingsStore.saveSettings({ theme: 'light' });
+  writeRaw(root, 'settings.json', '\u0000\u0000\u0000');
+  settingsStore.resetSettingsCache();
+  const lock = lockReads(t, [doc.file(), doc.bakFile()]);
+  assert.equal(settingsStore.loadSettings().theme, 'dark', 'defaults: neither file could be read');
+  lock.mock.restore();
+
+  require('../lib/storage-doc').migrateAllDocs();
+  assert.equal(kinds().includes('restored-from-backup'), false, 'no restore the cached defaults would undo');
+  assert.equal(names(root).filter((n) => n.includes('.corrupt-')).length, 1, 'damaged bytes copied aside');
+
+  settingsStore.saveSettings({ pos: { x: 5, y: 6 } });
+  const copies = names(root).filter((n) => n.startsWith('settings.json.unread-'));
+  assert.equal(copies.length, 1);
+  assert.equal(readRaw(root, copies[0]).theme, 'light', 'the last good copy survives the first save');
+});
+
 test('startup removes quarantined secret copies left by older versions (possibly plaintext)', () => {
   const root = freshDataRoot();
   for (const name of ['tokens.json.corrupt-1700000000000', 'credentials.json.corrupt-1700000000001']) {
