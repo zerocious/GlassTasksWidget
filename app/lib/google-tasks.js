@@ -54,7 +54,10 @@ const { retryingTasksClient } = require('./retry');
 const { parseQuickAdd } = require('./quick-add');
 
 const MAX_TITLE_LEN = 200;
-const MAX_NOTES_LEN = 8000;
+/** Google Tasks' own limit for notes. */
+const MAX_NOTES_LEN = 8192;
+const NOTES_TOO_LONG_MESSAGE =
+  'Заметки слишком длинные: сократите их, чтобы добавить время или повтор';
 
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000;
 /** Soft TTL for in-memory widget payload — avoids double network on rapid IPC. */
@@ -951,22 +954,17 @@ async function setTaskCompleted(listKind, taskId, completed) {
     const { tasksApi, listId } = await openList(config, listKind);
 
     // Cold cache: one tasks.get so we don't permanently complete a recurring task.
-    if (listKind === 'tasks' && completed && !cached) {
+    // Recurring per cache: read it fresh too — the phone may have moved the date or removed
+    // the repeat line since, and the next due below is written back to Google.
+    if (listKind === 'tasks' && completed && (!cached || recurrence)) {
       try {
         const existing = await tasksApi.tasks.get({
           tasklist: listId,
           task: taskId,
         });
         const data = (existing && existing.data) || {};
-        cached = {
-          id: taskId,
-          notes: data.notes || '',
-          due: data.due || null,
-          parent: data.parent || null,
-          position: data.position || '',
-          status: data.status || 'needsAction',
-          completed: data.status === 'completed',
-        };
+        // Google's copy wins over the cache, the repeat rule included (mapTask parses it from notes).
+        cached = { ...(cached || {}), ...mapTask({ ...data, id: taskId }) };
         recurrence = recurrenceFromItem(cached);
       } catch (err) {
         console.warn(
@@ -1130,24 +1128,24 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     let pendingDueTime;
     /** @type {'daily' | 'weekdays' | 'weekly' | null | undefined} */
     let pendingRecurrence;
+    /** Notes rebuilt around a time / repeat line (not text the user typed). */
+    let markerEdit = false;
 
     // Google Tasks due is date-only UTC — persist clock time via notes marker.
+    // In Google mode the notes are read fresh below (tasks.get), never from the cache: they may
+    // have been edited on the phone or web since, and the whole notes field is written back.
     if (Object.prototype.hasOwnProperty.call(patch, 'dueTime')) {
       const hm = normalizeDueTimeInput(patch.dueTime);
       delete patch.dueTime;
       let currentNotes = typeof patch.notes === 'string' ? patch.notes : null;
-      if (currentNotes === null) {
-        if (!hasGoogleCredentials()) {
-          const mockItem = getMockItem(listKind, taskId);
-          if (!mockItem) throw new Error('Элемент не найден');
-          currentNotes = mockItem.notes || '';
-        } else {
-          const cached = lookupCachedItem(listKind, taskId);
-          if (cached && typeof cached.notes === 'string') currentNotes = cached.notes;
-        }
+      if (currentNotes === null && !hasGoogleCredentials()) {
+        const mockItem = getMockItem(listKind, taskId);
+        if (!mockItem) throw new Error('Элемент не найден');
+        currentNotes = mockItem.notes || '';
       }
       if (currentNotes !== null) {
         patch.notes = applyDueTimeToNotes(currentNotes, hm);
+        markerEdit = true;
       } else {
         pendingDueTime = hm;
       }
@@ -1157,18 +1155,14 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       const rule = normalizeRecurrenceInput(patch.recurrence);
       delete patch.recurrence;
       let currentNotes = typeof patch.notes === 'string' ? patch.notes : null;
-      if (currentNotes === null) {
-        if (!hasGoogleCredentials()) {
-          const mockItem = getMockItem(listKind, taskId);
-          if (!mockItem) throw new Error('Элемент не найден');
-          currentNotes = mockItem.notes || '';
-        } else {
-          const cached = lookupCachedItem(listKind, taskId);
-          if (cached && typeof cached.notes === 'string') currentNotes = cached.notes;
-        }
+      if (currentNotes === null && !hasGoogleCredentials()) {
+        const mockItem = getMockItem(listKind, taskId);
+        if (!mockItem) throw new Error('Элемент не найден');
+        currentNotes = mockItem.notes || '';
       }
       if (currentNotes !== null) {
         patch.notes = applyRecurrenceToNotes(currentNotes, rule);
+        markerEdit = true;
       } else {
         pendingRecurrence = rule;
       }
@@ -1194,7 +1188,11 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     }
     if (typeof patch.notes === 'string') {
       let notes = patch.notes;
-      if (notes.length > MAX_NOTES_LEN) notes = notes.slice(0, MAX_NOTES_LEN);
+      if (notes.length > MAX_NOTES_LEN) {
+        // Never cut the end off notes the user did not edit just to fit a time / repeat line.
+        if (markerEdit) throw new Error(NOTES_TOO_LONG_MESSAGE);
+        notes = notes.slice(0, MAX_NOTES_LEN);
+      }
       body.notes = notes;
       itemPatch.notes = notes;
     }
@@ -1238,7 +1236,8 @@ async function updateItem(listKind, taskId, patchOrTitle) {
 
     const { tasksApi, listId } = await openList(config, listKind);
 
-    // Cache miss: fetch current notes before applying dueTime/recurrence so we don't wipe them.
+    // Fetch the current notes before applying dueTime/recurrence so we neither wipe them
+    // nor write back a stale cached copy over an edit made elsewhere.
     if (
       (pendingDueTime !== undefined || pendingRecurrence !== undefined) &&
       body.notes === undefined
@@ -1254,10 +1253,8 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       if (pendingRecurrence !== undefined) {
         currentNotes = applyRecurrenceToNotes(currentNotes, pendingRecurrence);
       }
-      body.notes =
-        currentNotes.length > MAX_NOTES_LEN
-          ? currentNotes.slice(0, MAX_NOTES_LEN)
-          : currentNotes;
+      if (currentNotes.length > MAX_NOTES_LEN) throw new Error(NOTES_TOO_LONG_MESSAGE);
+      body.notes = currentNotes;
       itemPatch.notes = body.notes;
     }
 
