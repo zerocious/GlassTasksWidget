@@ -1922,6 +1922,17 @@ let swipeArmed = false;
 let dndClickBlockTimer = null;
 
 /**
+ * Swallow the click that ends a row drag or a swipe: Chromium fires it on the row under both
+ * ends of the gesture, which would complete the task (the list click handlers check this timer).
+ */
+function blockRowClick() {
+  if (dndClickBlockTimer) clearTimeout(dndClickBlockTimer);
+  dndClickBlockTimer = setTimeout(() => {
+    dndClickBlockTimer = null;
+  }, 120);
+}
+
+/**
  * Pointer-based row reorder (drag handle). Avoids HTML5 DnD + window drag conflicts.
  * @param {'tasks' | 'habits'} listKind
  * @param {HTMLElement} listEl
@@ -1988,12 +1999,7 @@ function bindListReorder(listKind, listEl) {
     session = null;
     dndActive = false;
 
-    if (wasMoved) {
-      if (dndClickBlockTimer) clearTimeout(dndClickBlockTimer);
-      dndClickBlockTimer = setTimeout(() => {
-        dndClickBlockTimer = null;
-      }, 120);
-    }
+    if (wasMoved) blockRowClick();
 
     if (!commit || !moved || fromIndex === toIndex) return;
 
@@ -4071,7 +4077,8 @@ viewport.addEventListener('pointerdown', (e) => {
   swipeArmed = true;
   startX = e.clientX;
 });
-viewport.addEventListener('pointerup', (e) => {
+/** A horizontal swipe of 40px or more switches the view; it is not a click on the row under it. */
+function onSwipeEnd(e) {
   if (!swipeArmed || dndActive) {
     swipeArmed = false;
     return;
@@ -4079,8 +4086,10 @@ viewport.addEventListener('pointerup', (e) => {
   swipeArmed = false;
   const dx = e.clientX - startX;
   if (Math.abs(dx) < 40) return;
+  blockRowClick();
   setView(dx < 0 ? 'habits' : 'tasks');
-});
+}
+viewport.addEventListener('pointerup', onSwipeEnd);
 
 document.addEventListener('keydown', (e) => {
   if (!(e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'Tab')) return;
