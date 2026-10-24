@@ -87,6 +87,9 @@ const HABITS_RESET_RETRY_MS = 5 * 60 * 1000;
 /** Google Tasks API page size cap and a sanity ceiling on pages per list. */
 const PAGE_SIZE = 100;
 const MAX_PAGES = 20;
+/** Hidden (done in Google's own apps) tasks older than this stay out of the Tasks list. */
+const RECENT_HIDDEN_MS = 7 * 24 * 60 * 60 * 1000;
+const HIDDEN_MOVE_MESSAGE = 'Пункт отмечен выполненным в Google Задачах — Google не даёт его переставлять';
 
 /** Re-throw Google API failures with a user-safe Russian message when needed. */
 function rejectGoogleAuth(err) {
@@ -203,6 +206,9 @@ function mapTask(item) {
     completed,
     position: item.position || '',
     parent: item.parent || null,
+    // Done in Google's own apps (or cleared there): tasks.move takes it neither as `previous`
+    // nor as the item to move (see moveItem).
+    hidden: Boolean(item.hidden),
     meta: formatMeta(item) || (completed ? META_DONE : META_TASK),
   };
 }
@@ -426,17 +432,26 @@ async function openList(config, listKind) {
   return { tasksApi, listId };
 }
 
-/** Every item of a list (open + completed, all pages), mapped to widget shape. */
-async function fetchListItems(tasksApi, listId) {
+/**
+ * Every item of a list (open + completed, all pages), mapped to widget shape.
+ * Google's own apps (phone, web) mark what they complete as hidden, and so does «clear
+ * completed». Habits list them all (else a habit ticked on the phone vanishes until the next
+ * day's reset; the reset un-ticks them, so the list stays small). Tasks add only the recent
+ * ones: Google keeps the whole hidden history, which would push open tasks past MAX_PAGES.
+ * @param {'tasks' | 'habits'} listKind
+ */
+async function fetchListItems(tasksApi, listId, listKind) {
   if (!listId) return [];
-  const items = await listAllPages((p) => tasksApi.tasks.list(p), {
-    tasklist: listId,
-    showCompleted: true,
-    // Google's own apps (phone, web) mark what they complete as hidden: without this a habit
-    // ticked on the phone vanishes from the widget until the next day's reset.
-    showHidden: true,
-  });
-  return items.map(mapTask);
+  const list = (params) =>
+    listAllPages((p) => tasksApi.tasks.list(p), { tasklist: listId, showCompleted: true, ...params });
+  if (listKind === 'habits') return (await list({ showHidden: true })).map(mapTask);
+  const [visible, recent] = await Promise.all([
+    list({ showHidden: false }),
+    list({ showHidden: true, completedMin: new Date(Date.now() - RECENT_HIDDEN_MS).toISOString() }),
+  ]);
+  const seen = new Set(visible.map((i) => i && i.id));
+  const hidden = recent.filter((i) => i && i.id && i.hidden && !seen.has(i.id));
+  return [...visible, ...hidden].map(mapTask);
 }
 
 /**
@@ -516,8 +531,8 @@ async function fetchLivePayloadOnce(config) {
   const habitsListId = listMap.get(String(config.habitsListName || '').trim()) || null;
 
   const [tasksRaw, habitsRaw] = await Promise.all([
-    fetchListItems(tasksApi, tasksListId),
-    fetchListItems(tasksApi, habitsListId),
+    fetchListItems(tasksApi, tasksListId, 'tasks'),
+    fetchListItems(tasksApi, habitsListId, 'habits'),
   ]);
 
   const tasks = decorateTasks(tasksRaw);
@@ -571,6 +586,7 @@ function fromPayloadCache() {
       due: h.due || null,
       status: h.status || 'needsAction',
       completed: false,
+      hidden: Boolean(h.hidden),
       meta: !isPlaceholderMeta(h.meta) ? localizeMeta(h.meta) : META_HABIT,
     }))
   );
@@ -656,6 +672,7 @@ async function resetCompletedHabitsForNewDay() {
         patchOfflineCache('habits', item.id, {
           status: 'needsAction',
           completed: false,
+          hidden: false,
         });
       }
 
@@ -890,6 +907,8 @@ function buildCompletedItemPatch(listKind, cached, completed, overrides = {}, st
     recurrence,
     notes,
     meta: listKind === 'habits' ? localizeMeta(cached && cached.meta) || META_HABIT : meta,
+    // Re-opened in Google: no longer hidden there (a tick keeps Google's flag as it was).
+    ...(status === 'needsAction' ? { hidden: false } : {}),
     ...(stats
       ? {
           streak: stats.streak,
@@ -1348,7 +1367,8 @@ async function deleteItem(listKind, taskId) {
 
 /**
  * Previous sibling for tasks.move — never the parent row, and only an item
- * that shares the same parent (roots share parent=null).
+ * that shares the same parent (roots share parent=null). Hidden items (done in Google's
+ * own apps) are skipped: Google refuses them as `previous`.
  * @param {'tasks' | 'habits'} listKind
  * @param {string} taskId
  * @param {string[]} orderedIds
@@ -1365,7 +1385,7 @@ function resolveMovePreviousSibling(listKind, taskId, orderedIds, hintPreviousId
     if (!id || id === taskId) return false;
     if (parent && id === parent) return false;
     const item = lookupCachedItem(listKind, id);
-    if (!item) return false;
+    if (!item || item.hidden) return false;
     return (item.parent || null) === parent;
   };
 
@@ -1428,13 +1448,17 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
     const { tasksApi, listId } = await openList(config, listKind);
 
     let cached = lookupCachedItem(listKind, taskId);
-    if (!cached) {
+    if (!cached || cached.hidden) {
       // Not in the caches (created elsewhere since the last load): ask Google for its parent,
       // since a move without `parent` would lift a subtask to the top level.
+      // Hidden per the caches: it may have been un-ticked on the phone since.
       const existing = await tasksApi.tasks.get({ tasklist: listId, task: taskId });
       const data = (existing && existing.data) || {};
-      cached = { id: taskId, parent: data.parent || null };
+      cached = { ...(cached || {}), id: taskId, parent: data.parent || null, hidden: Boolean(data.hidden) };
     }
+    // Done in Google's own apps: Google only lets it go first at the top level, which is not
+    // where it was dropped (and would un-nest a subtask).
+    if (cached.hidden) throw new Error(HIDDEN_MOVE_MESSAGE);
     const prev = resolveMovePreviousSibling(listKind, taskId, ids, prevHint, cached);
 
     const moveParams = {
@@ -1450,6 +1474,7 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
       id: taskId,
       position: (res && res.data && res.data.position) || '',
       parent: (res && res.data && res.data.parent) || (cached && cached.parent) || null,
+      hidden: Boolean(res && res.data && res.data.hidden),
     };
 
     reorderOfflineCache(listKind, ids, movedPatch);
