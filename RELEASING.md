@@ -9,7 +9,8 @@
 | Что | Зачем | Как |
 |---|---|---|
 | Публикация OAuth-приложения | в статусе **Testing** Google выдаёт refresh-токены на **7 дней**: вход слетает раз в неделю | Google Cloud → Google Auth Platform → **Audience → Publish app** |
-| Страница политики конфиденциальности | Google требует её у любого приложения с пользовательскими данными, даже непроверенного | ссылка на [`docs/PRIVACY.md`](docs/PRIVACY.md) в репозитории; укажите её на экране согласия (**Branding**) |
+| Страница политики конфиденциальности | Google требует её при публикации (в статусе Testing не нужна) | исходный репозиторий приватный, ссылка на него не откроется: выложите текст [`docs/PRIVACY.md`](docs/PRIVACY.md) в публичный репозиторий релизов и укажите ту ссылку на экране согласия (**Branding**) |
+| Токен для канала обновлений | см. «Канал обновлений» ниже: без него workflow не создаст релиз | один раз, секрет `RELEASES_TOKEN` |
 | Встроенный клиент (необязательно) | чтобы пользователи не заводили свой проект Google Cloud | см. «Свой клиент или встроенный» ниже |
 | Подпись установщика (необязательно) | убирает предупреждение SmartScreen, включает проверку издателя при обновлении | сертификат подписи кода; без него `verifyUpdateCodeSignature` остаётся выключенным |
 
@@ -22,6 +23,21 @@
   `auth/tasks` не нужен: scope не входит в список restricted.
 - Пока клиент общий для всех, не коммитьте его секрет в открытый репозиторий (условия Google API).
 
+## Канал обновлений
+
+Исходный репозиторий `zerocious/GlassTasksWidget` **приватный**: установленный виджет не может читать
+его релизы (GitHub отвечает 404), поэтому обновления раздаются из **публичного**
+`zerocious/GlassTasksWidget-releases` (`build.publish` в `app/package.json`). Там уже лежит `v1.0.1`
+из ветки `feature/work-hours-blocker`, поэтому версия каждого нового релиза должна быть **больше
+1.0.1**, иначе electron-updater его не предложит.
+
+Workflow создаёт черновик релиза в репозитории релизов, а `GITHUB_TOKEN` туда писать не может. Один раз:
+
+1. GitHub → Settings → Developer settings → **Fine-grained tokens** → Generate: доступ только к
+   `zerocious/GlassTasksWidget-releases`, разрешение **Contents: Read and write**.
+2. В `zerocious/GlassTasksWidget` → Settings → Secrets and variables → Actions → New secret
+   `RELEASES_TOKEN` с этим токеном.
+
 ## Выпуск
 
 1. **Версия и журнал изменений.** В `CHANGELOG.md` перенесите раздел «Не выпущено» в новую версию.
@@ -33,7 +49,8 @@
    git push origin v1.1.0
    ```
 4. Workflow **Release** запустит линт, тесты, smoke-проверку пакета, соберёт установщик, проверит
-   метаданные автообновления (`scripts/check-release.js`) и создаст **черновик релиза**.
+   метаданные автообновления (`scripts/check-release.js`) и создаст **черновик релиза** в
+   `GlassTasksWidget-releases`.
    Проверка метаданных ловит ошибки, из-за которых автообновление молча ломается: имя файла,
    размер, контрольная сумма, blockmap, адрес репозитория.
 5. **Ручная проверка установщика** (обязательна, на чистой Windows или в виртуальной машине):
@@ -59,7 +76,7 @@ CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --win nsis --x64 --publis
 node scripts/check-release.js dist
 ```
 
-В релиз загрузите **все три** файла: `Glass-Tasks-Widget-Setup-<версия>.exe`, `….exe.blockmap`,
+Создайте релиз в `zerocious/GlassTasksWidget-releases` (не в исходном репозитории) и загрузите **все три** файла: `Glass-Tasks-Widget-Setup-<версия>.exe`, `….exe.blockmap`,
 `latest.yml`. Имя установщика без пробелов намеренно: GitHub заменяет пробелы точками, и ссылка в
 `latest.yml` перестала бы работать.
 
