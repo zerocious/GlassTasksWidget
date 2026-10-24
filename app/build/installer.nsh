@@ -14,7 +14,12 @@
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "com.glasstasks.widget"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "com.glasstasks.widget"
     ${ifNot} ${Silent}
-      ${if} $isDeleteAppData != "1"
+      ; electron-builder 26 declares $isDeleteAppData only after this macro, so check the
+      ; flag the same way its template does: ask only when --delete-app-data was not passed.
+      ClearErrors
+      ${GetParameters} $R0
+      ${GetOptions} $R0 "--delete-app-data" $R1
+      ${if} ${Errors}
         ${if} $installMode == "all"
           ; Elevated uninstall: %APPDATA% below is the account that elevated, not every user.
           MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "Удалить также данные Glass Tasks Widget текущей учётной записи Windows?$\r$\n$\r$\nБудут стёрты настройки, история привычек, резервные копии, ключи Google и вход (папка %APPDATA%\${APP_PACKAGE_NAME} этой учётной записи). Данные других пользователей компьютера останутся. Задачи в самом Google Tasks не пострадают." /SD IDNO IDNO glassTasksKeepUserData

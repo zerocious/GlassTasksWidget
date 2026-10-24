@@ -194,8 +194,7 @@ const REVOKE_TIMEOUT_MS = 5000;
  * @param {string} token
  */
 async function revokeAtGoogle(token) {
-  const { google } = require('googleapis');
-  const transporter = new google.auth.OAuth2().transporter;
+  const transporter = new (getGoogle().auth.OAuth2)().transporter;
   let timer;
   try {
     await Promise.race([

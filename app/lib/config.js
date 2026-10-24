@@ -17,9 +17,6 @@ function tryElectronApp() {
   }
 }
 
-/** @type {string | null} test hook, see setDataRootForTests */
-let dataRootOverride = null;
-
 /**
  * Writable data root. Packaged: %APPDATA%/glass-tasks-widget/data.
  * Dev: app/data, or <GT_USER_DATA_DIR>/data when an isolated profile is used
@@ -590,11 +587,6 @@ function clearMemorySecrets() {
 /** Test hook: inject a fake safeStorage (null = unavailable, undefined = real). */
 function setSafeStorageForTests(impl) {
   safeStorageOverride = impl;
-}
-
-/** Test hook: keep data/ in a temp folder (null = default location). */
-function setDataRootForTests(dir) {
-  dataRootOverride = dir;
 }
 
 function buildConfig() {

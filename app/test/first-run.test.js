@@ -38,7 +38,8 @@ test('demo mode works on a fresh profile (no data files yet)', () => {
       payload.habits.some((h) => h.streak > 0),
       'demo history is seeded so the week strip is not empty'
     );
-    assert.deepEqual(fs.readdirSync(dir).sort(), ['mock-items.json', 'streaks.json']);
+    // streaks.json.bak is the last-good copy the storage layer keeps next to every save.
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['mock-items.json', 'streaks.json', 'streaks.json.bak']);
   } finally {
     config.setDataRootForTests(null);
   }
