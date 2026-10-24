@@ -2494,7 +2494,9 @@ function closeNotesPanel({ revert, instant } = {}) {
 async function saveNotesPanel({ closeAfter } = {}) {
   if (!notesTarget || !window.widgetApi || notesSaving) return false;
   if (!guardMutate('сохранить заметки')) return false;
-  const { listKind, itemId, original } = notesTarget;
+  // The panel can be closed (Esc, «Отмена») or opened on another item while Google answers.
+  const target = notesTarget;
+  const { listKind, itemId, original } = target;
   const items = listKind === 'habits' ? state.habits : state.tasks;
   const item = items.find((i) => i.id === itemId);
   if (!item) {
@@ -2520,10 +2522,10 @@ async function saveNotesPanel({ closeAfter } = {}) {
         item.recurrence = result.item.recurrence;
       }
     }
-    notesTarget.original = notes;
+    target.original = notes;
     if (listKind === 'habits') patchHabitRow(item);
     else patchTaskRow(item);
-    if (closeAfter) closeNotesPanel();
+    if (closeAfter && notesTarget === target) closeNotesPanel();
     return true;
   } catch (err) {
     setBanner(`Не удалось сохранить заметки: ${errText(err)}`);
@@ -2569,7 +2571,9 @@ function closeTimePanel({ instant } = {}) {
 async function saveTimePanel({ closeAfter, clear } = {}) {
   if (!timeTarget || !window.widgetApi || timeSaving) return false;
   if (!guardMutate('сохранить время')) return false;
-  const { listKind, itemId, original } = timeTarget;
+  // The panel can be closed or opened on another item while Google answers.
+  const target = timeTarget;
+  const { listKind, itemId, original } = target;
   const items = listKind === 'habits' ? state.habits : state.tasks;
   const item = items.find((i) => i.id === itemId);
   if (!item) {
@@ -2614,10 +2618,10 @@ async function saveTimePanel({ closeAfter, clear } = {}) {
     } else {
       item.dueTime = next;
     }
-    timeTarget.original = item.dueTime || null;
+    target.original = item.dueTime || null;
     if (listKind === 'habits') patchHabitRow(item);
     else patchTaskRow(item);
-    if (closeAfter) closeTimePanel();
+    if (closeAfter && timeTarget === target) closeTimePanel();
     return true;
   } catch (err) {
     setBanner(`Не удалось сохранить время: ${errText(err)}`);
