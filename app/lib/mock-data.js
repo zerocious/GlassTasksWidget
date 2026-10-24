@@ -8,7 +8,7 @@ const {
   unmarkCompleted,
   removeHabit,
 } = require('./streak-store');
-const { todayIso } = require('./dates');
+const { todayIso, addDaysIso } = require('./dates');
 const { createJsonDoc } = require('./storage-doc');
 
 /** mock-items.json — demo-mode lists. Schema 1 = `{ tasks, habits }` (same as schema 0). */
@@ -19,11 +19,12 @@ const mockDoc = createJsonDoc({
   defaults: () => ({}),
 });
 
+/**
+ * Date-only due like Google's (midnight UTC of the local day): a real clock time here
+ * would show as a «12:00» chip and override the demo's «время …» lines.
+ */
 function dueIsoDaysFromNow(delta) {
-  const d = new Date();
-  d.setHours(12, 0, 0, 0);
-  d.setDate(d.getDate() + delta);
-  return d.toISOString();
+  return `${addDaysIso(todayIso(), delta)}T00:00:00.000Z`;
 }
 
 const DEFAULT_TASKS = [
