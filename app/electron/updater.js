@@ -7,7 +7,7 @@ let updateCheckInFlight = false;
 
 /**
  * Auto-update via GitHub Releases (packaged builds only).
- * Unsigned NSIS (`signAndEditExecutable: false`) cannot verify publisher —
+ * Unsigned NSIS (`signExecutable: false`) cannot verify publisher —
  * we skip code-signature check so updates still install; SmartScreen may warn.
  */
 /**
