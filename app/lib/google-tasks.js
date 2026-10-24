@@ -406,13 +406,15 @@ async function openList(config, listKind) {
   return { tasksApi, listId };
 }
 
-/** Every visible item of a list (open + completed, all pages), mapped to widget shape. */
+/** Every item of a list (open + completed, all pages), mapped to widget shape. */
 async function fetchListItems(tasksApi, listId) {
   if (!listId) return [];
   const items = await listAllPages((p) => tasksApi.tasks.list(p), {
     tasklist: listId,
     showCompleted: true,
-    showHidden: false,
+    // Google's own apps (phone, web) mark what they complete as hidden: without this a habit
+    // ticked on the phone vanishes from the widget until the next day's reset.
+    showHidden: true,
   });
   return items.map(mapTask);
 }
