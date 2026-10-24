@@ -25,6 +25,14 @@ test('accelerators are canonicalised (case, aliases, modifier order)', () => {
   assert.equal(normalizeAccelerator('F13'), 'F13', 'keys nobody types may stand alone');
 });
 
+test('Ctrl+Tab and Ctrl+Shift+Tab stay inside the widget (tab switching in every other app)', () => {
+  assert.equal(settings.isInWidgetAccelerator(settings.DEFAULT_SWITCH_HOTKEY), true, 'the default');
+  assert.equal(settings.isInWidgetAccelerator(normalizeAccelerator('ctrl+shift+tab')), true);
+  for (const global of [settings.DEFAULT_TOGGLE_HOTKEY, 'Control+Alt+H', 'Alt+Shift+Tab']) {
+    assert.equal(settings.isInWidgetAccelerator(global), false, global);
+  }
+});
+
 test('accelerators that would hijack typing or system keys are rejected', () => {
   for (const bad of [
     'Return', 'Space', 'A', 'Enter', 'F5', 'Tab', // no modifier

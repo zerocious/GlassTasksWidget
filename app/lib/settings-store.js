@@ -49,6 +49,7 @@ const BG_OPACITY_MIN = 0.2;
 const BG_OPACITY_MAX = 0.95;
 
 const DEFAULT_TOGGLE_HOTKEY = 'Control+Alt+W';
+/** Works inside the widget only (see IN_WIDGET_ACCELERATORS). */
 const DEFAULT_SWITCH_HOTKEY = 'Control+Tab';
 
 const DEFAULTS = /** @type {AppSettings} */ ({
@@ -161,6 +162,22 @@ const RESERVED_ACCELERATORS = new Set([
   'Control+Escape', 'Control+Esc', 'Control+Alt+Delete', 'Control+Shift+Escape', 'Control+Shift+Esc',
   'Alt+F4', 'Alt+Tab', 'Alt+Escape', 'Alt+Esc', 'Alt+Space',
 ]);
+
+/**
+ * Tab switching in browsers, editors and Explorer. Registered globally they would stop working
+ * in every other application, so the widget handles them only while it has focus (the
+ * renderer's keydown handler) and never registers them. settings.json may still name them:
+ * Ctrl+Tab is the default, and older versions saved it as a global hotkey.
+ */
+const IN_WIDGET_ACCELERATORS = new Set(['Control+Tab', 'Control+Shift+Tab']);
+
+/**
+ * @param {string} accel canonical accelerator (see normalizeAccelerator)
+ * @returns {boolean} true when the widget must not register it as a global shortcut
+ */
+function isInWidgetAccelerator(accel) {
+  return IN_WIDGET_ACCELERATORS.has(accel);
+}
 
 /**
  * Canonical, safe accelerator or null. Requires Control or Alt (Shift alone still types),
@@ -339,6 +356,7 @@ module.exports = {
   SIZE_PRESETS,
   DEFAULTS,
   normalizeAccelerator,
+  isInWidgetAccelerator,
   loadSettings,
   saveSettings,
   resetSettingsCache,

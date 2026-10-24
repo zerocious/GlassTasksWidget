@@ -3,7 +3,8 @@
 /**
  * electron/main.js started against a recording stand-in for Electron: no binary, window,
  * registry value or global hotkey is touched. Covers what a start does to the Windows login
- * item, and that hiding the widget survives a settings file that cannot be saved.
+ * item, which hotkeys it takes globally, and that hiding the widget survives a settings file
+ * that cannot be saved.
  */
 
 const test = require('node:test');
@@ -301,6 +302,37 @@ test('portable build: autostart points at the portable exe, not at its copy unpa
   assert.deepEqual(rec.loginWrites, []);
   await ipc('widget:set-settings', { autostart: true });
   assert.deepEqual(rec.loginWrites, [{ openAtLogin: true, name: AUMID, path: `"${portableExe}"`, args: [] }]);
+});
+
+// --- Global hotkeys -------------------------------------------------------------------------------
+
+test('Ctrl+Tab is never taken from other apps: the default switch hotkey works in the widget only', async (t) => {
+  // The bug: Ctrl+Tab was registered globally (and Ctrl+Shift+Tab when it was taken), so tab
+  // switching stopped working in browsers and editors while the widget ran.
+  for (const switchViewHotkey of [undefined, 'Control+Tab', 'Control+Shift+Tab']) {
+    const { ipc } = await startMain(t, { settings: switchViewHotkey ? { switchViewHotkey } : {} });
+    assert.deepEqual(rec.registerAttempts, ['Control+Alt+W'], String(switchViewHotkey));
+    const { hotkeys } = await ipc('widget:get-settings');
+    assert.equal(hotkeys.switchRegistered, false, 'the renderer handles Ctrl+Tab itself');
+    assert.equal(hotkeys.switchViewFallback, false);
+    assert.equal(hotkeys.switchViewHotkey, switchViewHotkey || 'Control+Tab');
+  }
+});
+
+test('a switch hotkey set in settings.json stays global; if refused, Ctrl+Tab in the widget stands in', async (t) => {
+  const { win, ipc } = await startMain(t, { settings: { switchViewHotkey: 'Control+Alt+H' } });
+  assert.deepEqual(rec.registerAttempts, ['Control+Alt+W', 'Control+Alt+H']);
+  rec.shortcuts.get('Control+Alt+H')();
+  assert.equal(win.visible, true, 'the global switch hotkey shows the widget');
+  assert.equal((await ipc('widget:get-settings')).hotkeys.switchRegistered, true);
+
+  const refused = await startMain(t, { settings: { switchViewHotkey: 'Control+Alt+H' }, busyKeys: ['Control+Alt+H'] });
+  assert.deepEqual(rec.registerAttempts, ['Control+Alt+W', 'Control+Alt+H'], 'no global Ctrl+Shift+Tab fallback');
+  const { hotkeys } = await refused.ipc('widget:get-settings');
+  assert.deepEqual(
+    [hotkeys.switchViewHotkey, hotkeys.switchViewFallback, hotkeys.switchRegistered],
+    ['Control+Tab', true, false]
+  );
 });
 
 // --- Last: leaves the settings store in its «file never read» state for the rest of this file ---

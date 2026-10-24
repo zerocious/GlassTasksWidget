@@ -49,6 +49,7 @@ const {
   loadSettings,
   saveSettings,
   getSizePreset,
+  isInWidgetAccelerator,
   DEFAULT_TOGGLE_HOTKEY,
   DEFAULT_SWITCH_HOTKEY,
 } = require('../lib/settings-store');
@@ -87,7 +88,11 @@ let mainWindow = null;
 let tray = null;
 let isQuitting = false;
 
-/** @type {{ toggle: string | null, switchView: string | null, switchFallback: boolean }} */
+/**
+ * Global shortcuts actually registered. switchFallback: the switch hotkey from settings.json was
+ * refused, so Ctrl+Tab inside the widget stands in for it.
+ * @type {{ toggle: string | null, switchView: string | null, switchFallback: boolean }}
+ */
 let hotkeyState = { toggle: null, switchView: null, switchFallback: false };
 let moveSettleTimer = null;
 let applyingBounds = false;
@@ -361,6 +366,12 @@ function safeRegisterShortcut(accel, handler) {
   }
 }
 
+/** The switch hotkey to show: the registered one, the in-widget stand-in, or the configured key. */
+function switchHotkeyInEffect(configured) {
+  if (hotkeyState.switchView) return hotkeyState.switchView;
+  return hotkeyState.switchFallback ? DEFAULT_SWITCH_HOTKEY : configured;
+}
+
 function registerHotkeys(settings) {
   unregisterHotkeys();
 
@@ -371,25 +382,19 @@ function registerHotkeys(settings) {
   hotkeyState.toggle = toggleOk ? toggleAccel : null;
   if (!toggleOk) console.warn('Hotkey not registered (toggle):', toggleAccel);
 
-  let switchOk = safeRegisterShortcut(switchAccel, () => notifySwitchView());
-  hotkeyState.switchView = switchOk ? switchAccel : null;
-  hotkeyState.switchFallback = false;
-
-  if (!switchOk) {
-    const fallback = 'Control+Shift+Tab';
-    switchOk = safeRegisterShortcut(fallback, () => notifySwitchView());
-    if (switchOk) {
-      hotkeyState.switchView = fallback;
-      hotkeyState.switchFallback = true;
-      console.warn(`${switchAccel} unavailable; using ${fallback}`);
-    } else {
-      console.warn('Hotkey not registered (switch view):', switchAccel);
-    }
+  // Ctrl+Tab (the default) switches tabs in every other app: the renderer handles it while the
+  // widget has focus, and it is never registered globally. A switch hotkey set in settings.json
+  // is global; when Windows refuses it, Ctrl+Tab inside the widget stands in for it.
+  if (!isInWidgetAccelerator(switchAccel)) {
+    const switchOk = safeRegisterShortcut(switchAccel, () => notifySwitchView());
+    hotkeyState.switchView = switchOk ? switchAccel : null;
+    hotkeyState.switchFallback = !switchOk;
+    if (!switchOk) console.warn(`${switchAccel} unavailable; using ${DEFAULT_SWITCH_HOTKEY} in the widget`);
   }
 
   return {
     toggleHotkey: hotkeyState.toggle || toggleAccel,
-    switchViewHotkey: hotkeyState.switchView || switchAccel,
+    switchViewHotkey: switchHotkeyInEffect(switchAccel),
     switchViewFallback: hotkeyState.switchFallback,
     toggleRegistered: Boolean(hotkeyState.toggle),
     switchRegistered: Boolean(hotkeyState.switchView),
@@ -404,7 +409,7 @@ function settingsForRenderer() {
     windowsToastsEnabled: windowsToastsGloballyEnabled(),
     hotkeys: {
       toggleHotkey: hotkeyState.toggle || s.toggleHotkey,
-      switchViewHotkey: hotkeyState.switchView || s.switchViewHotkey,
+      switchViewHotkey: switchHotkeyInEffect(s.switchViewHotkey),
       switchViewFallback: hotkeyState.switchFallback,
       toggleRegistered: Boolean(hotkeyState.toggle),
       switchRegistered: Boolean(hotkeyState.switchView),
