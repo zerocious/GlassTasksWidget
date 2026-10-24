@@ -28,11 +28,14 @@ stubModule('../lib/google-tasks', { getWidgetData: () => load(), resolveTaskDueA
 
 /** @type {{ title: string, body: string, ids: string[] }[]} */
 const toasts = [];
+/** When set, a toast counts as shown only once this resolves (Electron waits up to 1.2 s). */
+let toastShown = null;
 stubModule('../electron/notifications', {
   windowsToastsGloballyEnabled: () => true,
   // Like the real one: the ids are marked only once the toast is shown.
   showReminderToast: async (title, body, ids) => {
     toasts.push({ title, body, ids });
+    if (toastShown) await toastShown;
     markNotified(ids);
     return { shown: true, channel: 'electron' };
   },
@@ -47,10 +50,19 @@ const DUE_TODAY = '2026-03-10T00:00:00.000Z';
 /** Let the async part of a fired timer (data load, toast) finish. */
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 function fresh(t, now) {
   reminders.stopRemindersScheduler(); // timers left by an earlier test
   freshDataRoot();
   toasts.length = 0;
+  toastShown = null;
   load = async () => ({ tasks: [], habits: [] });
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now });
 }
@@ -103,3 +115,41 @@ test('a timer whose time was changed elsewhere stays quiet and the new time gets
   await flush();
   assert.deepEqual(toasts.map((x) => x.body), ['Пора: Отчёт (17:00)']);
 });
+
+/**
+ * After wake the network is slow: an exact timer and a sweep wait on one data load (getWidgetData
+ * shares it), and the first toast is still on its way when the second caller looks.
+ * @param {'timer-first' | 'sweep-first'} order
+ */
+async function raceTimerAndSweep(t, order) {
+  fresh(t, at(9));
+  const task = { id: 'w1', title: 'Встреча', due: DUE_TODAY, notes: 'время 10:00', dueTime: '10:00' };
+  reminders.scheduleExactReminders({ tasks: [task] });
+  const dataLoad = deferred();
+  load = () => dataLoad.promise;
+  const shown = deferred();
+  toastShown = shown.promise;
+
+  let sweep;
+  if (order === 'sweep-first') {
+    t.mock.timers.tick(at(9, 59) - at(9));
+    sweep = reminders.runReminderCheck();
+    t.mock.timers.tick(at(10) - at(9, 59)); // the timer fires while the sweep waits
+  } else {
+    t.mock.timers.tick(at(10) - at(9)); // the timer fires and waits for the load
+    sweep = reminders.runReminderCheck();
+  }
+  dataLoad.resolve({ tasks: [task], habits: [] });
+  await flush(); // both callers have looked; the first toast is not marked as shown yet
+  shown.resolve();
+  const swept = await sweep;
+  await flush();
+  assert.deepEqual(toasts.map((x) => x.body), ['Пора: Встреча (10:00)']);
+  assert.equal(swept.shown, false);
+}
+
+test('an exact timer and a sweep waiting on the same load toast once (timer first)', (t) =>
+  raceTimerAndSweep(t, 'timer-first'));
+
+test('an exact timer and a sweep waiting on the same load toast once (sweep first)', (t) =>
+  raceTimerAndSweep(t, 'sweep-first'));
