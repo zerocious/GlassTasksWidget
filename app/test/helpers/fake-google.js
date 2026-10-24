@@ -80,9 +80,17 @@ function createFakeTasks() {
         const items = listOf(params.tasklist).items.filter((i) => {
           if (i.status === 'completed' && params.showCompleted === false) return false;
           if (i.hidden && !params.showHidden) return false;
+          if (params.completedMin && !(Date.parse(i.completed || '') >= Date.parse(params.completedMin))) {
+            return false;
+          }
           return true;
         });
-        return { data: { items: clone(items) } };
+        // Pages like Google: `maxResults` per page (default 20), `nextPageToken` while more remain.
+        const start = Number(params.pageToken || 0);
+        const end = start + (params.maxResults || 20);
+        const page = { items: clone(items.slice(start, end)) };
+        if (end < items.length) page.nextPageToken = String(end);
+        return { data: page };
       },
       get: async (params) => {
         await record('tasks.get', params);
@@ -107,6 +115,11 @@ function createFakeTasks() {
         await record('tasks.move', params);
         const list = listOf(params.tasklist);
         const item = find(params.tasklist, params.task);
+        // Like Google: `previous` and `parent` can not be hidden, and a completed hidden task
+        // (ticked in Google's own apps) can only go first at the top level.
+        const hiddenRef = [params.previous, params.parent].some((id) => id && find(params.tasklist, id).hidden);
+        const pinned = item.hidden && item.status === 'completed' && (params.previous || params.parent);
+        if (hiddenRef || pinned) throw Object.assign(new Error('Invalid Value'), { code: 400 });
         // Like Google: no `parent` means «move to the top level».
         item.parent = params.parent || null;
         placeAfter(list, item, params.previous || null);

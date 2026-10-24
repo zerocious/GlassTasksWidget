@@ -94,6 +94,81 @@ test("habits and tasks completed in Google's own apps (hidden) still reach the w
   assert.ok(data.tasks.some((t) => t.id === 'T2' && t.completed), 'listed in the done section');
 });
 
+test('the Tasks list adds only recent hidden completions, not the whole hidden history', async () => {
+  const { fake } = freshGoogle();
+  const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+  // Years of phone completions and «clear completed» (all hidden), well past the page cap.
+  const history = Array.from({ length: 2100 }, (_, n) => ({
+    id: `old-${n}`,
+    title: `Давно ${n}`,
+    status: 'completed',
+    completed: daysAgo(60),
+    hidden: true,
+  }));
+  fake.setItems('L-tasks', [
+    ...history,
+    { id: 'T1', title: 'Открытая', notes: 'время 18:00', due: dueOn(todayIso()) },
+    { id: 'T2', title: 'Сделана на телефоне вчера', status: 'completed', completed: daysAgo(1), hidden: true },
+    { id: 'T3', title: 'Сделана в виджете давно', status: 'completed', completed: daysAgo(60) },
+  ]);
+  fake.setItems('L-habits', [
+    { id: 'H1', title: 'Чтение', status: 'completed', completed: daysAgo(3), hidden: true },
+  ]);
+
+  const data = await gt.getWidgetData({ force: true });
+  assert.deepEqual(data.tasks.map((t) => t.id).sort(), ['T1', 'T2', 'T3'], 'the open task is not cut off');
+  assert.deepEqual(data.habits.map((h) => h.id), ['H1'], 'Habits still list every hidden item');
+  const taskCalls = fake.calls.filter((c) => c.method === 'tasks.list' && c.params.tasklist === 'L-tasks');
+  assert.ok(taskCalls.length <= 3, `${taskCalls.length} requests for the Tasks list`);
+});
+
+test('drag and drop works around items Google keeps hidden (ticked in its own apps)', async () => {
+  const { fake } = freshGoogle();
+  const now = new Date().toISOString();
+  const moves = () => fake.calls.filter((c) => c.method === 'tasks.move').length;
+  fake.setItems('L-habits', [
+    { id: 'H0', title: 'Зарядка' },
+    { id: 'H1', title: 'Чтение', status: 'completed', completed: now, hidden: true },
+    { id: 'H2', title: 'Вода' },
+    { id: 'H3', title: 'Бег' },
+  ]);
+  await gt.getWidgetData({ force: true });
+  const { habits } = await gt.getWidgetData(); // warm cache, as most drags see it
+  assert.equal(habits.find((h) => h.id === 'H1').completed, false, 'open here: no tick in the widget today');
+
+  // H3 dropped right below H1: Google refuses a hidden `previous`, so the widget skips it.
+  await gt.moveItem('habits', 'H3', 'H1', ['H0', 'H1', 'H3', 'H2']);
+  assert.deepEqual(fake.items('L-habits').map((i) => i.id), ['H0', 'H3', 'H1', 'H2']);
+
+  // H1 itself could only go first at the top level: refused with a reason, nothing sent.
+  const before = moves();
+  await assert.rejects(
+    gt.moveItem('habits', 'H1', 'H2', ['H0', 'H3', 'H2', 'H1']),
+    /выполненным в Google Задачах/
+  );
+  assert.equal(moves(), before);
+
+  // Un-ticked on the phone since the last sync: the widget checks with Google and moves it.
+  Object.assign(fake.item('L-habits', 'H1'), { status: 'needsAction', completed: null, hidden: false });
+  await gt.moveItem('habits', 'H1', 'H2', ['H0', 'H3', 'H2', 'H1']);
+  assert.deepEqual(fake.items('L-habits').map((i) => i.id), ['H0', 'H3', 'H2', 'H1']);
+  // ...and the caches know it is visible now: H0 dropped right after it uses it as `previous`.
+  await gt.moveItem('habits', 'H0', 'H1', ['H3', 'H2', 'H1', 'H0']);
+  assert.deepEqual(fake.items('L-habits').map((i) => i.id), ['H3', 'H2', 'H1', 'H0']);
+
+  // A task done on the phone and re-opened in the widget is visible again in Google: it is a
+  // valid `previous` for the next drop.
+  fake.setItems('L-tasks', [
+    { id: 'T2', title: 'Сделана на телефоне', status: 'completed', completed: now, hidden: true },
+    { id: 'T0', title: 'Первая' },
+    { id: 'T1', title: 'Вторая' },
+  ]);
+  await gt.getWidgetData({ force: true });
+  await gt.setTaskCompleted('tasks', 'T2', false);
+  await gt.moveItem('tasks', 'T1', 'T2', ['T2', 'T1', 'T0']);
+  assert.deepEqual(fake.items('L-tasks').map((i) => i.id), ['T2', 'T1', 'T0']);
+});
+
 test('setting a time or a repeat keeps notes edited on the phone after the last sync', async () => {
   const { fake } = freshGoogle();
   fake.setItems('L-tasks', [{ id: 'T1', title: 'Магазин', notes: 'купить молоко' }]);
