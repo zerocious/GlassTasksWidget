@@ -2352,14 +2352,17 @@ function hideUndoToast() {
   if (undoToast) undoToast.hidden = true;
 }
 
-/** Run the pending action now (another undoable action started, or the window is closing). */
+/**
+ * Run the pending action now (another undoable action started, the window is closing, or the
+ * Google account is about to go away). Await the result to know the delete reached Google.
+ */
 function commitPendingUndo() {
   const entry = undoState;
   if (!entry) return;
   undoState = null;
   clearTimeout(entry.timer);
   hideUndoToast();
-  entry.commit();
+  return entry.commit();
 }
 
 /**
@@ -2423,8 +2426,12 @@ async function removeItem(listKind, item) {
 
   const restore = () => {
     // Put the removed items back at their old positions; keep anything added meanwhile.
-    const current = new Set(state[listKey].map((i) => i && i.id));
-    const kept = before.filter((i) => i && (removedIds.has(i.id) || current.has(i.id)));
+    // The others keep their current objects: ↻ / R during the undo window may have brought
+    // newer titles or states, and the old copies in `before` must not roll them back.
+    const current = new Map(state[listKey].filter(Boolean).map((i) => [i.id, i]));
+    const kept = before
+      .filter((i) => i && (removedIds.has(i.id) || current.has(i.id)))
+      .map((i) => current.get(i.id) || i);
     const keptIds = new Set(kept.map((i) => i.id));
     state[listKey] = [...state[listKey].filter((i) => i && !keptIds.has(i.id)), ...kept];
     if (listKind === 'habits') {
@@ -3353,6 +3360,9 @@ async function onAuthClick() {
   }
   addBusy = true;
   try {
+    // A delete still in its undo window must reach Google before the tokens are revoked:
+    // afterwards it fails with «Не авторизован» and the task comes back.
+    await commitPendingUndo();
     state = await window.widgetApi.logout();
     renderAll();
   } catch (err) {
@@ -3383,6 +3393,8 @@ async function importClientJson(text) {
   onboardingDrop?.setAttribute('aria-busy', 'true');
   setOnboardingError('');
   try {
+    // New keys sign out of Google: finish a pending delete while it still can (onAuthClick).
+    await commitPendingUndo();
     const result = await window.widgetApi.importClientJson(text);
     if (result && !result.canceled) applyCredentialsResult(result);
   } catch (err) {
@@ -3417,6 +3429,8 @@ async function onSaveCredentials() {
   setOnboardingError('');
   let result = null;
   try {
+    // A changed Client ID signs out of Google: finish a pending delete first (onAuthClick).
+    await commitPendingUndo();
     result = await window.widgetApi.saveCredentials({ clientId, clientSecret, redirectPort });
   } catch (err) {
     setOnboardingError(errText(err));
