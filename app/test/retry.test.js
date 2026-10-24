@@ -71,6 +71,28 @@ test('honours Retry-After seconds', async () => {
   assert.deepEqual(waits, [2000]);
 });
 
+test('retryingTasksClient keeps the real Google client methods (they live on the class prototype)', async (t) => {
+  // Regression: wrapping only Object.keys() dropped every method of @googleapis/tasks,
+  // so Google mode could neither read nor write anything.
+  const { tasks } = require('@googleapis/tasks');
+  const client = tasks({ version: 'v1' });
+  let calls = 0;
+  // Stub the prototype method before wrapping (the wrapper binds what it finds), no network.
+  t.mock.method(Object.getPrototypeOf(client.tasks), 'list', async function list() {
+    calls += 1;
+    if (calls === 1) throw httpError(503);
+    assert.equal(this, client.tasks, 'called on the original resource');
+    return { data: { items: ['ok'] } };
+  });
+  const wrapped = retryingTasksClient(client, { sleep: noSleep });
+  for (const name of ['list', 'get', 'insert', 'patch', 'delete', 'move']) {
+    assert.equal(typeof wrapped.tasks[name], 'function', `tasks.${name}`);
+  }
+  assert.equal(typeof wrapped.tasklists.list, 'function', 'tasklists.list');
+  assert.deepEqual((await wrapped.tasks.list({ tasklist: 'x' })).data.items, ['ok']);
+  assert.equal(calls, 2, 'retried once after 503');
+});
+
 test('retryingTasksClient wraps every method and keeps `this`', async () => {
   let inserts = 0;
   let lists = 0;
