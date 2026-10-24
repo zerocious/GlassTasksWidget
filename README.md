@@ -22,7 +22,7 @@ npm start
 cd C:\Users\User\Desktop\GlassTasksWidget\app
 npm install
 $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
-npm run dist    # NSIS → app\dist\Glass Tasks Widget-Setup-1.0.0.exe + ярлык
+npm run dist    # NSIS → app\dist\Glass-Tasks-Widget-Setup-<версия>.exe + ярлык
 # или
 npm run pack    # app\dist\win-unpacked\ + ярлык
 ```
@@ -107,7 +107,7 @@ Dev-запуск не перезаписывает существующие яр
 ### Автообновления
 
 - Только **упакованная** сборка (`app.isPackaged`); `npm start` проверки пропускает.
-- Провайдер: GitHub Releases (`zerocious/GlassTasksWidget`). NSIS `dist` пишет `latest.yml` + blockmap.
+- Провайдер: GitHub Releases публичного `zerocious/GlassTasksWidget-releases` (исходный репозиторий приватный, его релизы виджету не видны; см. `RELEASING.md`). NSIS `dist` пишет `latest.yml` + blockmap.
 - Публикация: создайте GitHub Release с артефактами из `npm run dist` (Setup.exe, `.blockmap`, `latest.yml`). Без опубликованного релиза проверка ничего не найдёт.
 - Сборка **без подписи** (`signAndEditExecutable: false`): SmartScreen может ругаться; updater отключает проверку publisher signature, иначе обновления не встанут. Для продакшена лучше code signing.
 

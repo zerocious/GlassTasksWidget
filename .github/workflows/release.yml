@@ -69,13 +69,22 @@ jobs:
             app/dist/Glass-Tasks-Widget-Setup-*.exe.blockmap
             app/dist/latest.yml
 
-      - name: Create draft release
+      # This source repo is private, so installed widgets cannot read its releases (404).
+      # The updater feed is the public repo named in app/package.json build.publish; the
+      # default GITHUB_TOKEN cannot write there, hence a fine-grained token (RELEASING.md).
+      - name: Create draft release in the public releases repo
         if: startsWith(github.ref, 'refs/tags/v')
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::secret RELEASES_TOKEN is not set (see RELEASING.md, 'Канал обновлений')"
+            exit 1
+          fi
+          feed="$(node -p "const p=require('./package.json').build.publish[0]; p.owner + '/' + p.repo")"
+          gh release create "$GITHUB_REF_NAME" -R "$feed" \
             dist/Glass-Tasks-Widget-Setup-*.exe \
             dist/Glass-Tasks-Widget-Setup-*.exe.blockmap \
             dist/latest.yml \
-            --draft --generate-notes --title "$GITHUB_REF_NAME"
+            --draft --title "$GITHUB_REF_NAME" \
+            --notes "Glass Tasks Widget $GITHUB_REF_NAME. Changes: CHANGELOG.md in the source repository."

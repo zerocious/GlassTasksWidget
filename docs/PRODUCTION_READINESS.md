@@ -55,9 +55,8 @@ Electron 44.9.0, electron-builder 26.15.3, клиент Google `@googleapis/task
   решается повторным нажатием «Google» в виджете; пользователей нужно добавлять в список тестовых вручную
   (Google Auth Platform → Audience → Test users).
 - **Политика конфиденциальности:** на экране согласия в статусе Testing не требуется. Если позже решите
-  публиковать (кнопка Publish app), ссылка для поля Branding:
-  `https://github.com/zerocious/GlassTasksWidget/blob/main/docs/PRIVACY.md` (репозиторий должен быть
-  публичным).
+  публиковать (кнопка Publish app): исходный репозиторий приватный, поэтому выложите текст
+  `docs/PRIVACY.md` в публичный `GlassTasksWidget-releases` и укажите ту ссылку в поле Branding.
 
 ## Состояние PR
 

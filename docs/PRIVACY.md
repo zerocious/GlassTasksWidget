@@ -41,7 +41,7 @@ Google Tasks и ведёт локальные привычки. У прилож�
 
 ## Вопросы
 
-Откройте обращение: https://github.com/zerocious/GlassTasksWidget/issues
+Откройте обращение: https://github.com/zerocious/GlassTasksWidget-releases/issues
 
 ---
 
@@ -73,4 +73,4 @@ it locally; you can also revoke access at https://myaccount.google.com/permissio
 lives in `%APPDATA%\glass-tasks-widget`; delete that folder after uninstalling. Your tasks stay in
 Google Tasks.
 
-**Contact.** https://github.com/zerocious/GlassTasksWidget/issues
+**Contact.** https://github.com/zerocious/GlassTasksWidget-releases/issues
