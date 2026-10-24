@@ -10,6 +10,7 @@
 const { app, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { clearRunAsFlag } = require('../lib/lnk-flags');
 
 const APP_USER_MODEL_ID = 'com.glasstasks.widget';
 const SHORTCUT_NAME = 'Glass Tasks Widget.lnk';
@@ -68,6 +69,10 @@ function writeLnk(lnkPath, target, cwd) {
     iconIndex: 0,
   });
   if (!ok) throw new Error(`writeShortcutLink failed: ${lnkPath}`);
+  // «update» keeps a «Run as administrator» flag set by the work-hours branch: the widget
+  // itself must never run elevated.
+  const { buffer, changed } = clearRunAsFlag(fs.readFileSync(lnkPath));
+  if (changed) fs.writeFileSync(lnkPath, buffer);
 }
 
 app.whenReady().then(() => {

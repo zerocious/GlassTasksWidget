@@ -14,6 +14,7 @@ const { pathToFileURL } = require('url');
 const { markNotified } = require('../lib/reminder-store');
 const { childEnv } = require('../lib/child-env');
 const { shortcutAction } = require('../lib/shortcut-policy');
+const { clearRunAsFlag } = require('../lib/lnk-flags');
 
 const APP_USER_MODEL_ID = 'com.glasstasks.widget';
 
@@ -123,10 +124,32 @@ function ensureWindowsNotificationShortcut(opts = {}) {
       });
       if (!op) continue;
       const ok = shell.writeShortcutLink(lnk, op, details);
-      if (!ok) console.warn('[reminders] shortcut write failed', lnk);
+      if (!ok) {
+        console.warn('[reminders] shortcut write failed', lnk);
+        continue;
+      }
+      clearShortcutRunAs(lnk);
     }
   } catch (err) {
     console.warn('[reminders] shortcut', err && err.message ? err.message : err);
+  }
+}
+
+/**
+ * The work-hours branch marked these links «Run as administrator» and writeShortcutLink keeps
+ * that flag on update. The widget must never run elevated (sandbox, OAuth loopback server and
+ * updater would all run as administrator), so the flag is cleared after every write.
+ * @param {string} lnk
+ */
+function clearShortcutRunAs(lnk) {
+  try {
+    const { buffer, changed } = clearRunAsFlag(fs.readFileSync(lnk));
+    if (changed) {
+      fs.writeFileSync(lnk, buffer);
+      console.log('[reminders] shortcut no longer runs as administrator:', path.basename(path.dirname(lnk)));
+    }
+  } catch (err) {
+    console.warn('[reminders] shortcut run-as flag', err && err.message ? err.message : err);
   }
 }
 
