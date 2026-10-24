@@ -1,6 +1,6 @@
 'use strict';
 
-/** The saved Google session: refresh after an API 401, saving refreshed tokens. */
+/** The saved Google session: refresh after an API 401, saving refreshed tokens, client changes. */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -8,7 +8,7 @@ const path = require('path');
 
 const config = require('../lib/config');
 const auth = require('../lib/google-auth');
-const { freshDataRoot, fakeSafeStorage } = require('./helpers/storage');
+const { freshDataRoot, fakeSafeStorage, writeRaw } = require('./helpers/storage');
 
 const REFRESH = '1//0gLiveRefreshToken_abcdefghijklmnop';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -110,4 +110,23 @@ test('a refreshed token that cannot be saved still serves this session', async (
   assert.match(text, /ENOSPC/);
   assert.equal(text.includes('ya29.new'), false, 'no token in the log');
   assert.equal(text.includes(REFRESH), false, 'no token in the log');
+});
+
+test('saving keys drops the saved grant when the client changes or the old client is unknown', () => {
+  const A = '1-a.apps.googleusercontent.com';
+  const B = '2-b.apps.googleusercontent.com';
+  const root = signedInProfile(50 * 60 * 1000);
+  assert.equal(auth.clientChangeDropsGrant(A, A), false, 'same client: keep the sign-in');
+  assert.equal(auth.clientChangeDropsGrant(A, B), true, 'other client');
+
+  // credentials.json got corrupt and was deleted on read; tokens.json (client A) survived.
+  writeRaw(root, 'credentials.json', '{"format":"glass-tas');
+  config.resetEnvCache();
+  const existing = config.getGoogleCredentialsStatus();
+  assert.equal(existing.clientId, null);
+  assert.equal(auth.loadSavedTokens().refresh_token, REFRESH);
+  assert.equal(auth.clientChangeDropsGrant(existing.clientId, B), true, 'grant of an unknown client');
+
+  freshDataRoot();
+  assert.equal(auth.clientChangeDropsGrant(null, B), false, 'nothing saved: nothing to drop');
 });

@@ -171,6 +171,20 @@ function saveTokens(tokens) {
   writeSecretJson(tokensFile(), tokens);
 }
 
+/**
+ * Whether saving `clientId` as the OAuth client must drop the saved grant: a refresh token
+ * works only with the client that issued it. With no client configured (credentials.json was
+ * corrupt and deleted, a .env removed) tokens.json does not say which client issued it, so a
+ * saved grant counts as another client's — reusing it ends in «Google не узнал Client ID».
+ * @param {string | null} previousClientId client configured before the save
+ * @param {string} clientId client being saved
+ */
+function clientChangeDropsGrant(previousClientId, clientId) {
+  if (previousClientId) return previousClientId !== clientId;
+  const saved = loadSavedTokens();
+  return Boolean(saved && saved.refresh_token);
+}
+
 /** Bumped on logout / credential change so late OAuth results are discarded. */
 let authGeneration = 0;
 /** @type {(() => void) | null} */
@@ -532,6 +546,7 @@ module.exports = {
   reopenLoginInBrowser,
   getPendingLoginUrl,
   loadSavedTokens,
+  clientChangeDropsGrant,
   isInvalidGrantError,
   normalizeGoogleAuthError,
   classifyExchangeError,
