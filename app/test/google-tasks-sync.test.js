@@ -182,6 +182,32 @@ test('a fetch still running at logout does not bring the old account back', asyn
   assert.equal((await gt.getWidgetData()).mode, 'needs_auth');
 });
 
+test('reopening a task cut from the «5 done» keeps it in the cached list (reminders read it)', async () => {
+  const { fake } = freshGoogle();
+  const now = new Date().toISOString();
+  const done = [1, 2, 3, 4, 5].map((n) => ({ id: `D${n}`, title: `Готово ${n}`, status: 'completed', completed: now }));
+  fake.setItems('L-tasks', [
+    ...done,
+    { id: 'X', title: 'Позвонить', notes: 'время 18:00', due: dueOn(todayIso()) },
+    { id: 'O', title: 'Другая' },
+  ]);
+  await gt.getWidgetData({ force: true });
+  const lists = () => fake.calls.filter((c) => c.method === 'tasks.list').length;
+  const listsBefore = lists();
+
+  await gt.setTaskCompleted('tasks', 'X', true);
+  await gt.setTaskCompleted('tasks', 'X', false); // un-checked by mistake
+
+  const data = await gt.getWidgetData(); // warm cache, as refreshExactReminders reads it
+  assert.equal(lists(), listsBefore, 'served from the cache');
+  const x = data.tasks.find((t) => t.id === 'X');
+  assert.ok(x, 'X is listed again');
+  assert.equal(x.completed, false);
+  assert.equal(x.title, 'Позвонить');
+  assert.equal(x.dueTime, '18:00');
+  assert.deepEqual(data.tasks.filter((t) => !t.completed).map((t) => t.id), ['X', 'O']);
+});
+
 test('a habit ticked just before midnight counts for that day when Google answers after it', async (t) => {
   const { fake } = freshGoogle();
   fake.setItems('L-habits', [{ id: 'H1', title: 'Медитация' }]);
