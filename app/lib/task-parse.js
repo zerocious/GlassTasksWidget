@@ -6,7 +6,7 @@
  * («время HH:MM») and repeat rules («повтор: …») as managed lines in notes.
  */
 
-const { todayIso, addDaysIso } = require('./dates');
+const { todayIso, addDaysIso, daysBetweenIso } = require('./dates');
 
 /** Row subtitles when an item has no date and no notes preview. */
 const META_TASK = 'Задача';
@@ -176,13 +176,21 @@ function advanceDateKey(key, recurrence) {
 
 /**
  * Next due after completing a recurring task (always after today).
+ * A weekly task keeps its weekday even when it is ticked late.
  * @param {string | null | undefined} due
  * @param {'daily' | 'weekdays' | 'weekly'} recurrence
  */
 function nextOccurrenceDue(due, recurrence) {
   const today = todayIso();
   let cursor = dueDateKey(due) || today;
-  if (cursor < today) cursor = today;
+  if (cursor < today) {
+    // Skip whole weeks, not to today: a Friday task ticked on Saturday stays on Fridays.
+    // Daily / weekdays don't depend on the old day, so they restart from today.
+    cursor =
+      recurrence === 'weekly'
+        ? addDaysIso(cursor, Math.floor(daysBetweenIso(cursor, today) / 7) * 7)
+        : today;
+  }
   cursor = advanceDateKey(cursor, recurrence);
   while (cursor <= today) {
     cursor = advanceDateKey(cursor, recurrence);

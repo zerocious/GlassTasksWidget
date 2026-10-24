@@ -16,4 +16,13 @@ function addDaysIso(iso, delta) {
   return todayIso(dt);
 }
 
-module.exports = { todayIso, addDaysIso };
+/** Whole calendar days from one local YYYY-MM-DD key to another (negative if `toIso` is earlier). */
+function daysBetweenIso(fromIso, toIso) {
+  const utc = (iso) => {
+    const [y, m, d] = String(iso).split('-').map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.round((utc(toIso) - utc(fromIso)) / 86400000);
+}
+
+module.exports = { todayIso, addDaysIso, daysBetweenIso };

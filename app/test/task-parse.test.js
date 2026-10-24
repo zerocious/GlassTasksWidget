@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { todayIso, addDaysIso } = require('../lib/dates');
+const { todayIso, addDaysIso, daysBetweenIso } = require('../lib/dates');
 const tp = require('../lib/task-parse');
 
 const today = todayIso();
@@ -14,6 +14,9 @@ test('todayIso / addDaysIso use local calendar days', () => {
   assert.equal(addDaysIso('2026-02-28', 1), '2026-03-01');
   assert.equal(addDaysIso('2024-02-28', 1), '2024-02-29');
   assert.equal(addDaysIso('2026-01-01', -1), '2025-12-31');
+  assert.equal(daysBetweenIso('2026-10-23', '2026-10-31'), 8);
+  assert.equal(daysBetweenIso('2026-03-31', '2026-03-28'), -3);
+  assert.equal(daysBetweenIso('2025-12-31', '2026-01-01'), 1);
 });
 
 test('timeFromNotes understands the supported phrasings', () => {
@@ -67,6 +70,21 @@ test('nextOccurrenceDue is always after today', () => {
     assert.ok(tp.dueDateKey(next) > today, `${rule}: ${next}`);
   }
   assert.equal(tp.dueDateKey(tp.nextOccurrenceDue(dueOn(today), 'daily')), addDaysIso(today, 1));
+});
+
+test('a weekly task ticked late keeps its weekday', () => {
+  const nextAfter = (key, rule) => tp.dueDateKey(tp.nextOccurrenceDue(dueOn(key), rule));
+  // Due yesterday (say Friday), ticked today (Saturday): next Friday, not next Saturday.
+  assert.equal(nextAfter(addDaysIso(today, -1), 'weekly'), addDaysIso(today, 6));
+  assert.equal(nextAfter(addDaysIso(today, -7), 'weekly'), addDaysIso(today, 7));
+  assert.equal(nextAfter(addDaysIso(today, -15), 'weekly'), addDaysIso(today, 6));
+  const longAgo = '2020-01-01';
+  const next = nextAfter(longAgo, 'weekly');
+  assert.equal(daysBetweenIso(longAgo, next) % 7, 0);
+  assert.ok(daysBetweenIso(today, next) >= 1 && daysBetweenIso(today, next) <= 7, next);
+  // Daily / weekdays still restart from today.
+  assert.equal(nextAfter(addDaysIso(today, -3), 'daily'), addDaysIso(today, 1));
+  assert.equal(nextAfter(addDaysIso(today, -3), 'weekdays'), tp.advanceDateKey(today, 'weekdays'));
 });
 
 test('weekdays recurrence skips Saturday and Sunday', () => {
