@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const http = require('http');
+const { GaxiosError } = require('gaxios');
 
 const { parseClientSecretJson, looksLikeClientJson } = require('../lib/client-secret-file');
 const { describeAuthError, CONSOLE_LINKS } = require('../lib/auth-errors');
@@ -36,7 +38,7 @@ test('describeAuthError maps OAuth codes from callback, token endpoint and API e
     'invalid_client'
   );
   assert.equal(describeAuthError(new Error('The OAuth client was not found.')).code, 'invalid_client');
-  assert.equal(describeAuthError(Object.assign(new Error('listen EADDRINUSE'), { code: 'EADDRINUSE' })).code, 'port_busy');
+  assert.equal(describeAuthError(Object.assign(new Error('listen EADDRINUSE'), { code: 'EADDRINUSE', syscall: 'listen' })).code, 'port_busy');
   assert.equal(describeAuthError(new Error('Something else')), null);
   assert.equal(describeAuthError(null), null);
 });
@@ -62,10 +64,39 @@ test('describeAuthError links the right project when the Tasks API is disabled',
   assert.equal(describeAuthError(new Error('API is disabled. Enable it by visiting …')).actionUrl, CONSOLE_LINKS.enableApi);
 });
 
-test('describeAuthError maps every bind failure of the loopback port', () => {
+test('describeAuthError maps every bind failure of the loopback port', async () => {
   for (const code of ['EADDRINUSE', 'EACCES', 'EPERM', 'EADDRNOTAVAIL']) {
-    assert.equal(describeAuthError(Object.assign(new Error('listen failed'), { code })).code, 'port_busy', code);
+    assert.equal(describeAuthError(Object.assign(new Error('listen failed'), { code, syscall: 'listen' })).code, 'port_busy', code);
   }
+  // The real error Node gives a server whose port is taken.
+  const taken = http.createServer();
+  await new Promise((resolve) => taken.listen(0, '127.0.0.1', resolve));
+  try {
+    const second = http.createServer();
+    const err = await new Promise((resolve) => {
+      second.on('error', resolve);
+      second.listen(/** @type {any} */ (taken.address()).port, '127.0.0.1');
+    });
+    assert.equal(describeAuthError(err).code, 'port_busy');
+  } finally {
+    taken.close();
+  }
+});
+
+test('the same codes from a blocked connection or a file are not «port busy»', () => {
+  // A firewall / antivirus blocking outbound HTTPS: node-fetch's FetchError, wrapped by gaxios.
+  const fetchErr = Object.assign(new Error('request to https://tasks.googleapis.com/ failed, reason: connect EACCES 142.250.1.1:443'), {
+    name: 'FetchError',
+    code: 'EACCES',
+    errno: 'EACCES',
+    erroredSysCall: 'connect',
+  });
+  const blocked = new GaxiosError(fetchErr.message, { url: 'https://tasks.googleapis.com/' }, undefined, fetchErr);
+  assert.equal(blocked.code, 'EACCES');
+  assert.equal(describeAuthError(blocked), null);
+  assert.equal(describeAuthError(Object.assign(new Error('connect EACCES 142.250.1.1:443'), { code: 'EACCES', syscall: 'connect' })), null);
+  assert.equal(describeAuthError(Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM', syscall: 'rename' })), null);
+  assert.equal(describeAuthError(Object.assign(new Error('EPERM'), { code: 'EPERM' })), null);
 });
 
 test('access_denied tells the user they declined, without a console button', () => {

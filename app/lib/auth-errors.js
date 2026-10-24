@@ -17,8 +17,8 @@ const CONSOLE_LINKS = {
 
 /** @param {unknown} err */
 function errorBits(err) {
-  if (!err) return { codes: [], text: '', project: null };
-  if (typeof err === 'string') return { codes: [err.toLowerCase()], text: err, project: null };
+  if (!err) return { codes: [], text: '', project: null, syscall: '' };
+  if (typeof err === 'string') return { codes: [err.toLowerCase()], text: err, project: null, syscall: '' };
   const e = /** @type {any} */ (err);
   const data = e.response && e.response.data;
   const apiErr = data && typeof data.error === 'object' ? data.error : null;
@@ -45,7 +45,7 @@ function errorBits(err) {
     const m = typeof consumer === 'string' && consumer.match(/projects\/(\d+)/);
     if (m) project = m[1];
   }
-  return { codes, text, project };
+  return { codes, text, project, syscall: typeof e.syscall === 'string' ? e.syscall : '' };
 }
 
 /**
@@ -54,7 +54,7 @@ function errorBits(err) {
  *   null when the error is not a recognised auth / setup problem.
  */
 function describeAuthError(err) {
-  const { codes, text, project } = errorBits(err);
+  const { codes, text, project, syscall } = errorBits(err);
   const has = (...names) => names.some((n) => codes.includes(n));
   const says = (re) => re.test(text);
 
@@ -106,7 +106,10 @@ function describeAuthError(err) {
   if (has('rate_limit_exceeded')) {
     return { code: 'rate_limit', message: 'Google временно ограничил новые входы. Попробуйте через несколько минут.' };
   }
-  if (has('eaddrinuse', 'eacces', 'eperm', 'eaddrnotavail')) {
+  // Only a bind failure of the loopback sign-in port (Node marks it syscall 'listen'). The same
+  // codes come from an outbound connection blocked by a firewall (connect EACCES) or a locked
+  // file (EPERM): there the port advice would point at the wrong setting.
+  if (syscall === 'listen' && has('eaddrinuse', 'eacces', 'eperm', 'eaddrnotavail')) {
     return {
       code: 'port_busy',
       message:
