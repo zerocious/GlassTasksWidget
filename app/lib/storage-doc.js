@@ -94,7 +94,8 @@ function parseDocFile(filePath, retries = READ_RETRIES) {
   if (read.status !== 'ok') return read;
   let raw;
   try {
-    raw = JSON.parse(read.text);
+    // A hand-edited file may start with a UTF-8 BOM (Notepad, PowerShell 5.1): not damage.
+    raw = JSON.parse(read.text.replace(/^\uFEFF/, ''));
   } catch (error) {
     return { status: 'corrupt', error };
   }
@@ -438,7 +439,7 @@ function createJsonDoc(spec) {
     let encrypted = false;
     if (st) {
       try {
-        const raw = JSON.parse(fs.readFileSync(file(), 'utf8'));
+        const raw = JSON.parse(fs.readFileSync(file(), 'utf8').replace(/^\uFEFF/, ''));
         encrypted = Boolean(raw && raw.format === SECRET_ENVELOPE);
         schemaVersion = schemaVersionOf(raw);
       } catch {

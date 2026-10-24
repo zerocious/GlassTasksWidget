@@ -336,7 +336,9 @@ function readJson(filePath, fallback) {
     return fallback;
   }
   try {
-    return JSON.parse(text);
+    // Notepad («UTF-8 with BOM») and PowerShell 5.1 `Set-Content -Encoding UTF8` start the
+    // file with a BOM, which JSON.parse rejects: a hand-edited config.json is still valid.
+    return JSON.parse(text.replace(/^\uFEFF/, ''));
   } catch (err) {
     quarantineCorruptFile(filePath, err);
     return fallback;
