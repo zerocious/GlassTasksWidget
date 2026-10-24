@@ -58,26 +58,35 @@ function exactReminderId(taskId, dueAt) {
   return `exact:${taskId}@${dueAt.toISOString()}`;
 }
 
+/** @param {Date} d */
+function hhmm(d) {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 /**
- * A notes line that holds nothing but a time: the «время 14:30» line the «Время» panel writes,
- * or a bare «14:30» / «в 14:30» (the same lines «Сбросить» removes).
+ * A time at the start of a notes line, in the forms the notes parser reads: the «время 14:30»
+ * line the «Время» panel writes, «в 15:00 забрать посылку», a bare «14:30» (never «10.05»).
  */
-const TIME_ONLY_LINE_RE =
-  /^(?:(?:время|time)\s*(?:[:-]\s*)?\d{1,2}[:.]\d{2}|(?:в|at)\s+\d{1,2}[:.]\d{2}|\d{1,2}:\d{2})$/i;
+const LEADING_TIME_RE =
+  /^(?:(?:(?:время|time)\s*(?:[:-]\s*)?|(?:в|at)\s+)(\d{1,2})[:.](\d{2})|(\d{1,2}):(\d{2}))\b/i;
 
 /**
  * When a timed reminder is due. A task without a due date counts as timed («сегодня в …») only
- * when its time stands on a line of its own: a time mentioned in passing («созвон был в 10:30»,
- * «Иоанн 3:16») would otherwise toast «Пора» every day and show up as «просрочено».
+ * when its time (the one on the row's chip) starts a notes line: a time mentioned in passing
+ * («созвон был в 10:30», «Иоанн 3:16») would otherwise toast «Пора» every day and show up as
+ * «просрочено».
  * @param {any} t
  * @returns {Date | null}
  */
 function reminderDueAt(t) {
-  if (!t.due) {
-    const lines = String(t.notes || '').split(/\r?\n/);
-    if (!lines.some((line) => TIME_ONLY_LINE_RE.test(line.trim()))) return null;
-  }
-  return resolveTaskDueAt(t);
+  const dueAt = resolveTaskDueAt(t);
+  if (!dueAt || t.due) return dueAt;
+  const time = hhmm(dueAt);
+  const leading = String(t.notes || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim().match(LEADING_TIME_RE))
+    .some((m) => m && `${(m[1] || m[3]).padStart(2, '0')}:${m[2] || m[4]}` === time);
+  return leading ? dueAt : null;
 }
 
 /**
@@ -275,9 +284,7 @@ function scheduleExactReminders(data) {
       id: t.id,
       reminderId,
       title: String(t.title || 'Задача').trim() || 'Задача',
-      dueTime:
-        t.dueTime ||
-        `${String(dueAt.getHours()).padStart(2, '0')}:${String(dueAt.getMinutes()).padStart(2, '0')}`,
+      dueTime: t.dueTime || hhmm(dueAt),
       dueAt,
     });
   }
