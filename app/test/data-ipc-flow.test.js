@@ -109,8 +109,8 @@ test('wipe: cancel does nothing; a failed revoke shows a second dialog with the 
 
   const root = freshDataRoot();
   config.writeSecretJson(path.join(root, 'tokens.json'), { refresh_token: '1//0gLiveRefreshTokenValue_xyz' });
-  const { google } = require('googleapis');
-  t.mock.method(Object.getPrototypeOf(new google.auth.OAuth2().transporter), 'request', async () => {
+  const { auth: googleAuth } = require('@googleapis/tasks');
+  t.mock.method(Object.getPrototypeOf(new googleAuth.OAuth2().transporter), 'request', async () => {
     throw Object.assign(new Error('offline'), { code: 'ENOTFOUND' });
   });
   calls.dialogs.length = 0;

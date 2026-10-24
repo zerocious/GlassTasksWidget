@@ -10,10 +10,10 @@ const { freshDataRoot } = require('./helpers/storage');
 
 const REFRESH = '1//0gLiveRefreshToken_abcdefghijklmnop';
 
-/** Prototype of the transporter googleapis' OAuth2 client really uses. */
+/** Prototype of the transporter the Google client's OAuth2 really uses. */
 function transporterProto() {
-  const { google } = require('googleapis');
-  return Object.getPrototypeOf(new google.auth.OAuth2().transporter);
+  const { auth: googleAuth } = require('@googleapis/tasks');
+  return Object.getPrototypeOf(new googleAuth.OAuth2().transporter);
 }
 
 function signedInProfile() {
