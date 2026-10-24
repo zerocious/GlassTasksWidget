@@ -9,8 +9,10 @@
  * whose decrypted text is the same plain document.
  *
  * Failure behaviour (each case is reported through storage-events, so the user sees it):
- * - unparseable file → moved to `<name>.corrupt-<ts>`, then `<name>.bak` is restored if valid,
- *   otherwise defaults are used;
+ * - unparseable file → `<name>.bak` is restored if valid (the damaged file is copied to
+ *   `<name>.corrupt-<ts>` and stays until the restore replaces it); a locked `.bak` → defaults
+ *   for now, and the `.bak` is copied aside before it is first overwritten; no good copy →
+ *   the file is moved to `<name>.corrupt-<ts>` and defaults are used;
  * - file from an older schema → copied to `<name>.v<old>.bak`, migrated, saved;
  * - file from a newer app version → copied to `<name>.v<new>.bak` before it can be overwritten;
  * - encrypted file while safeStorage is unavailable → left untouched, defaults in memory;
@@ -140,6 +142,8 @@ function createJsonDoc(spec) {
   let timer = null;
   /** The file could not be read this session: its content was never loaded, so never overwrite it blindly. */
   let unreadOnDisk = false;
+  /** The file was damaged and its last good copy could not be read: never overwrite the copy blindly. */
+  let bakUnread = false;
   /** When the file last proved unreadable (0 = never): skip the blocking retries for a while. */
   let unreadableAt = 0;
 
@@ -284,24 +288,42 @@ function createJsonDoc(spec) {
       });
       return bak && bak.status === 'ok' ? migrate(bak.raw, spec).data : spec.defaults();
     }
-    // Corrupt: quarantine, then try the last good copy.
-    const movedTo = quarantine(file(), main.error);
-    if (spec.lastGood) {
-      const bak = parseDocFile(bakFile());
-      if (bak.status === 'ok') {
-        const data = accept(bak, bakFile(), true);
-        reportStorageIssue({
-          kind: 'restored-from-backup',
-          file: spec.name,
-          repeat: true,
-          message: `${capitalize(spec.label)}: файл был повреждён и восстановлен из последней хорошей копии.${
-            movedTo ? ` Повреждённый файл: ${path.basename(movedTo)}.` : ''
-          }`,
-        });
-        return data;
-      }
-      if (bak.status === 'corrupt') quarantine(bakFile(), bak.error);
+    // Corrupt. With a last good copy the damaged file is only copied aside and stays in place
+    // until the restored data replaces it: if that write fails (disk full) or the copy cannot
+    // be read yet (locked), the next start finds the file damaged again and retries the copy,
+    // instead of taking a missing file for «reset» and overwriting the only good copy.
+    const bak = spec.lastGood ? parseDocFile(bakFile()) : null;
+    if (bak && bak.status === 'ok') {
+      const copiedTo = copyAside(file(), `corrupt-${Date.now()}`);
+      const data = accept(bak, bakFile(), true);
+      reportStorageIssue({
+        kind: 'restored-from-backup',
+        file: spec.name,
+        repeat: true,
+        message: `${capitalize(spec.label)}: файл был повреждён и восстановлен из последней хорошей копии.${
+          copiedTo ? ` Повреждённый файл: ${path.basename(copiedTo)}.` : ''
+        }`,
+      });
+      return data;
     }
+    if (bak && bak.status === 'unreadable') {
+      // Locked by another program: there is a good copy, it just cannot be opened right now.
+      bakUnread = true;
+      const copiedTo = copyAside(file(), `corrupt-${Date.now()}`);
+      reportStorageIssue({
+        kind: 'backup-unreadable',
+        file: spec.name,
+        level: 'error',
+        message: `${capitalize(spec.label)}: файл повреждён, а последняя хорошая копия сейчас не открывается (${
+          bak.error && bak.error.code ? bak.error.code : 'ошибка чтения'
+        }). Пока используются данные по умолчанию. Закройте программы, которые могут держать файл, и перезапустите виджет: данные восстановятся из копии.${
+          copiedTo ? ` Повреждённый файл: ${path.basename(copiedTo)}.` : ''
+        }`,
+      });
+      return spec.defaults();
+    }
+    const movedTo = quarantine(file(), main.error);
+    if (bak && bak.status === 'corrupt') quarantine(bakFile(), bak.error);
     reportStorageIssue({
       kind: 'reset-corrupt',
       file: spec.name,
@@ -339,7 +361,15 @@ function createJsonDoc(spec) {
     }
     memory = undefined;
     try {
-      if (unreadOnDisk) preserveUnreadFile();
+      if (unreadOnDisk) {
+        preserveUnread(file());
+        unreadOnDisk = false;
+      }
+      if (bakUnread) {
+        // Once the new file is saved, no start would look at the old copy again.
+        preserveUnread(bakFile());
+        bakUnread = false;
+      }
       writeFileAtomic(file(), body);
     } catch (err) {
       reportStorageIssue({
@@ -364,24 +394,26 @@ function createJsonDoc(spec) {
   /**
    * Before the first overwrite of a file this session never managed to read, keep its bytes
    * as `<name>.unread-<ts>.bak`; while it is still locked, refuse to write at all.
+   * @param {string} src the file, or its last good copy (when the file itself was damaged)
    */
-  function preserveUnreadFile() {
-    if (!statSafe(file())) {
-      unreadOnDisk = false;
-      return;
-    }
-    const copy = copyAside(file(), `unread-${Date.now()}.bak`);
+  function preserveUnread(src) {
+    if (!statSafe(src)) return;
+    let stamp = Date.now();
+    while (statSafe(`${file()}.unread-${stamp}.bak`)) stamp += 1; // file and copy in one save
+    const copy = copyAside(src, `unread-${stamp}.bak`);
     if (!copy) {
-      const err = new Error(`${spec.name} is still locked; not overwriting unread data`);
+      const err = new Error(`${path.basename(src)} is still locked; not overwriting unread data`);
       /** @type {any} */ (err).code = 'EBUSY';
       throw err;
     }
-    unreadOnDisk = false;
     reportStorageIssue({
       kind: 'unread-preserved',
       file: spec.name,
       repeat: true,
-      message: `${capitalize(spec.label)}: файл, который не удалось прочитать при запуске, сохранён как ${path.basename(copy)} перед перезаписью. Его можно вернуть вручную: закройте виджет и переименуйте копию обратно.`,
+      message:
+        src === file()
+          ? `${capitalize(spec.label)}: файл, который не удалось прочитать при запуске, сохранён как ${path.basename(copy)} перед перезаписью. Его можно вернуть вручную: закройте виджет и переименуйте копию обратно.`
+          : `${capitalize(spec.label)}: последняя хорошая копия, которую не удалось прочитать, сохранена как ${path.basename(copy)} перед перезаписью. Её можно вернуть вручную: закройте виджет и переименуйте её в ${spec.name}.`,
     });
   }
 
