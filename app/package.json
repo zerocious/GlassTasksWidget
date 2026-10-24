@@ -89,6 +89,9 @@
       "include": "build/installer.nsh",
       "deleteAppDataOnUninstall": false
     },
+    "portable": {
+      "artifactName": "Glass-Tasks-Widget-Portable-${version}.${ext}"
+    },
     "afterPack": "scripts/after-pack.js"
   }
 }

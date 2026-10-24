@@ -47,7 +47,7 @@ $env:GT_USER_DATA_DIR = "$env:TEMP\gt-dev"
 npm start
 ```
 
-Dev-запуск не перезаписывает существующие ярлыки «Glass Tasks Widget».
+Dev-запуск не перезаписывает существующие ярлыки «Glass Tasks Widget» и запись автозапуска установленного виджета: у dev-сборки своя запись (`com.glasstasks.widget.dev`).
 
 ## Первый запуск (Google)
 
