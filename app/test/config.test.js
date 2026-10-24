@@ -59,6 +59,14 @@ test('readJson moves a corrupt file aside instead of letting it be overwritten',
   assert.match(names[0], /^streaks\.json\.corrupt-\d+$/);
 });
 
+test('readJson accepts a hand-edited file saved with a UTF-8 BOM (Notepad, PowerShell 5.1)', () => {
+  const dir = tmpDir();
+  const file = path.join(dir, 'config.json');
+  fs.writeFileSync(file, '\uFEFF{"tasksListName": "Работа"}', 'utf8');
+  assert.deepEqual(config.readJson(file, {}), { tasksListName: 'Работа' });
+  assert.deepEqual(fs.readdirSync(dir), ['config.json'], 'not moved aside as corrupt');
+});
+
 test('writeSecretJson encrypts when safeStorage is available', () => {
   config.setSafeStorageForTests(fakeSafeStorage);
   const file = path.join(tmpDir(), 'tokens.json');

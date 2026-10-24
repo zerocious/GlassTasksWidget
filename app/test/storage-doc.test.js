@@ -193,6 +193,18 @@ test('settings.json: corrupt file is restored from settings.json.bak', () => {
   assert.equal(s.hideCompleted, true);
 });
 
+test('settings.json edited by hand and saved with a UTF-8 BOM is read, not replaced by the .bak', () => {
+  const root = freshDataRoot();
+  settingsStore.saveSettings({ theme: 'light' }); // settings.json.bak: light, completed tasks shown
+  const edited = { schemaVersion: 1, theme: 'light', hideCompleted: true };
+  fs.writeFileSync(path.join(root, 'settings.json'), `\uFEFF${JSON.stringify(edited)}`, 'utf8');
+  settingsStore.resetSettingsCache();
+  assert.equal(settingsStore.loadSettings().hideCompleted, true, 'the hand edit is used');
+  assert.equal(names(root).some((n) => n.includes('.corrupt-')), false);
+  assert.equal(kinds().includes('restored-from-backup'), false);
+  assert.equal(settingsStore.settingsDoc.info().schemaVersion, 1);
+});
+
 test('reminders.json: legacy file migrates; today state survives', () => {
   const root = freshDataRoot();
   const { todayIso } = require('../lib/dates');
