@@ -201,10 +201,22 @@ function syncAutostartAtStartup(enabled) {
   }
 }
 
+/**
+ * The window position is saved in passing (hide, move, quit). When settings.json cannot be
+ * written the storage layer has already told the user; hiding must still work.
+ */
+function savePosition(pos) {
+  try {
+    saveSettings({ pos });
+  } catch (err) {
+    console.warn('[settings] position not saved:', err && err.message ? err.message : err);
+  }
+}
+
 function persistPosition() {
   if (!mainWindow || mainWindow.isDestroyed() || applyingBounds) return;
   const b = mainWindow.getBounds();
-  saveSettings({ pos: { x: b.x, y: b.y } });
+  savePosition({ x: b.x, y: b.y });
 }
 
 function scheduleMoveSettled() {
@@ -251,7 +263,7 @@ function snapToNearestEdge() {
     mainWindow.setPosition(x, y);
     applyingBounds = false;
   }
-  saveSettings({ pos: { x, y } });
+  savePosition({ x, y });
 }
 
 function applyWindowSize(size) {

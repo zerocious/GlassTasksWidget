@@ -3,11 +3,12 @@
 /**
  * electron/main.js started against a recording stand-in for Electron: no binary, window,
  * registry value or global hotkey is touched. Covers what a start does to the Windows login
- * item.
+ * item, and that hiding the widget survives a settings file that cannot be saved.
  */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
@@ -300,4 +301,39 @@ test('portable build: autostart points at the portable exe, not at its copy unpa
   assert.deepEqual(rec.loginWrites, []);
   await ipc('widget:set-settings', { autostart: true });
   assert.deepEqual(rec.loginWrites, [{ openAtLogin: true, name: AUMID, path: `"${portableExe}"`, args: [] }]);
+});
+
+// --- Last: leaves the settings store in its «file never read» state for the rest of this file ---
+
+test('hide, close and the toggle hotkey still work when settings.json cannot be saved', async (t) => {
+  // settings.json that cannot be read (here: a folder) is never overwritten, so every save throws.
+  const { win, send } = await startMain(t, { prepare: (root) => fs.mkdirSync(path.join(root, 'settings.json')) });
+  const settingsStore = require('../lib/settings-store');
+  assert.throws(() => settingsStore.saveSettings({ pos: { x: 1, y: 2 } }), /locked|EBUSY/);
+
+  win.emit('ready-to-show');
+  assert.equal(win.visible, true);
+  win.setPosition(10, 20); // a moved window: hiding tries to save the new position
+
+  send('widget:minimize');
+  assert.equal(win.visible, false, '«–» hides the widget');
+
+  win.show();
+  send('widget:close');
+  assert.equal(win.visible, false, '«×» hides the widget');
+
+  win.show();
+  const closing = { prevented: false, preventDefault() { this.prevented = true; } };
+  win.emit('close', closing);
+  assert.ok(closing.prevented, 'closing the window keeps the app in the tray');
+  assert.equal(win.visible, false, 'closing the window hides it');
+
+  win.show();
+  rec.shortcuts.get('Control+Alt+W')();
+  assert.equal(win.visible, false, 'the toggle hotkey hides the widget');
+
+  // Dragging saves the position after the move settles: that save must not throw either.
+  win.emit('moved');
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  assert.ok(rec.warnings.some((w) => /position not saved/.test(w)), rec.warnings.join('\n'));
 });
