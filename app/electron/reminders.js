@@ -37,14 +37,26 @@ function configureReminders({ isQuitting }) {
 }
 
 /**
+ * «Already notified» key of an exact-time toast. It names the time, not just the task: the sweep
+ * marks `task:<id>` for a date-level toast in the morning, and a time set or moved later that day
+ * must still get its own «Пора».
+ * @param {string} taskId
+ * @param {Date} dueAt
+ */
+function exactReminderId(taskId, dueAt) {
+  return `exact:${taskId}@${dueAt.toISOString()}`;
+}
+
+/**
  * Collect actionable open items for the periodic sweep toast.
  * Timed tasks still in the future are skipped (exact timers handle them).
- * Timed tasks whose time already passed (today / overdue / notes+today) stay as safety net.
+ * Timed tasks whose time already passed (today / overdue / notes+today) stay as safety net,
+ * unless their exact «Пора» toast already went out (`exactId`).
  * @param {any} data
- * @returns {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]}
+ * @returns {{ id: string, exactId?: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]}
  */
 function collectReminderCandidates(data) {
-  /** @type {{ id: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]} */
+  /** @type {{ id: string, exactId?: string, kind: 'task' | 'habit', title: string, dueKind?: string, dueTime?: string | null }[]} */
   const out = [];
   const now = Date.now();
   const today = todayIso();
@@ -58,6 +70,7 @@ function collectReminderCandidates(data) {
       if (todayIso(dueAt) > today) continue;
       out.push({
         id: `task:${t.id}`,
+        exactId: exactReminderId(t.id, dueAt),
         kind: 'task',
         title: String(t.title || 'Задача').trim() || 'Задача',
         dueKind: 'overdue',
@@ -142,11 +155,12 @@ function stopRemindersScheduler() {
 
 /**
  * Fire a one-shot exact-time toast for a single task.
- * Re-checks the task is still open so completed/deleted items stay silent.
- * @param {{ id: string, title: string, dueTime?: string | null }} task
+ * Re-checks the task is still open and still due at this time, so completed/deleted items
+ * and times changed elsewhere (Google, another device) stay silent.
+ * @param {{ id: string, reminderId: string, title: string, dueTime?: string | null, dueAt: Date }} task
  */
 async function fireExactTaskReminder(task) {
-  const reminderId = `task:${task.id}`;
+  const { reminderId } = task;
   if (isQuittingFn() || !loadSettings().remindersEnabled) return;
   if (wasNotifiedToday(reminderId)) return;
   if (!Notification.isSupported()) return;
@@ -158,6 +172,12 @@ async function fireExactTaskReminder(task) {
       (t) => t && t.id === task.id
     );
     if (!live || live.completed) return;
+    const liveDueAt = resolveTaskDueAt(live);
+    if (!liveDueAt || liveDueAt.getTime() !== task.dueAt.getTime()) {
+      // The time moved since this timer was set: no toast for the old one, arm the new one.
+      scheduleExactReminders(data);
+      return;
+    }
   } catch (err) {
     console.warn('[reminders] exact recheck', err && err.message ? err.message : err);
     // Fall through and notify — better a late toast than a missed one if fetch fails.
@@ -187,7 +207,7 @@ function scheduleExactReminders(data) {
   const state = loadReminderState();
   const notified = new Set(state.notifiedIds);
 
-  /** @type {{ id: string, title: string, dueTime: string | null, dueAt: Date }[]} */
+  /** @type {{ id: string, reminderId: string, title: string, dueTime: string | null, dueAt: Date }[]} */
   const upcoming = [];
   for (const t of tasks) {
     if (!t || t.completed || !t.id) continue;
@@ -195,10 +215,11 @@ function scheduleExactReminders(data) {
     if (!dueAt) continue;
     const ts = dueAt.getTime();
     if (ts <= now || ts > horizon) continue;
-    const reminderId = `task:${t.id}`;
+    const reminderId = exactReminderId(t.id, dueAt);
     if (notified.has(reminderId)) continue;
     upcoming.push({
       id: t.id,
+      reminderId,
       title: String(t.title || 'Задача').trim() || 'Задача',
       dueTime:
         t.dueTime ||
@@ -311,7 +332,9 @@ async function runReminderCheck(opts = {}) {
     const notified = new Set(state.notifiedIds);
     const fresh = opts.force
       ? candidates
-      : candidates.filter((c) => !notified.has(c.id));
+      : candidates.filter(
+          (c) => !notified.has(c.id) && !(c.exactId && notified.has(c.exactId))
+        );
     if (!fresh.length) {
       return {
         ok: true,
