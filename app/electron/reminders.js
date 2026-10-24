@@ -29,6 +29,13 @@ let reminderStartupTimer = null;
 let reminderCheckInFlight = false;
 /** @type {Map<string, ReturnType<typeof setTimeout>>} */
 const exactReminderTimers = new Map();
+/**
+ * `task:<id>` of tasks with a toast on the way (a fired exact timer, or a sweep toast being shown).
+ * The «already notified» mark is written only once the toast shows, so without this an exact
+ * timer and a sweep waiting on the same data load (e.g. after wake) both toast one task.
+ * @type {Set<string>}
+ */
+const toastingIds = new Set();
 
 /** Set by main.js so timers stay quiet while the app is quitting. */
 let isQuittingFn = () => false;
@@ -161,34 +168,40 @@ function stopRemindersScheduler() {
  */
 async function fireExactTaskReminder(task) {
   const { reminderId } = task;
+  const taskKey = `task:${task.id}`;
   if (isQuittingFn() || !loadSettings().remindersEnabled) return;
-  if (wasNotifiedToday(reminderId)) return;
+  if (wasNotifiedToday(reminderId) || toastingIds.has(taskKey)) return;
   if (!Notification.isSupported()) return;
 
+  toastingIds.add(taskKey);
   try {
-    const data = await getWidgetData();
-    if (isQuittingFn() || !loadSettings().remindersEnabled) return;
-    const live = (Array.isArray(data?.tasks) ? data.tasks : []).find(
-      (t) => t && t.id === task.id
-    );
-    if (!live || live.completed) return;
-    const liveDueAt = resolveTaskDueAt(live);
-    if (!liveDueAt || liveDueAt.getTime() !== task.dueAt.getTime()) {
-      // The time moved since this timer was set: no toast for the old one, arm the new one.
-      scheduleExactReminders(data);
-      return;
+    try {
+      const data = await getWidgetData();
+      if (isQuittingFn() || !loadSettings().remindersEnabled) return;
+      const live = (Array.isArray(data?.tasks) ? data.tasks : []).find(
+        (t) => t && t.id === task.id
+      );
+      if (!live || live.completed) return;
+      const liveDueAt = resolveTaskDueAt(live);
+      if (!liveDueAt || liveDueAt.getTime() !== task.dueAt.getTime()) {
+        // The time moved since this timer was set: no toast for the old one, arm the new one.
+        scheduleExactReminders(data);
+        return;
+      }
+    } catch (err) {
+      console.warn('[reminders] exact recheck', err && err.message ? err.message : err);
+      // Fall through and notify — better a late toast than a missed one if fetch fails.
     }
-  } catch (err) {
-    console.warn('[reminders] exact recheck', err && err.message ? err.message : err);
-    // Fall through and notify — better a late toast than a missed one if fetch fails.
-  }
 
-  const time = task.dueTime || '';
-  const title = 'Пора';
-  const body = time
-    ? `Пора: ${task.title} (${time})`
-    : `Пора: ${task.title}`;
-  await showReminderToast(title, body, [reminderId]);
+    const time = task.dueTime || '';
+    const title = 'Пора';
+    const body = time
+      ? `Пора: ${task.title} (${time})`
+      : `Пора: ${task.title}`;
+    await showReminderToast(title, body, [reminderId]);
+  } finally {
+    toastingIds.delete(taskKey);
+  }
 }
 
 /**
@@ -333,7 +346,10 @@ async function runReminderCheck(opts = {}) {
     const fresh = opts.force
       ? candidates
       : candidates.filter(
-          (c) => !notified.has(c.id) && !(c.exactId && notified.has(c.exactId))
+          (c) =>
+            !notified.has(c.id) &&
+            !(c.exactId && notified.has(c.exactId)) &&
+            !toastingIds.has(c.id)
         );
     if (!fresh.length) {
       return {
@@ -349,12 +365,15 @@ async function runReminderCheck(opts = {}) {
     }
 
     const { title, body } = formatReminderToast(fresh);
-    const result = await showReminderToast(
-      title,
-      body,
-      fresh.map((c) => c.id),
-      { force: Boolean(opts.force) }
-    );
+    const ids = fresh.map((c) => c.id);
+    const claimed = ids.filter((id) => !toastingIds.has(id));
+    for (const id of claimed) toastingIds.add(id);
+    let result;
+    try {
+      result = await showReminderToast(title, body, ids, { force: Boolean(opts.force) });
+    } finally {
+      for (const id of claimed) toastingIds.delete(id);
+    }
 
     if (!result.shown) {
       return {
