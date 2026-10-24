@@ -116,6 +116,26 @@ test('a timer whose time was changed elsewhere stays quiet and the new time gets
   assert.deepEqual(toasts.map((x) => x.body), ['Пора: Отчёт (17:00)']);
 });
 
+test('an undated task is timed only by a time on a line of its own, not one in passing', async (t) => {
+  fresh(t, at(9));
+  // dueTime is what the widget derives from the notes.
+  const tasks = [
+    { id: 'n1', title: 'Итоги', due: null, notes: 'Созвон был в 10:30, итоги ниже', dueTime: '10:30' },
+    { id: 'n2', title: 'Прочитать', due: null, notes: 'Иоанн 3:16', dueTime: '03:16' },
+    { id: 'n3', title: 'Купить хлеб', due: null, notes: 'время 10:00\nи молоко', dueTime: '10:00' },
+  ];
+  load = async () => ({ tasks, habits: [] });
+  reminders.scheduleExactReminders({ tasks });
+  t.mock.timers.tick(at(11) - at(9));
+  await flush();
+  assert.deepEqual(toasts.map((x) => x.body), ['Пора: Купить хлеб (10:00)']);
+
+  // Nor does the sweep list the other two as «просрочено».
+  const swept = await reminders.runReminderCheck();
+  assert.equal(swept.shown, false);
+  assert.equal(toasts.length, 1);
+});
+
 /**
  * After wake the network is slow: an exact timer and a sweep wait on one data load (getWidgetData
  * shares it), and the first toast is still on its way when the second caller looks.
