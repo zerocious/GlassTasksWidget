@@ -164,6 +164,104 @@ test('syncListOrder drops rows of hidden items and keeps rows it has no item for
   assert.deepEqual(fake.moves, []);
 });
 
+/** A row element for removeRowAnimated / patchTaskRow: classes, listeners, attached or not. */
+function fakeRow(id) {
+  const classes = new Set(['row']);
+  const listeners = new Set();
+  return {
+    dataset: { id },
+    parentNode: { name: 'list' },
+    classList: {
+      add: (c) => classes.add(c),
+      remove: (c) => classes.delete(c),
+      contains: (c) => classes.has(c),
+    },
+    get className() {
+      return [...classes].join(' ');
+    },
+    set className(v) {
+      classes.clear();
+      for (const c of String(v).split(/\s+/).filter(Boolean)) classes.add(c);
+    },
+    addEventListener: (type, fn) => listeners.add(fn),
+    removeEventListener: (type, fn) => listeners.delete(fn),
+    listeners,
+    querySelector: () => null,
+    remove() {
+      this.parentNode = null;
+    },
+  };
+}
+
+function leaveHarness(extra = {}) {
+  return loadRendererFunctions(['removeRowAnimated', 'cancelRowLeave', ...(extra.names || [])], {
+    motionQuiet: () => false,
+    rowLeaves: new WeakMap(),
+    ...extra.globals,
+  });
+}
+
+test('a row whose leave animation is cancelled stays in the list', async () => {
+  const r = leaveHarness();
+  const li = fakeRow('a');
+  let done = 0;
+  r.removeRowAnimated(li, () => (done += 1));
+  assert.ok(li.classList.contains('row-leave'));
+  r.cancelRowLeave(li);
+  await sleep(300);
+  assert.ok(li.parentNode, 'not removed by the pending timer');
+  assert.equal(done, 0);
+  assert.equal(li.listeners.size, 0, 'transitionend listener dropped');
+});
+
+test('an uncancelled leave still removes the row once', async () => {
+  const r = leaveHarness();
+  const li = fakeRow('a');
+  let done = 0;
+  r.removeRowAnimated(li, () => (done += 1));
+  r.removeRowAnimated(li, () => (done += 1)); // the server reply confirms the hide again
+  await sleep(300);
+  assert.equal(li.parentNode, null);
+  assert.equal(done, 1);
+});
+
+test('hide completed: a toggle that fails within the animation brings the row back for good', async () => {
+  const li = fakeRow('t1');
+  const task = { id: 't1', title: 'Купить молоко', completed: true, parent: null };
+  const noop = () => {};
+  const r = leaveHarness({
+    names: ['patchTaskRow'],
+    globals: {
+      // hideCompleted on: a completed task is not in the visible list
+      visibleTasks: () => (task.completed ? [] : [task]),
+      rowById: () => (li.parentNode ? li : null),
+      listTasks: { querySelector: () => null },
+      buildTaskRow: () => assert.fail('the existing row is reused'),
+      taskRowClassName: (t) => (t.completed ? 'row done' : 'row'),
+      syncTaskFilterUi: noop,
+      syncListOrder: noop,
+      ensureListEmpty: noop,
+      markRowEnter: noop,
+      setRowTitle: noop,
+      displayMeta: (m) => m || '',
+      syncRowA11y: noop,
+      syncRowTimeChip: noop,
+      syncRowRepeatBadge: noop,
+      taskHasNotes: () => false,
+      NOTES_IND_SVG: '',
+      document: {},
+      state: { tasks: [task] },
+    },
+  });
+  r.patchTaskRow(task); // optimistic: completed → the row starts leaving
+  assert.ok(li.classList.contains('row-leave'));
+  task.completed = false; // setCompleted failed fast: toggleItem reverts and patches again
+  r.patchTaskRow(task);
+  assert.equal(li.className, 'row');
+  await sleep(300);
+  assert.ok(li.parentNode, 'the open task is still shown');
+});
+
 test('syncListOrder reaches any order with the fewest moves', () => {
   const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
   let seed = 7;
