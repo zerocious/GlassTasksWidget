@@ -65,10 +65,22 @@ function windowsToastsGloballyEnabled() {
 }
 
 /**
+ * The installer's Start Menu link when it installed «для всех пользователей» (per-machine):
+ * %ProgramData%\Microsoft\Windows\Start Menu\Programs.
+ * @returns {string | null}
+ */
+function allUsersStartMenuLink() {
+  const root = process.env.ProgramData || process.env.ALLUSERSPROFILE;
+  if (!root) return null;
+  return path.join(root, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Glass Tasks Widget.lnk');
+}
+
+/**
  * Ensure Start Menu + Desktop shortcuts carry AppUserModelID matching
  * app.setAppUserModelId — required for Windows Action Center toasts.
- * Runs once per session (or when forced). The Start Menu link is required and always
- * written; the Desktop link is only refreshed if the user still has one.
+ * Runs once per session (or when forced). The Start Menu link is required and written unless
+ * the all-users Start Menu already has one; the Desktop link is only refreshed if the user
+ * still has one.
  */
 function ensureWindowsNotificationShortcut(opts = {}) {
   if (process.platform !== 'win32') return;
@@ -102,8 +114,12 @@ function ensureWindowsNotificationShortcut(opts = {}) {
 
     const startMenuLnk = path.join(startMenuDir, 'Glass Tasks Widget.lnk');
     const desktopLnk = path.join(app.getPath('desktop'), 'Glass Tasks Widget.lnk');
+    const allUsersLnk = allUsersStartMenuLink();
     for (const lnk of [startMenuLnk, desktopLnk]) {
       const exists = fs.existsSync(lnk);
+      // A per-machine install's link already carries the AUMID. A per-user copy would only show
+      // up twice in Start and outlive the uninstaller, which removes just the all-users one.
+      if (!exists && lnk === startMenuLnk && allUsersLnk && fs.existsSync(allUsersLnk)) continue;
       let currentTarget = null;
       if (exists) {
         try {
