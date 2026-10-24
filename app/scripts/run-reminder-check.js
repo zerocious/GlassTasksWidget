@@ -27,8 +27,9 @@ function windowsToastsGloballyEnabled() {
 
 app.whenReady().then(async () => {
   const { loadSettings } = require('../lib/settings-store');
-  const { getWidgetData, resolveTaskDueAt } = require('../lib/google-tasks');
+  const { getWidgetData } = require('../lib/google-tasks');
   const { loadReminderState, markNotified } = require('../lib/reminder-store');
+  const { collectReminderCandidates, formatReminderToast } = require('../electron/reminders');
 
   // Ensure Start Menu shortcut (same as main)
   try {
@@ -91,47 +92,8 @@ app.whenReady().then(async () => {
   }
 
   const data = await getWidgetData();
-  const now = Date.now();
-  const today = (() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  })();
-
-  /** @type {{ id: string, kind: string, title: string, dueKind?: string, dueTime?: string | null }[]} */
-  const candidates = [];
-  for (const t of Array.isArray(data?.tasks) ? data.tasks : []) {
-    if (!t || t.completed || !t.id) continue;
-    const dueAt = resolveTaskDueAt(t);
-    if (dueAt) {
-      if (dueAt.getTime() > now) continue;
-      const dueDay = `${dueAt.getFullYear()}-${String(dueAt.getMonth() + 1).padStart(2, '0')}-${String(dueAt.getDate()).padStart(2, '0')}`;
-      if (dueDay > today) continue;
-      candidates.push({
-        id: `task:${t.id}`,
-        kind: 'task',
-        title: String(t.title || 'Задача').trim() || 'Задача',
-        dueKind: 'overdue',
-        dueTime: t.dueTime || null,
-      });
-      continue;
-    }
-    if (t.dueKind !== 'today' && t.dueKind !== 'overdue') continue;
-    candidates.push({
-      id: `task:${t.id}`,
-      kind: 'task',
-      title: String(t.title || 'Задача').trim() || 'Задача',
-      dueKind: t.dueKind,
-      dueTime: t.dueTime || null,
-    });
-  }
-  for (const h of Array.isArray(data?.habits) ? data.habits : []) {
-    if (!h || h.completed || !h.id) continue;
-    candidates.push({
-      id: `habit:${h.id}`,
-      kind: 'habit',
-      title: String(h.title || 'Привычка').trim() || 'Привычка',
-    });
-  }
+  // The same items the widget's sweep would pick.
+  const candidates = collectReminderCandidates(data);
 
   // force: true — same as widget:check-reminders
   const fresh = candidates;
@@ -150,27 +112,7 @@ app.whenReady().then(async () => {
     return;
   }
 
-  const overdue = fresh.filter((i) => i.dueKind === 'overdue');
-  const todayItems = fresh.filter((i) => i.dueKind === 'today');
-  const habits = fresh.filter((i) => i.kind === 'habit');
-  const parts = [];
-  if (overdue.length) parts.push(`просрочено: ${overdue.length}`);
-  if (todayItems.length) parts.push(`на сегодня: ${todayItems.length}`);
-  if (habits.length) parts.push(`привычки: ${habits.length}`);
-  const title =
-    overdue.length && !todayItems.length && !habits.length
-      ? 'Просроченные задачи'
-      : habits.length && !overdue.length && !todayItems.length
-        ? 'Привычки на сегодня'
-        : 'Напоминание Glass Tasks';
-  const names = fresh
-    .slice(0, 3)
-    .map((i) => `${i.title}${i.dueTime ? ` (${i.dueTime})` : ''}`)
-    .join(', ');
-  const more = fresh.length > 3 ? ` и ещё ${fresh.length - 3}` : '';
-  const body = parts.length
-    ? `${parts.join(' · ')}. ${names}${more}`
-    : `${names}${more}`;
+  const { title, body } = formatReminderToast(fresh);
 
   const n = new Notification({ title, body, silent: false });
   await new Promise((resolve) => {

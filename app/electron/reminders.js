@@ -55,6 +55,28 @@ function exactReminderId(taskId, dueAt) {
 }
 
 /**
+ * A notes line that holds nothing but a time: the «время 14:30» line the «Время» panel writes,
+ * or a bare «14:30» / «в 14:30» (the same lines «Сбросить» removes).
+ */
+const TIME_ONLY_LINE_RE =
+  /^(?:(?:время|time)\s*(?:[:-]\s*)?\d{1,2}[:.]\d{2}|(?:в|at)\s+\d{1,2}[:.]\d{2}|\d{1,2}:\d{2})$/i;
+
+/**
+ * When a timed reminder is due. A task without a due date counts as timed («сегодня в …») only
+ * when its time stands on a line of its own: a time mentioned in passing («созвон был в 10:30»,
+ * «Иоанн 3:16») would otherwise toast «Пора» every day and show up as «просрочено».
+ * @param {any} t
+ * @returns {Date | null}
+ */
+function reminderDueAt(t) {
+  if (!t.due) {
+    const lines = String(t.notes || '').split(/\r?\n/);
+    if (!lines.some((line) => TIME_ONLY_LINE_RE.test(line.trim()))) return null;
+  }
+  return resolveTaskDueAt(t);
+}
+
+/**
  * Collect actionable open items for the periodic sweep toast.
  * Timed tasks still in the future are skipped (exact timers handle them).
  * Timed tasks whose time already passed (today / overdue / notes+today) stay as safety net,
@@ -70,7 +92,7 @@ function collectReminderCandidates(data) {
   const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
   for (const t of tasks) {
     if (!t || t.completed || !t.id) continue;
-    const dueAt = resolveTaskDueAt(t);
+    const dueAt = reminderDueAt(t);
     if (dueAt) {
       if (dueAt.getTime() > now) continue; // exact timer pending
       // Past timed: only if due calendar day is today or earlier (notes-only → today).
@@ -182,7 +204,7 @@ async function fireExactTaskReminder(task) {
         (t) => t && t.id === task.id
       );
       if (!live || live.completed) return;
-      const liveDueAt = resolveTaskDueAt(live);
+      const liveDueAt = reminderDueAt(live);
       if (!liveDueAt || liveDueAt.getTime() !== task.dueAt.getTime()) {
         // The time moved since this timer was set: no toast for the old one, arm the new one.
         scheduleExactReminders(data);
@@ -224,7 +246,7 @@ function scheduleExactReminders(data) {
   const upcoming = [];
   for (const t of tasks) {
     if (!t || t.completed || !t.id) continue;
-    const dueAt = resolveTaskDueAt(t);
+    const dueAt = reminderDueAt(t);
     if (!dueAt) continue;
     const ts = dueAt.getTime();
     if (ts <= now || ts > horizon) continue;
@@ -446,6 +468,8 @@ function syncRemindersScheduler(enabled, opts = {}) {
 
 module.exports = {
   configureReminders,
+  collectReminderCandidates,
+  formatReminderToast,
   runReminderCheck,
   syncRemindersScheduler,
   stopRemindersScheduler,
