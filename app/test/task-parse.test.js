@@ -44,6 +44,36 @@ test('applyDueTimeToNotes upserts and clears the managed line', () => {
   assert.equal(tp.applyDueTimeToNotes('в 10:00\nтекст', null), 'текст');
 });
 
+test('clearing a time that the notes text mentions leaves no time', () => {
+  const notes = 'Созвон с Ивановым в 15:00, взять договор';
+  const cleared = tp.applyDueTimeToNotes(notes, null);
+  assert.equal(cleared, `время: нет\n${notes}`);
+  assert.equal(tp.resolveTaskTime({ due: dueOn(today), notes: cleared }), null);
+  assert.equal(tp.resolveTaskDueAt({ due: dueOn(today), notes: cleared }), null);
+  assert.equal(tp.isManagedNotesLine('время: нет'), true);
+  assert.ok(tp.formatMeta({ notes: cleared }).startsWith('Созвон'));
+  // Set 09:00, then clear: no time, not the 15:00 from the text.
+  const set = tp.applyDueTimeToNotes(cleared, '09:00');
+  assert.equal(set, `время 09:00\n${notes}`);
+  assert.equal(tp.resolveTaskTime({ notes: set }), '09:00');
+  assert.equal(tp.applyDueTimeToNotes(set, null), cleared);
+  assert.equal(tp.applyDueTimeToNotes(cleared, null), cleared);
+  assert.equal(tp.timeFromNotes(tp.applyDueTimeToNotes('Иоанн 3:16', null)), null);
+  // Nothing left that reads as a time: no marker.
+  assert.equal(tp.applyDueTimeToNotes('время 15:00\nкупить хлеб', null), 'купить хлеб');
+});
+
+test('a dotted date after «в» is not a clock time', () => {
+  assert.equal(tp.timeFromNotes('Срок сдачи перенесли в 10.11'), null);
+  assert.equal(tp.resolveTaskDueAt({ due: dueOn('2026-11-10'), notes: 'Срок сдачи перенесли в 10.11' }), null);
+  assert.equal(tp.timeFromNotes('позвонить в 9.30'), '09:30');
+  assert.equal(tp.timeFromNotes('в 10.00'), '10:00');
+  assert.equal(tp.timeFromNotes('в 10:11'), '10:11');
+  assert.equal(tp.timeFromNotes('время 10.11'), '10:11');
+  assert.equal(tp.timeFromNotes('перенесли в 10.11, созвон в 15:00'), '15:00');
+  assert.equal(tp.applyDueTimeToNotes('в 10.11\nтекст', null), 'в 10.11\nтекст');
+});
+
 test('normalizeDueTimeInput validates HH:MM', () => {
   assert.equal(tp.normalizeDueTimeInput('7:05'), '07:05');
   assert.equal(tp.normalizeDueTimeInput(''), null);

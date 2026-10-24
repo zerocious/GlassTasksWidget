@@ -68,6 +68,18 @@ function dueKindFor(due, completed) {
 const MANAGED_TIME_LINE_RE =
   /^(?:время|Время|time)\s*(?:[:-]\s*)?\d{1,2}[:.]\d{2}\s*$/i;
 
+/**
+ * «Сбросить» writes «время: нет» when the notes text itself mentions a time
+ * («Созвон в 15:00, взять договор»): that time is then not the task's time.
+ */
+const NO_TIME_MARKER = 'время: нет';
+const NO_TIME_LINE_RE = /^(?:время|Время|time)\s*(?:[:-]\s*)?(?:нет|none)\s*$/i;
+
+function isTimeMarkerLine(line) {
+  const t = String(line || '').trim();
+  return MANAGED_TIME_LINE_RE.test(t) || NO_TIME_LINE_RE.test(t);
+}
+
 /** Managed recurrence line («повтор: ежедневно|будни|еженедельно»). */
 const MANAGED_REPEAT_LINE_RE =
   /^(?:повтор|Повтор|repeat)\s*(?:[:-]\s*)?(ежедневно|будни|еженедельно|daily|weekdays|weekly)\s*$/i;
@@ -91,7 +103,7 @@ const REPEAT_MARKER = {
 
 function isManagedNotesLine(line) {
   const t = String(line || '').trim();
-  return Boolean(t) && (MANAGED_TIME_LINE_RE.test(t) || MANAGED_REPEAT_LINE_RE.test(t));
+  return Boolean(t) && (isTimeMarkerLine(t) || MANAGED_REPEAT_LINE_RE.test(t));
 }
 
 /**
@@ -248,7 +260,7 @@ function normalizeDueTimeInput(value) {
  */
 function applyDueTimeToNotes(notes, dueTime) {
   const lines = String(notes || '').split(/\r?\n/);
-  const kept = lines.filter((line) => !MANAGED_TIME_LINE_RE.test(String(line).trim()));
+  const kept = lines.filter((line) => !isTimeMarkerLine(line));
   let rest = trimNewlines(kept.join('\n'));
 
   if (dueTime == null || dueTime === '') {
@@ -258,12 +270,15 @@ function applyDueTimeToNotes(notes, dueTime) {
       .filter((line) => {
         const t = String(line).trim();
         if (!t) return true;
-        if (/^(?:в|at)\s+\d{1,2}[:.]\d{2}$/i.test(t)) return false;
+        // «в 10.11» alone is a date, not a time: keep it.
+        if (/^(?:в|at)\s+\d{1,2}[:.]\d{2}$/i.test(t)) return !timeFromNotes(t);
         if (/^\d{1,2}:\d{2}$/.test(t)) return false;
         return true;
       })
       .join('\n');
     rest = trimNewlines(rest);
+    // A time inside a sentence stays in the text: mark the task as having none.
+    if (timeFromNotes(rest)) return `${NO_TIME_MARKER}\n${rest}`;
     return rest;
   }
 
@@ -319,21 +334,25 @@ function dueTimeLabel(due) {
 
 /**
  * Parse time from notes: «14:30», «в 14:30», «time: 9:05», «время 09.30».
+ * A «время: нет» line means no time, whatever the text says.
  * @param {string | null | undefined} notes
  * @returns {string | null}
  */
 function timeFromNotes(notes) {
   if (!notes) return null;
   const text = String(notes);
+  if (text.split(/\r?\n/).some((line) => NO_TIME_LINE_RE.test(line.trim()))) return null;
   const patterns = [
-    /(?:^|[\s,;|(])(?:в|В|at|time|время|Время)\s*(?:[:-]\s*)?(\d{1,2})[:.](\d{2})\b/i,
+    /(?:^|[\s,;|(])(?:time|время|Время)\s*(?:[:-]\s*)?(\d{1,2})[:.](\d{2})\b/i,
+    // «в 9.30» only when the part after the dot can't be a month: «перенесли в 10.11» is a date.
+    /(?:^|[\s,;|(])(?:в|В|at)\s*(?:[:-]\s*)?(\d{1,2})(?::(\d{2})|\.(00|1[3-9]|[2-5]\d))\b/i,
     /\b(\d{1,2}):(\d{2})\b/,
   ];
   for (const re of patterns) {
     const m = text.match(re);
     if (!m) continue;
     const h = Number(m[1]);
-    const min = Number(m[2]);
+    const min = Number(m[2] ?? m[3]);
     if (!Number.isFinite(h) || !Number.isFinite(min) || h > 23 || min > 59) continue;
     return formatHm(h, min);
   }
