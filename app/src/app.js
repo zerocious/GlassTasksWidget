@@ -1937,11 +1937,24 @@ async function undoReschedule(item, prevKey) {
   }
 }
 
+/**
+ * A new item that the search or the «Сегодня» / «Просрочено» / «Без даты» filter hides looks
+ * like a failed add (and gets added twice): close the search, then show all tasks if needed.
+ */
+function revealCreatedItem(listKind, item) {
+  const shown = () =>
+    (listKind === 'habits' ? filterVisibleItems(state.habits) : visibleTasks()).some((i) => i.id === item.id);
+  if (shown()) return;
+  if (searchQuery && !matchesSearch(item)) closeSearch();
+  if (listKind === 'tasks' && !shown()) setTaskDueFilter('all');
+}
+
 function insertCreatedItem(listKind, item) {
   if (!item || !item.id) return;
   if (listKind === 'habits') {
     state.habits = [item, ...state.habits.filter((h) => h.id !== item.id)];
     resortHabitsLocal();
+    revealCreatedItem('habits', item);
     patchHabitRow(item);
   } else {
     state.tasks = state.tasks.filter((t) => t.id !== item.id);
@@ -1953,6 +1966,7 @@ function insertCreatedItem(listKind, item) {
       state.tasks.unshift(item);
     }
     resortTasksLocal();
+    revealCreatedItem('tasks', item);
     renderTasks();
     markRowEnter(rowById(listTasks, item.id));
   }

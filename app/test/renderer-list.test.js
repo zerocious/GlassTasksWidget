@@ -262,6 +262,62 @@ test('hide completed: a toggle that fails within the animation brings the row ba
   assert.ok(li.parentNode, 'the open task is still shown');
 });
 
+function revealHarness({ filter = 'all', query = '', tasks = [], habits = [] } = {}) {
+  const r = loadRendererFunctions(
+    ['revealCreatedItem', 'visibleTasks', 'filterTasksByDue', 'taskMatchesDueFilter', 'filterVisibleItems', 'matchesSearch'],
+    {
+      settings: { hideCompleted: false },
+      searchQuery: query,
+      taskDueFilter: filter,
+      state: { tasks, habits },
+      closed: 0,
+    }
+  );
+  r.closeSearch = () => {
+    r.closed += 1;
+    r.searchQuery = '';
+  };
+  r.setTaskDueFilter = (f) => {
+    r.taskDueFilter = f;
+  };
+  return r;
+}
+
+test('a task added under the «Сегодня» filter without a date is shown, not silently hidden', () => {
+  const item = { id: 'new', title: 'купить молоко', due: null, dueKind: null };
+  const r = revealHarness({ filter: 'today', tasks: [item, { id: 't', title: 'x', dueKind: 'today' }] });
+  r.revealCreatedItem('tasks', item);
+  assert.equal(r.taskDueFilter, 'all');
+});
+
+test('a task that matches the active filter and search leaves both alone', () => {
+  const item = { id: 'new', title: 'купить молоко', due: '2026-10-24', dueKind: 'today' };
+  const r = revealHarness({ filter: 'today', query: 'молоко', tasks: [item] });
+  r.revealCreatedItem('tasks', item);
+  assert.equal(r.taskDueFilter, 'today');
+  assert.equal(r.closed, 0);
+});
+
+test('an add that the search does not match closes the search; one it matches keeps it', () => {
+  const milk = { id: 'new', title: 'купить молоко', due: null, dueKind: null };
+  const r = revealHarness({ query: 'хлеб', tasks: [milk] });
+  r.revealCreatedItem('tasks', milk);
+  assert.equal(r.closed, 1);
+  assert.equal(r.taskDueFilter, 'all');
+
+  const kept = revealHarness({ filter: 'overdue', query: 'молоко', tasks: [milk] });
+  kept.revealCreatedItem('tasks', milk);
+  assert.equal(kept.closed, 0, 'only the date filter hid it');
+  assert.equal(kept.taskDueFilter, 'all');
+});
+
+test('a habit added during a search it does not match closes the search', () => {
+  const habit = { id: 'h', title: 'Читать', completed: false };
+  const r = revealHarness({ query: 'вода', habits: [habit] });
+  r.revealCreatedItem('habits', habit);
+  assert.equal(r.closed, 1);
+});
+
 test('syncListOrder reaches any order with the fewest moves', () => {
   const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
   let seed = 7;
