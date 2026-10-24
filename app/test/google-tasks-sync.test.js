@@ -7,10 +7,14 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 
-const { freshGoogle } = require('./helpers/fake-google');
+const { freshGoogle, session, deferred } = require('./helpers/fake-google');
 const gt = require('../lib/google-tasks');
+const { loadOfflineCache } = require('../lib/offline-cache');
 const { getHabitStats } = require('../lib/streak-store');
+const { flushAllDocs } = require('../lib/storage-doc');
 const { todayIso, addDaysIso } = require('../lib/dates');
 const { nextOccurrenceDue, applyDueTimeToNotes, applyRecurrenceToNotes } = require('../lib/task-parse');
 
@@ -147,6 +151,35 @@ test('a time line never cuts the end off long notes', async () => {
 
   await assert.rejects(gt.updateItem('tasks', 'T2', { dueTime: '10:00' }), /слишком длинные/);
   assert.equal(fake.item('L-tasks', 'T2').notes, googleMax, 'nothing was written');
+});
+
+test('a fetch still running at logout does not bring the old account back', async () => {
+  const { root, fake } = freshGoogle();
+  fake.setItems('L-tasks', [{ id: 'T1', title: 'Задача старого аккаунта' }]);
+  const reached = deferred();
+  const gate = deferred();
+  fake.hooks['tasks.list'] = async () => {
+    reached.resolve();
+    await gate.promise;
+  };
+
+  const inFlight = gt.getWidgetData(); // e.g. a reminder check
+  await reached.promise;
+  // «Выйти» (electron/main.js): tokens gone, every cache cleared, then a forced reload.
+  session.signedIn = false;
+  gt.invalidateListCache();
+  gt.invalidatePayloadCache();
+  gt.clearOfflineCache();
+  const afterLogout = gt.getWidgetData({ force: true });
+  gate.resolve();
+
+  const [stale, fresh] = await Promise.all([inFlight, afterLogout]);
+  assert.equal(fresh.mode, 'needs_auth');
+  assert.equal(stale.mode, 'needs_auth', 'the late reply is not served as signed-in data');
+  assert.equal(loadOfflineCache(), null);
+  flushAllDocs();
+  assert.equal(fs.existsSync(path.join(root, 'offline-cache.json')), false);
+  assert.equal((await gt.getWidgetData()).mode, 'needs_auth');
 });
 
 test('a habit ticked just before midnight counts for that day when Google answers after it', async (t) => {

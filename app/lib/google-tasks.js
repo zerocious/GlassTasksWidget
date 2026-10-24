@@ -48,6 +48,7 @@ const {
   clearOfflineCache,
   patchOfflineCache,
   reorderOfflineCache,
+  offlineCacheGeneration,
 } = require('./offline-cache');
 const { applyItemPatch, reorderList } = require('./list-ops');
 const { retryingTasksClient } = require('./retry');
@@ -456,10 +457,14 @@ async function fetchLivePayload(config) {
   for (let attempt = 0; ; attempt += 1) {
     const genStart = mutationGeneration;
     const busyStart = mutationsActive;
+    const sessionStart = offlineCacheGeneration();
     const payload = await fetchLivePayloadOnce(config);
     if (payload.mode !== 'google') return payload;
+    // Logout / new client cleared the caches meanwhile: this is the previous account's data,
+    // never save it back. The next attempt asks auth again (normally «needs_auth» now).
+    const sessionChanged = sessionStart !== offlineCacheGeneration();
     const consistent =
-      busyStart === 0 && mutationsActive === 0 && genStart === mutationGeneration;
+      !sessionChanged && busyStart === 0 && mutationsActive === 0 && genStart === mutationGeneration;
     if (consistent) {
       saveOfflineCache(payload);
       setPayloadCache(payload);
@@ -467,7 +472,7 @@ async function fetchLivePayload(config) {
     }
     if (attempt >= 2) {
       // Still racing edits: prefer the cache those edits patched over this snapshot.
-      const patched = payloadCache && payloadCache.payload;
+      const patched = !sessionChanged && payloadCache && payloadCache.payload;
       return patched && patched.mode === 'google' ? patched : payload;
     }
     await Promise.allSettled([...mutationInFlight.values()]);
