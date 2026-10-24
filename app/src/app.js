@@ -1352,11 +1352,24 @@ function markRowEnter(li) {
   setTimeout(() => li.classList.remove('row-enter'), 400);
 }
 
+/** Row → stops its pending removeRowAnimated (see cancelRowLeave). */
+const rowLeaves = new WeakMap();
+
+/**
+ * A leaving row that is shown again (a toggle failed and was reverted before the animation
+ * ended) must not be removed when the animation's timer fires.
+ */
+function cancelRowLeave(li) {
+  const stop = li && rowLeaves.get(li);
+  if (stop) stop();
+}
+
 function removeRowAnimated(li, done) {
   if (!li) {
     done?.();
     return;
   }
+  cancelRowLeave(li);
   if (motionQuiet()) {
     li.remove();
     done?.();
@@ -1364,10 +1377,16 @@ function removeRowAnimated(li, done) {
   }
   li.classList.add('row-leave');
   let finished = false;
+  let timer = null;
+  const stop = () => {
+    finished = true;
+    clearTimeout(timer);
+    li.removeEventListener('transitionend', onEnd);
+    if (rowLeaves.get(li) === stop) rowLeaves.delete(li);
+  };
   const finish = () => {
     if (finished) return;
-    finished = true;
-    li.removeEventListener('transitionend', onEnd);
+    stop();
     if (li.parentNode) li.remove();
     done?.();
   };
@@ -1376,7 +1395,8 @@ function removeRowAnimated(li, done) {
     finish();
   };
   li.addEventListener('transitionend', onEnd);
-  setTimeout(finish, 260);
+  timer = setTimeout(finish, 260);
+  rowLeaves.set(li, stop);
 }
 
 /**
@@ -1471,6 +1491,7 @@ function patchTaskRow(task) {
     listTasks.appendChild(li);
     markRowEnter(li);
   } else {
+    cancelRowLeave(li);
     li.className = taskRowClassName(task);
     if (task.parent) li.dataset.parent = task.parent;
     else delete li.dataset.parent;
@@ -1538,6 +1559,7 @@ function patchHabitRow(habit) {
     listHabits.appendChild(li);
     markRowEnter(li);
   } else {
+    cancelRowLeave(li);
     const done = Boolean(habit.completed);
     li.className = `row${done ? ' done' : ''}`;
     const icon = li.querySelector('.habit-icon');
