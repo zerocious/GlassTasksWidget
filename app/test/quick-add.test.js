@@ -58,3 +58,16 @@ test('a title made only of keywords is kept as-is', () => {
 test('invalid clock values are left in the title', () => {
   assert.deepEqual(p('Счёт 25:99'), { title: 'Счёт 25:99', dueKey: null, time: null, recurrence: null });
 });
+
+// Saturday, 2026-10-24, 10:00 local.
+const SAT = new Date(2026, 9, 24, 10, 0);
+const ps = (s) => parseQuickAdd(s, SAT);
+
+test('«по будням» entered at a weekend starts on Monday', () => {
+  assert.deepEqual(ps('Стендап по будням 9:30'), {
+    title: 'Стендап', dueKey: '2026-10-26', time: '09:30', recurrence: 'weekdays',
+  });
+  assert.equal(parseQuickAdd('Стендап по будням', new Date(2026, 9, 25, 10, 0)).dueKey, '2026-10-26');
+  assert.equal(ps('Уборка еженедельно').dueKey, '2026-10-24');
+  assert.equal(ps('Созвон 9:05').dueKey, '2026-10-24');
+});
