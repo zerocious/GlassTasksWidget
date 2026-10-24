@@ -40,6 +40,7 @@ const {
   reopenLoginInBrowser,
   getPendingLoginUrl,
   loadSavedTokens,
+  clientChangeDropsGrant,
 } = require('../lib/google-auth');
 const { parseClientSecretJson, MAX_FILE_BYTES } = require('../lib/client-secret-file');
 const { createLogger, captureConsole } = require('../lib/logger');
@@ -858,11 +859,12 @@ function registerIpc() {
 
   /**
    * Save OAuth client keys and reload. A different Client ID invalidates the saved
-   * refresh token (it belongs to the old client), so the user signs in again.
+   * refresh token (it belongs to the old client), so the user signs in again — as does
+   * a grant saved while no client is configured, whose client is unknown.
    */
   async function storeCredentials({ clientId, clientSecret, redirectPort }) {
     const existing = getGoogleCredentialsStatus();
-    const clientChanged = Boolean(existing.clientId && existing.clientId !== clientId);
+    const clientChanged = clientChangeDropsGrant(existing.clientId, clientId);
     // Validation happens inside save (it throws), so nothing is cleared for rejected input.
     saveGoogleCredentials({ clientId, clientSecret, redirectPort });
     if (clientChanged) {
