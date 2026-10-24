@@ -67,7 +67,22 @@ async function withRetry(fn, opts = {}) {
 const NON_IDEMPOTENT = new Set(['insert']);
 
 /**
- * Wrap a googleapis Tasks client so every `tasks.*` / `tasklists.*` call retries transient errors.
+ * Method names of a resource group, own and inherited. The generated Google clients define
+ * list/insert/patch/… on a class prototype, so Object.keys() would see none of them.
+ * @param {object} group
+ */
+function methodNames(group) {
+  const names = new Set();
+  for (let o = group; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+    for (const name of Object.getOwnPropertyNames(o)) {
+      if (name !== 'constructor' && typeof group[name] === 'function') names.add(name);
+    }
+  }
+  return names;
+}
+
+/**
+ * Wrap a Google Tasks client so every `tasks.*` / `tasklists.*` call retries transient errors.
  * @template {{ tasks: object, tasklists: object }} C
  * @param {C} client
  * @param {Parameters<typeof withRetry>[1]} [opts]
@@ -76,9 +91,8 @@ const NON_IDEMPOTENT = new Set(['insert']);
 function retryingTasksClient(client, opts = {}) {
   const wrapGroup = (group) => {
     const out = {};
-    for (const name of Object.keys(group)) {
+    for (const name of methodNames(group)) {
       const fn = group[name];
-      if (typeof fn !== 'function') continue;
       out[name] = (params) =>
         withRetry(() => fn.call(group, params), { ...opts, idempotent: !NON_IDEMPOTENT.has(name) });
     }
