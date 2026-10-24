@@ -6,6 +6,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { loadRendererFunctions } = require('./helpers/renderer');
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 function deferred() {
   let resolve;
   const promise = new Promise((r) => {
@@ -98,6 +100,48 @@ test('time saved after the panel was closed: no false error, the time chip is up
   assert.deepEqual(calls.patched, ['a']);
   assert.equal(r.state.tasks[0].dueTime, '09:30');
   assert.equal(calls.closedTime, 0);
+});
+
+function notesBlurHarness() {
+  const cancel = { name: 'btnNotesCancel' };
+  const close = { name: 'btnNotesClose' };
+  const save = { name: 'btnNotesSave' };
+  const saves = [];
+  const r = loadRendererFunctions(['onNotesBlur'], {
+    notesIgnoreBlur: false,
+    notesTarget: { listKind: 'tasks', itemId: 'a', original: '' },
+    notesSaving: false,
+    notesOverlay: {
+      hidden: false,
+      classList: { contains: (c) => c === 'is-open' },
+      contains: (node) => node === cancel || node === close || node === save,
+    },
+    saveNotesPanel: (opts) => saves.push(opts),
+  });
+  return { r, saves, cancel, close, save };
+}
+
+test('Tab from the notes text to «Отмена» or × does not save the edit before Cancel runs', async () => {
+  const { r, saves, cancel, close } = notesBlurHarness();
+  r.onNotesBlur({ relatedTarget: cancel });
+  r.onNotesBlur({ relatedTarget: close });
+  await sleep(160);
+  assert.deepEqual(saves, []);
+});
+
+test('Tab to «Сохранить» leaves the save to the button (no autosave racing it)', async () => {
+  const { r, saves, save } = notesBlurHarness();
+  r.onNotesBlur({ relatedTarget: save });
+  await sleep(160);
+  assert.deepEqual(saves, []);
+});
+
+test('leaving the notes text any other way (window loses focus) still autosaves', async () => {
+  const { r, saves } = notesBlurHarness();
+  r.onNotesBlur({ relatedTarget: null });
+  await sleep(160);
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].closeAfter, false);
 });
 
 test('a time save that lands while another item is open leaves that panel alone', async () => {

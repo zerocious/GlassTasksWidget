@@ -3621,22 +3621,30 @@ if (notesOverlay) {
     if (e.target === notesOverlay) closeNotesPanel({ revert: true });
   });
 }
+/**
+ * Leaving the notes text saves it, unless focus went to one of the panel's own buttons:
+ * Tab / Shift+Tab to «Отмена», × or «Сохранить» lets that button decide, like a click does.
+ */
+function onNotesBlur(e) {
+  const toPanelButton = Boolean(e.relatedTarget && notesOverlay && notesOverlay.contains(e.relatedTarget));
+  setTimeout(() => {
+    if (
+      notesIgnoreBlur ||
+      toPanelButton ||
+      !notesTarget ||
+      !notesOverlay ||
+      notesOverlay.hidden ||
+      !notesOverlay.classList.contains('is-open') ||
+      notesSaving
+    ) {
+      return;
+    }
+    saveNotesPanel({ closeAfter: false });
+  }, 120);
+}
+
 if (notesTextarea) {
-  notesTextarea.addEventListener('blur', () => {
-    setTimeout(() => {
-      if (
-        notesIgnoreBlur ||
-        !notesTarget ||
-        !notesOverlay ||
-        notesOverlay.hidden ||
-        !notesOverlay.classList.contains('is-open') ||
-        notesSaving
-      ) {
-        return;
-      }
-      saveNotesPanel({ closeAfter: false });
-    }, 120);
-  });
+  notesTextarea.addEventListener('blur', onNotesBlur);
   notesTextarea.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       e.preventDefault();
