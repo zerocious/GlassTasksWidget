@@ -11,25 +11,34 @@ const { todayIso, addDaysIso } = require('./dates');
 const B = '(?<![\\p{L}\\p{N}])';
 const E = '(?![\\p{L}\\p{N}])';
 
-/** JS getDay(): 0 = Sunday. */
+/**
+ * JS getDay(): 0 = Sunday. `pl` is the «по …» form («по средам»).
+ * `abbr` is matched in lower case only and never next to a hyphen: «60 Вт», «в ВС», «ср-во».
+ * `prep`: only with «в» — a bare «среда» is usually the noun («среда разработки»).
+ */
 const WEEKDAYS = [
-  { day: 1, re: 'понедельник|пн' },
-  { day: 2, re: 'вторник|вт' },
-  { day: 3, re: 'среду|среда|ср' },
-  { day: 4, re: 'четверг|чт' },
-  { day: 5, re: 'пятницу|пятница|пт' },
-  { day: 6, re: 'субботу|суббота|сб' },
-  { day: 0, re: 'воскресенье|вс' },
+  { day: 1, re: 'понедельник', abbr: 'пн', pl: 'понедельникам' },
+  { day: 2, re: 'вторник', abbr: 'вт', pl: 'вторникам' },
+  { day: 3, re: 'среду|среда', abbr: 'ср', pl: 'средам', prep: true },
+  { day: 4, re: 'четверг', abbr: 'чт', pl: 'четвергам' },
+  { day: 5, re: 'пятницу|пятница', abbr: 'пт', pl: 'пятницам' },
+  { day: 6, re: 'субботу|суббота', abbr: 'сб', pl: 'субботам' },
+  { day: 0, re: 'воскресенье', abbr: 'вс', pl: 'воскресеньям' },
 ];
 
 const REPEATS = [
-  { rule: 'weekdays', re: 'по будням|каждый будний день|в будни' },
+  { rule: 'weekdays', re: 'по будням|каждый будний день|в будни|пн\\s*[-–—]\\s*пт' },
   { rule: 'daily', re: 'каждый день|ежедневно' },
   { rule: 'weekly', re: 'каждую неделю|еженедельно' },
 ];
 
 function rx(body) {
   return new RegExp(`${B}(?:${body})${E}`, 'iu');
+}
+
+/** Case-sensitive, and a hyphen on either side means part of a word («ср-во»). */
+function abbrRx(body) {
+  return new RegExp(`(?<![\\p{L}\\p{N}-])(?:${body})(?![\\p{L}\\p{N}-])`, 'u');
 }
 
 function weekdayOf(key) {
@@ -81,6 +90,16 @@ function parseQuickAdd(input, now = new Date()) {
     })) break;
   }
 
+  // «каждый вторник», «каждую пятницу», «по средам»: weekly, first time on that day.
+  if (!recurrence || recurrence === 'weekly') {
+    for (const w of WEEKDAYS) {
+      if (take(rx(`(?:каждый|каждую|каждое)\\s+(?:${w.re}|${w.abbr})|по\\s+${w.pl}`), () => {
+        recurrence = 'weekly';
+        dueKey = nextWeekday(today, w.day);
+      })) break;
+    }
+  }
+
   // Time: «в 18:30», «18:30» (colon only — «12.10» is a date).
   take(rx('(?:в\\s+)?([01]?\\d|2[0-3]):([0-5]\\d)'), (m) => {
     time = `${m[1].padStart(2, '0')}:${m[2]}`;
@@ -92,10 +111,12 @@ function parseQuickAdd(input, now = new Date()) {
     { re: 'сегодня', key: () => today },
     { re: 'через неделю', key: () => addDaysIso(today, 7) },
   ];
-  for (const r of relative) {
-    if (take(rx(r.re), () => {
-      dueKey = r.key();
-    })) break;
+  if (!dueKey) {
+    for (const r of relative) {
+      if (take(rx(r.re), () => {
+        dueKey = r.key();
+      })) break;
+    }
   }
 
   if (!dueKey) {
@@ -106,9 +127,11 @@ function parseQuickAdd(input, now = new Date()) {
 
   if (!dueKey) {
     for (const w of WEEKDAYS) {
-      if (take(rx(`(?:(?:в|во)\\s+)?(?:${w.re})`), () => {
+      const hit = () => {
         dueKey = nextWeekday(today, w.day);
-      })) break;
+      };
+      const full = w.prep ? `(?:в|во)\\s+(?:${w.re})` : `(?:(?:в|во)\\s+)?(?:${w.re})`;
+      if (take(rx(full), hit) || take(abbrRx(`(?:[вВ]о?\\s+)?${w.abbr}`), hit)) break;
     }
   }
 

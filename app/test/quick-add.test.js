@@ -62,6 +62,36 @@ test('invalid clock values are left in the title', () => {
 // Saturday, 2026-10-24, 10:00 local.
 const SAT = new Date(2026, 9, 24, 10, 0);
 const ps = (s) => parseQuickAdd(s, SAT);
+const plain = (s) => ({ title: s, dueKey: null, time: null, recurrence: null });
+
+test('«каждый вторник» / «по средам» repeat weekly from that day', () => {
+  assert.deepEqual(ps('Уборка каждый вторник'), {
+    title: 'Уборка', dueKey: '2026-10-27', time: null, recurrence: 'weekly',
+  });
+  assert.deepEqual(ps('Йога каждую пятницу 19:00'), {
+    title: 'Йога', dueKey: '2026-10-30', time: '19:00', recurrence: 'weekly',
+  });
+  assert.equal(ps('Уборка каждое воскресенье').dueKey, '2026-10-25');
+  assert.deepEqual(p('Полив по средам'), {
+    title: 'Полив', dueKey: '2026-10-07', time: null, recurrence: 'weekly',
+  });
+  assert.deepEqual(ps('Отчёт еженедельно по пятницам'), {
+    title: 'Отчёт', dueKey: '2026-10-30', time: null, recurrence: 'weekly',
+  });
+});
+
+test('weekday words and abbreviations inside ordinary text are not dates', () => {
+  assert.deepEqual(ps('Настроить среду разработки'), plain('Настроить среду разработки'));
+  assert.deepEqual(ps('Купить лампу 60 Вт'), plain('Купить лампу 60 Вт'));
+  assert.deepEqual(ps('Купить ср-во для посуды'), plain('Купить ср-во для посуды'));
+  assert.deepEqual(ps('Подать жалобу в ВС'), plain('Подать жалобу в ВС'));
+  assert.equal(p('Созвон во вт').dueKey, '2026-10-13');
+  assert.equal(p('Созвон В пт').dueKey, '2026-10-09');
+  // «пн-пт» is the weekdays repeat.
+  assert.deepEqual(ps('Зарядка пн-пт 7:00'), {
+    title: 'Зарядка', dueKey: '2026-10-26', time: '07:00', recurrence: 'weekdays',
+  });
+});
 
 test('«по будням» entered at a weekend starts on Monday', () => {
   assert.deepEqual(ps('Стендап по будням 9:30'), {
