@@ -155,6 +155,20 @@ function saveStore(store) {
   storeCache = store;
 }
 
+/**
+ * Copy of the history to change: the cache takes it only once it is saved, so after a failed
+ * save (disk full, file still locked) the cache still matches the file and a retry saves again.
+ * @returns {StreakStore}
+ */
+function draftStore() {
+  /** @type {StreakStore} */
+  const draft = { habits: Object.create(null) };
+  for (const [habitId, entry] of Object.entries(loadStore().habits)) {
+    draft.habits[habitId] = { dates: Array.isArray(entry.dates) ? entry.dates.slice() : [] };
+  }
+  return draft;
+}
+
 /** Forget the in-memory copy (after import / wipe) so the next load reads the file. */
 function resetStreakCache() {
   storeCache = null;
@@ -166,7 +180,7 @@ function resetStreakCache() {
  * @returns {{ habits: number, daysAdded: number }}
  */
 function mergeHistory(incoming) {
-  const store = loadStore();
+  const store = draftStore();
   const normalized = decodeStore(incoming);
   let habits = 0;
   let daysAdded = 0;
@@ -197,7 +211,7 @@ function ensureHabit(store, habitId) {
  * @param {string} [isoDate]
  */
 function markCompleted(habitId, isoDate = todayIso()) {
-  const store = loadStore();
+  const store = draftStore();
   const habit = ensureHabit(store, habitId);
   if (!habit.dates.includes(isoDate)) {
     habit.dates.push(isoDate);
@@ -213,7 +227,7 @@ function markCompleted(habitId, isoDate = todayIso()) {
  * @param {string} [isoDate]
  */
 function unmarkCompleted(habitId, isoDate = todayIso()) {
-  const store = loadStore();
+  const store = draftStore();
   const habit = ensureHabit(store, habitId);
   habit.dates = habit.dates.filter((d) => d !== isoDate);
   saveStore(store);
@@ -293,9 +307,8 @@ function enrichHabits(habits) {
  * @param {string} habitId
  */
 function removeHabit(habitId) {
-  if (!habitId) return;
-  const store = loadStore();
-  if (!Object.hasOwn(store.habits, habitId)) return;
+  if (!habitId || !Object.hasOwn(loadStore().habits, habitId)) return;
+  const store = draftStore();
   delete store.habits[habitId];
   saveStore(store);
 }
