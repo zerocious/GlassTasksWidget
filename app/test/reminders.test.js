@@ -14,8 +14,11 @@ function stubModule(rel, exports) {
   require.cache[file] = { id: file, filename: file, loaded: true, exports };
 }
 
+/** What powerMonitor.getSystemIdleState reports. */
+let idleState = 'active';
 stubModule('electron', {
   Notification: { isSupported: () => true },
+  powerMonitor: { getSystemIdleState: () => idleState },
 });
 
 const { freshDataRoot } = require('./helpers/storage');
@@ -63,6 +66,7 @@ function fresh(t, now) {
   freshDataRoot();
   toasts.length = 0;
   toastShown = null;
+  idleState = 'active';
   load = async () => ({ tasks: [], habits: [] });
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now });
 }
@@ -134,6 +138,36 @@ test('an undated task is timed only by a time on a line of its own, not one in p
   const swept = await reminders.runReminderCheck();
   assert.equal(swept.shown, false);
   assert.equal(toasts.length, 1);
+});
+
+const dayItems = async () => ({
+  tasks: [{ id: 'd1', title: 'Оплатить счёт', due: DUE_TODAY, dueKind: 'today', notes: '', dueTime: null }],
+  habits: [{ id: 'h1', title: 'Зарядка', completed: false }],
+});
+
+test('a sweep just after midnight waits for the user instead of using up the day', async (t) => {
+  fresh(t, at(0, 15));
+  load = dayItems;
+  for (const state of ['idle', 'locked', 'unknown']) {
+    idleState = state;
+    assert.equal((await reminders.runReminderCheck()).reason, 'night', state);
+  }
+  assert.equal(toasts.length, 0);
+
+  // 08:00, nobody at the PC yet: the day's reminders are all still there.
+  t.mock.timers.tick(at(8) - at(0, 15));
+  const morning = await reminders.runReminderCheck();
+  assert.equal(morning.shown, true);
+  assert.equal(morning.count, 2);
+});
+
+test('at night the sweep still toasts someone at the PC, and «Проверить» always does', async (t) => {
+  fresh(t, at(1));
+  load = dayItems;
+  assert.equal((await reminders.runReminderCheck()).shown, true);
+  idleState = 'idle';
+  assert.equal((await reminders.runReminderCheck({ force: true })).shown, true);
+  assert.equal(toasts.length, 2);
 });
 
 /**

@@ -5,7 +5,7 @@
  * for today / overdue tasks and open habits.
  */
 
-const { Notification } = require('electron');
+const { Notification, powerMonitor } = require('electron');
 const { getWidgetData, resolveTaskDueAt } = require('../lib/google-tasks');
 const { loadSettings } = require('../lib/settings-store');
 const { todayIso } = require('../lib/dates');
@@ -21,6 +21,10 @@ const REMINDER_INTERVAL_MS = 45 * 60 * 1000;
 const REMINDER_STARTUP_DELAY_MS = 8 * 1000;
 /** Only schedule one-shot timers for due times within this horizon. */
 const EXACT_REMINDER_HORIZON_MS = 24 * 60 * 60 * 1000;
+/** Before this local hour the sweep toasts only while someone is at the PC. */
+const NIGHT_END_HOUR = 7;
+/** «At the PC» = input within this many seconds and the screen not locked. */
+const NIGHT_PRESENCE_IDLE_S = 10 * 60;
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let reminderInterval = null;
@@ -126,6 +130,21 @@ function collectReminderCandidates(data) {
     });
   }
   return out;
+}
+
+/**
+ * The «already notified» set starts empty at midnight, so a sweep at 00:15 on a PC left on
+ * overnight (interval, maintenance wake, a night restart) would toast every habit and today task
+ * to an empty room and use them up for the whole day. At night the sweep waits for the user.
+ * @returns {boolean}
+ */
+function sweepWaitsForMorning() {
+  if (new Date().getHours() >= NIGHT_END_HOUR) return false;
+  try {
+    return powerMonitor.getSystemIdleState(NIGHT_PRESENCE_IDLE_S) !== 'active';
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -363,6 +382,16 @@ async function runReminderCheck(opts = {}) {
 
     const candidates = collectReminderCandidates(data);
     scheduleExactReminders(data);
+    if (!opts.force && sweepWaitsForMorning()) {
+      return {
+        ok: true,
+        shown: false,
+        count: 0,
+        reason: 'night',
+        message: 'Ночью напоминания ждут утра или пока вы не вернётесь к компьютеру.',
+        notificationsSupported,
+      };
+    }
     const state = loadReminderState();
     const notified = new Set(state.notifiedIds);
     const fresh = opts.force
