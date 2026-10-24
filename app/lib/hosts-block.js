@@ -23,7 +23,7 @@ const BEGIN_MARKER = '# BEGIN GlassTasksWidget work-hours';
 const END_MARKER = '# END GlassTasksWidget work-hours';
 
 /**
- * @typedef {'unterminated' | 'nested' | 'encoding' | 'invalid'} HostsError
+ * @typedef {'unterminated' | 'nested' | 'stray-end' | 'encoding' | 'invalid'} HostsError
  * @typedef {{ text: string, eol: string }} Line
  */
 
@@ -84,12 +84,16 @@ function findBlocks(lines) {
   const strays = [];
   let open = -1;
   for (let i = 0; i < lines.length; i += 1) {
-    const t = lines[i].text.trim();
+    // A UTF-8 BOM (read as utf8 or as latin1) in front of the first line must not hide a marker.
+    const raw = i === 0 ? lines[i].text.replace(/^(?:\uFEFF|\u00EF\u00BB\u00BF)/, '') : lines[i].text;
+    const t = raw.trim();
     if (t === BEGIN_MARKER) {
       if (open >= 0) return { ok: false, error: 'nested', line: i + 1 };
       open = i;
     } else if (t === END_MARKER) {
-      if (open < 0) strays.push(i); // our marker without a block: dropped with the blocks
+      // An END without its BEGIN means the file is not what we wrote (a hand edit, or a BEGIN we
+      // could not recognise): dropping just the END would leave its redirect lines behind forever.
+      if (open < 0) return { ok: false, error: 'stray-end', line: i + 1 };
       else {
         blocks.push({ start: open, end: i });
         open = -1;
@@ -138,7 +142,14 @@ function applyBlock(text, sites) {
   const eol = detectEol(text);
   const want = Array.isArray(sites) && sites.length ? sites : null;
   /** @type {Line[]} */
-  const blockLines = want ? buildBlock(want, eol).split(eol).map((t) => ({ text: t, eol })) : [];
+  let blockLines = [];
+  if (want) {
+    try {
+      blockLines = buildBlock(want, eol).split(eol).map((t) => ({ text: t, eol }));
+    } catch {
+      return { ok: false, text, changed: false, error: 'invalid' };
+    }
+  }
   const remove = new Set(found.strays);
   for (const b of found.blocks) for (let i = b.start; i <= b.end; i += 1) remove.add(i);
 
@@ -206,6 +217,8 @@ function describeHostsError(code) {
   switch (code) {
     case 'unterminated':
       return 'В файле hosts есть строка начала блока виджета без строки конца. Виджет не меняет такой файл: исправьте его вручную.';
+    case 'stray-end':
+      return 'В файле hosts есть строка конца блока виджета без строки начала. Виджет не меняет такой файл: исправьте его вручную.';
     case 'nested':
       return 'В файле hosts блок виджета начат дважды. Виджет не меняет такой файл: исправьте его вручную.';
     case 'encoding':

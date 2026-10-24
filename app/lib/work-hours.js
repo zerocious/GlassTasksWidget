@@ -107,7 +107,9 @@ function checkDomain(raw) {
     if (!ascii) return { reason: 'invalid' };
     s = ascii;
   }
-  if (s.startsWith('www.')) s = s.slice(4);
+  // Strip every leading «www.»: the result must be a fixed point (normalizeDomain(x) === x),
+  // because buildBlock re-checks each site and rejects anything else.
+  while (s.startsWith('www.')) s = s.slice(4);
   if (s.length > 253) return { reason: 'too-long' };
   const labels = s.split('.');
   if (labels.length < 2) return { reason: 'invalid' };
@@ -147,11 +149,12 @@ function listItems(value) {
       /* not JSON: one entry per line below */
     }
   }
-  return text.split(/[\r\n,;]+/).slice(0, MAX_INPUT_ITEMS);
+  // One entry per line: a pasted URL may contain commas or semicolons in its query.
+  return text.split(/\r?\n/).slice(0, MAX_INPUT_ITEMS);
 }
 
 /**
- * Validate a site list: an array of strings, the textarea text (one per line; commas work too)
+ * Validate a site list: an array of strings, the textarea text (one per line)
  * or a JSON array string. Valid, unique, non-protected domains are kept in order, up to
  * MAX_WORK_HOURS_SITES; everything else is reported in `dropped` (blank lines are just skipped).
  * @param {unknown} value
@@ -240,19 +243,16 @@ function nextWorkHoursBoundary(now, start, end) {
   const s = normalizeTime(start, DEFAULT_WORK_HOURS_START);
   const e = normalizeTime(end, DEFAULT_WORK_HOURS_END);
   if (s === e) return null;
-  let best = null;
-  for (const hhmm of [s, e]) {
-    const [h, m] = hhmm.split(':').map(Number);
-    // Local calendar arithmetic (not +24 h), so a DST change keeps the wall-clock time.
-    for (let dayOffset = 0; dayOffset <= 2; dayOffset += 1) {
-      const at = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset, h, m, 0, 0);
-      if (at.getTime() > now.getTime()) {
-        if (!best || at < best) best = at;
-        break;
-      }
-    }
+  // Walk real minutes and ask isWithinWorkHours itself, so the answer always agrees with it,
+  // also on DST days (a skipped 02:30 opens at 03:00; a repeated hour does not fire twice).
+  const inside = isWithinWorkHours(now, s, e);
+  const t = new Date(now.getTime());
+  t.setSeconds(0, 0);
+  for (let i = 0; i < 49 * 60; i += 1) {
+    t.setTime(t.getTime() + 60 * 1000);
+    if (isWithinWorkHours(t, s, e) !== inside) return new Date(t.getTime());
   }
-  return best;
+  return null;
 }
 
 /**

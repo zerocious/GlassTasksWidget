@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const hb = require('../lib/hosts-block');
+const wh = require('../lib/work-hours');
 
 const { BEGIN_MARKER: BEGIN, END_MARKER: END } = hb;
 
@@ -62,7 +63,7 @@ test('apply: a changed list replaces the block in place; lines after it stay whe
 
 test('clear: removes every block and stray END markers, nothing else', () => {
   const block = hb.buildBlock(['vk.com']);
-  const text = `a.example 1\r\n${block}\r\nkeep me\r\n${block}\r\n${END}\r\nlast line`;
+  const text = `a.example 1\r\n${block}\r\nkeep me\r\n${block}\r\nlast line`;
   const r = hb.stripBlocks(text);
   assert.deepEqual(r, { ok: true, text: 'a.example 1\r\nkeep me\r\nlast line', changed: true });
   assert.deepEqual(hb.applyBlock(r.text, null), { ok: true, text: r.text, changed: false });
@@ -70,6 +71,40 @@ test('clear: removes every block and stray END markers, nothing else', () => {
   // Apply, then clear: the original text comes back.
   const applied = hb.applyBlock(WINDOWS_HOSTS, ['vk.com']).text;
   assert.equal(hb.applyBlock(applied, null).text, WINDOWS_HOSTS);
+});
+
+test('an END without its BEGIN is an error: the file is left alone (its redirects are not ours to guess)', () => {
+  const text = `keep\r\n127.0.0.1 vk.com\r\n${END}\r\nlast`;
+  for (const sites of [null, ['vk.com']]) {
+    const r = hb.applyBlock(text, sites);
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'stray-end');
+    assert.equal(r.text, text);
+    assert.equal(r.changed, false);
+  }
+  assert.match(hb.describeHostsError('stray-end'), /конца блока/);
+});
+
+test('a UTF-8 BOM in front of BEGIN on the first line does not hide the block', () => {
+  const block = hb.buildBlock(['vk.com']);
+  for (const bom of ['\uFEFF', '\u00EF\u00BB\u00BF']) {
+    const text = `${bom}${block}\r\nuser line\r\n`;
+    const cleared = hb.applyBlock(text, null);
+    assert.equal(cleared.ok, true);
+    assert.equal(cleared.text, 'user line\r\n', 'the whole block goes, not just its END');
+    assert.deepEqual(hb.currentBlockSites(text), { ok: true, present: true, sites: ['vk.com'] });
+  }
+});
+
+test('applyBlock never throws on any list the validator accepted', () => {
+  const inputs = ['www.www.youtube.com', 'https://www.www.example.com/path', 'WWW.WWW.WWW.vk.com', 'пример.рф', 'www.пример.рф', 'site.ru:443', 'vk.com.'];
+  const { sites } = wh.normalizeSitesList(inputs);
+  assert.ok(sites.length > 0);
+  for (const s of sites) assert.equal(wh.normalizeDomain(s), s, `fixed point: ${s}`);
+  const r = hb.applyBlock(WINDOWS_HOSTS, sites);
+  assert.equal(r.ok, true);
+  // Something unvalidated slipped in by a caller: a result, not an exception.
+  assert.deepEqual(hb.applyBlock(WINDOWS_HOSTS, ['not a domain']), { ok: false, text: WINDOWS_HOSTS, changed: false, error: 'invalid' });
 });
 
 test('apply with several blocks: the first is replaced, the rest removed', () => {

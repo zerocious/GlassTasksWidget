@@ -78,7 +78,7 @@ test('domains: the reason a value is refused', () => {
 });
 
 test('site list: order kept, duplicates and bad entries reported, blank lines skipped', () => {
-  const r = wh.normalizeSitesList('youtube.com\r\n\r\nhttps://www.YouTube.com/\nvk.com, twitch.tv;*.x.com\ngoogle.com\n127.0.0.1\n');
+  const r = wh.normalizeSitesList('youtube.com\r\n\r\nhttps://www.YouTube.com/\nvk.com\ntwitch.tv\n*.x.com\ngoogle.com\n127.0.0.1\n');
   assert.deepEqual(r.sites, ['youtube.com', 'vk.com', 'twitch.tv']);
   assert.deepEqual(r.dropped, [
     { input: 'https://www.YouTube.com/', reason: 'duplicate' },
@@ -87,6 +87,37 @@ test('site list: order kept, duplicates and bad entries reported, blank lines sk
     { input: '127.0.0.1', reason: 'ip' },
   ]);
   assert.equal(r.droppedCount, 4);
+});
+
+test('site list: one entry per line, so a pasted URL with commas stays one entry', () => {
+  const r = wh.normalizeSitesList('https://vk.com/search?q=a,b;c\nwww.www.twitch.tv');
+  assert.deepEqual(r.sites, ['vk.com', 'twitch.tv']);
+  assert.deepEqual(r.dropped, []);
+});
+
+test('normalizeDomain is a fixed point (strips every leading www.)', () => {
+  assert.equal(wh.normalizeDomain('www.www.youtube.com'), 'youtube.com');
+  assert.equal(wh.normalizeDomain('https://WWW.www.example.com/x'), 'example.com');
+  assert.equal(wh.normalizeDomain('www.www.com'), null, 'nothing but www. left is not a site');
+});
+
+test('next boundary agrees with isWithinWorkHours across DST (Europe/Berlin, in a child process)', () => {
+  const { execFileSync } = require('child_process');
+  const script = `
+    const wh = require(${JSON.stringify(require.resolve('../lib/work-hours'))});
+    const out = [];
+    // 2026-03-29: 02:00 -> 03:00 (02:30 does not exist). 2026-10-25: 03:00 -> 02:00 (02:30 twice).
+    for (const [now, s, e] of [['2026-03-28T23:00:00Z', '02:30', '06:00'], ['2026-10-24T22:00:00Z', '02:30', '06:00'], ['2026-03-29T00:30:00Z', '01:00', '02:30']]) {
+      const n = new Date(now);
+      const b = wh.nextWorkHoursBoundary(n, s, e);
+      const before = new Date(b.getTime() - 60000);
+      out.push({ ok: wh.isWithinWorkHours(before, s, e) === wh.isWithinWorkHours(n, s, e) && wh.isWithinWorkHours(b, s, e) !== wh.isWithinWorkHours(n, s, e), at: b.toISOString() });
+    }
+    process.stdout.write(JSON.stringify(out));`;
+  const res = JSON.parse(execFileSync(process.execPath, ['-e', script], { env: { ...process.env, TZ: 'Europe/Berlin' } }).toString());
+  for (const r of res) assert.equal(r.ok, true, JSON.stringify(r));
+  // Spring forward: the window that should open at 02:30 opens at 03:00 local (01:00Z), not an hour late.
+  assert.equal(res[0].at, '2026-03-29T01:00:00.000Z');
 });
 
 test('site list: array, JSON string (an early stored form) and junk', () => {
