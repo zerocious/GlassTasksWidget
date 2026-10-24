@@ -210,6 +210,63 @@ test('writeFileAtomic flushes and renames: content complete, no temp files, mode
   assert.deepEqual(fs.readdirSync(dir), ['x.json']);
 });
 
+test('writeFileAtomic with a target held open by another program (AV, indexer)', (t) => {
+  const dir = tmpDir();
+  const file = path.join(dir, 'streaks.json');
+  fs.writeFileSync(file, 'old');
+  const held = () => Object.assign(new Error('held'), { code: 'EPERM' });
+  const realRename = fs.renameSync;
+  let failures = 2;
+  const rename = t.mock.method(fs, 'renameSync', function (...args) {
+    if (failures-- > 0) throw held();
+    return realRename.apply(this, args);
+  });
+  config.writeFileAtomic(file, 'new');
+  assert.equal(rename.mock.callCount(), 3, 'a short lock is ridden out: the rename is retried');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'new');
+  assert.deepEqual(fs.readdirSync(dir), ['streaks.json']);
+
+  // Held for good: written in place and flushed before the complete temp copy is removed.
+  rename.mock.mockImplementation(() => {
+    throw held();
+  });
+  const realOpen = fs.openSync;
+  const realFsync = fs.fsyncSync;
+  const realWrite = fs.writeSync;
+  /** @type {Map<number, string>} */
+  const fdPath = new Map();
+  /** @type {string[]} */
+  const events = [];
+  t.mock.method(fs, 'openSync', function (p, ...rest) {
+    const fd = realOpen.call(this, p, ...rest);
+    fdPath.set(fd, p);
+    return fd;
+  });
+  t.mock.method(fs, 'fsyncSync', function (fd) {
+    events.push(`fsync ${path.basename(fdPath.get(fd))}`);
+    return realFsync.call(this, fd);
+  });
+  const realUnlink = fs.unlinkSync;
+  t.mock.method(fs, 'unlinkSync', function (p) {
+    events.push(`unlink ${path.extname(p)}`);
+    return realUnlink.call(this, p);
+  });
+  config.writeFileAtomic(file, 'newer');
+  assert.equal(fs.readFileSync(file, 'utf8'), 'newer');
+  assert.deepEqual(events.slice(-2), ['fsync streaks.json', 'unlink .tmp'], 'target flushed, then the temp copy goes');
+  assert.deepEqual(fs.readdirSync(dir), ['streaks.json']);
+
+  // The in-place write is cut short: the complete temp copy stays for recovery.
+  t.mock.method(fs, 'writeSync', function (fd, ...rest) {
+    if (fdPath.get(fd) === file) throw Object.assign(new Error('device error'), { code: 'EIO' });
+    return realWrite.call(this, fd, ...rest);
+  });
+  assert.throws(() => config.writeFileAtomic(file, 'newest'), /device error/);
+  const temps = fs.readdirSync(dir).filter((n) => n.endsWith('.tmp'));
+  assert.equal(temps.length, 1);
+  assert.equal(fs.readFileSync(path.join(dir, temps[0]), 'utf8'), 'newest');
+});
+
 test('freezeWrites blocks every write until lifted (used by «delete all my data»)', () => {
   const dir = tmpDir();
   const file = path.join(dir, 'x.json');
