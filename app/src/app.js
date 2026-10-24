@@ -1668,6 +1668,64 @@ function renderAll() {
   setView(view, true);
 
   offlinePill.hidden = !state.offline;
+  renderBanner();
+  btnAuth.textContent = signedIn() ? 'Выйти' : 'Google';
+}
+
+/**
+ * Storage warnings from the main process (a file restored or reset after corruption, sign-in
+ * kept in memory only, a rejected hotkey…). Each stays in the banner until «Понятно», ahead of
+ * the usual mode banner: otherwise a lost sign-in or lost settings come with no explanation.
+ * @type {{ key: string, message: string }[]}
+ */
+const storageNotices = [];
+/** Issues already taken in: one can arrive both live and in data:storage-status. */
+const storageIssuesSeen = new Set();
+
+/**
+ * @param {{ at?: string, kind?: string, file?: string | null, level?: string, message?: string } | null} issue
+ * @returns {boolean} the banner has something new
+ */
+function addStorageNotice(issue) {
+  if (!issue || issue.level === 'info' || !issue.message) return false;
+  const id = `${issue.at}|${issue.kind}|${issue.file || ''}|${issue.message}`;
+  if (storageIssuesSeen.has(id)) return false;
+  storageIssuesSeen.add(id);
+  // A repeat of the same problem (the hotkey rejected again) replaces the older text.
+  const key = `${issue.kind}|${issue.file || ''}`;
+  const same = storageNotices.find((n) => n.key === key);
+  if (same) same.message = issue.message;
+  else storageNotices.push({ key, message: issue.message });
+  return true;
+}
+
+function dismissStorageNotice() {
+  storageNotices.shift();
+  renderBanner();
+}
+
+/** Warnings from before the window could receive data:storage-issue are only in the status. */
+async function loadStorageNotices() {
+  if (!window.widgetApi?.getStorageStatus) return;
+  try {
+    const status = await window.widgetApi.getStorageStatus();
+    let added = false;
+    for (const issue of (status && status.issues) || []) added = addStorageNotice(issue) || added;
+    if (added) renderBanner();
+  } catch {
+    /* still listed in «Скопировать диагностику» */
+  }
+}
+
+function renderBanner() {
+  if (storageNotices.length) {
+    const more = storageNotices.length - 1;
+    setBanner(`${storageNotices[0].message}${more ? ` (ещё ${more})` : ''}`, {
+      label: 'Понятно',
+      onClick: dismissStorageNotice,
+    });
+    return;
+  }
 
   let banner = '';
   let bannerAction = setupAction();
@@ -1699,8 +1757,6 @@ function renderAll() {
     }
   }
   setBanner(banner, bannerAction);
-
-  btnAuth.textContent = signedIn() ? 'Выйти' : 'Google';
 }
 
 /**
@@ -3486,6 +3542,7 @@ async function bootstrap() {
       else if (!settings.autoPalette && state.accentColor) configAccent = state.accentColor;
       syncSettingsUi();
       renderAll();
+      loadStorageNotices();
       maybeShowFirstRunOnboarding();
       return;
     }
@@ -3495,6 +3552,7 @@ async function bootstrap() {
     }
     syncSettingsUi();
     await loadData();
+    loadStorageNotices();
     maybeShowFirstRunOnboarding();
   } catch (err) {
     syncSettingsUi();
@@ -4244,6 +4302,11 @@ if (window.widgetApi?.onFocusAdd) {
 if (window.widgetApi?.onHabitsReset) {
   window.widgetApi.onHabitsReset(() => {
     loadData(true).catch(() => {});
+  });
+}
+if (window.widgetApi?.onStorageIssue) {
+  window.widgetApi.onStorageIssue((issue) => {
+    if (addStorageNotice(issue)) renderBanner();
   });
 }
 
