@@ -674,7 +674,9 @@ function syncCredentialsForm(opts = {}) {
       : 'Подключение Google';
   }
   if (btnSkipCredentials) {
-    btnSkipCredentials.hidden = credentialsFromSettings && Boolean(credentials?.configured);
+    // From Settings it reads «Отмена» and only closes the form (onSkipCredentials): with keys
+    // already saved it is the one visible way out, so it is never hidden.
+    btnSkipCredentials.hidden = false;
     btnSkipCredentials.textContent = credentialsFromSettings
       ? 'Отмена'
       : 'Продолжить в демо';
@@ -3564,6 +3566,13 @@ document.addEventListener('keydown', (e) => {
   if (notesOverlay && !notesOverlay.hidden) {
     e.preventDefault();
     closeNotesPanel({ revert: true });
+    return;
+  }
+  // «Google API ключи» opened from Settings (or «Ввести ключи»): Esc = «Отмена».
+  // The first-run wizard has no cancel: its button switches to the demo.
+  if (onboardingPanel && !onboardingPanel.hidden && credentialsFromSettings) {
+    e.preventDefault();
+    onSkipCredentials();
     return;
   }
   if (btnSettings.getAttribute('aria-expanded') === 'true') {

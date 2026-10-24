@@ -144,6 +144,45 @@ test('leaving the notes text any other way (window loses focus) still autosaves'
   assert.equal(saves[0].closeAfter, false);
 });
 
+function credentialsFormHarness(credentials) {
+  const el = () => ({ hidden: true, textContent: '', value: '', placeholder: '', open: false, focus() {} });
+  return loadRendererFunctions(['syncCredentialsForm'], {
+    credentials,
+    credentialsFromSettings: false,
+    onboardingReturnFocus: null,
+    wizardFocusArmed: false,
+    onboardingPanel: el(),
+    onboardingTitle: el(),
+    btnSkipCredentials: el(),
+    inputClientId: el(),
+    inputClientSecret: el(),
+    inputRedirectPort: el(),
+    onboardingManual: el(),
+    onboardingDrop: el(),
+    document: { activeElement: null, body: {}, documentElement: { dataset: {} }, getElementById: () => null },
+    setOnboardingError: () => {},
+    setSettingsOpen: () => {},
+    restoreFocus: () => {},
+  });
+}
+
+test('«Google API ключи» from Settings always offers «Отмена», also when keys are saved', () => {
+  for (const configured of [true, false]) {
+    const r = credentialsFormHarness({ configured, needsOnboarding: false, clientId: 'id', redirectPort: 0 });
+    r.syncCredentialsForm({ open: true, fromSettings: true });
+    assert.equal(r.onboardingPanel.hidden, false);
+    assert.equal(r.btnSkipCredentials.hidden, false, `configured=${configured}`);
+    assert.equal(r.btnSkipCredentials.textContent, 'Отмена');
+  }
+});
+
+test('the first-run wizard keeps «Продолжить в демо»', () => {
+  const r = credentialsFormHarness({ configured: false, needsOnboarding: true, clientId: null, redirectPort: 0 });
+  r.syncCredentialsForm({ open: true, fromSettings: false });
+  assert.equal(r.btnSkipCredentials.hidden, false);
+  assert.equal(r.btnSkipCredentials.textContent, 'Продолжить в демо');
+});
+
 test('a time save that lands while another item is open leaves that panel alone', async () => {
   const { r, reply, calls } = panelHarness();
   const saving = r.saveTimePanel({ closeAfter: true });
