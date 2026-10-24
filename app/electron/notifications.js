@@ -7,11 +7,13 @@
 
 const { app, shell, nativeImage, Notification } = require('electron');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execSync, execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const { markNotified } = require('../lib/reminder-store');
 const { childEnv } = require('../lib/child-env');
+const { shortcutAction } = require('../lib/shortcut-policy');
 
 const APP_USER_MODEL_ID = 'com.glasstasks.widget';
 
@@ -101,10 +103,25 @@ function ensureWindowsNotificationShortcut(opts = {}) {
     const desktopLnk = path.join(app.getPath('desktop'), 'Glass Tasks Widget.lnk');
     for (const lnk of [startMenuLnk, desktopLnk]) {
       const exists = fs.existsSync(lnk);
-      if (!exists && lnk === desktopLnk) continue;
-      // A dev run (`npm start`) must not repoint the installed widget's shortcuts.
-      if (exists && !app.isPackaged) continue;
-      const op = exists ? 'update' : 'create';
+      let currentTarget = null;
+      if (exists) {
+        try {
+          currentTarget = shell.readShortcutLink(lnk).target || null;
+        } catch {
+          /* unreadable link: treat as broken */
+        }
+      }
+      const op = shortcutAction({
+        exists,
+        isDesktop: lnk === desktopLnk,
+        isPackaged: app.isPackaged,
+        execPath: process.execPath,
+        currentTarget,
+        currentTargetExists: Boolean(currentTarget && fs.existsSync(currentTarget)),
+        tmpDir: os.tmpdir(),
+        skip: process.env.GT_SKIP_SHORTCUTS === '1',
+      });
+      if (!op) continue;
       const ok = shell.writeShortcutLink(lnk, op, details);
       if (!ok) console.warn('[reminders] shortcut write failed', lnk);
     }
