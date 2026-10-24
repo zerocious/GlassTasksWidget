@@ -12,20 +12,31 @@ const RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 /** A failed check (autostart at login before Wi-Fi/VPN is up) is retried after 1, 2, 4 … min. */
 const RETRY_BASE_MS = 60 * 1000;
 const RETRY_MAX_MS = 60 * 60 * 1000;
+/**
+ * A failed download costs the whole installer (~100 MB), and a failure after the bytes arrived
+ * (a release whose .exe fails the sha512 check, a full disk) repeats on every attempt: retry it
+ * only with the regular re-check, then 12 and 24 h apart.
+ */
+const DOWNLOAD_RETRY_MAX_MS = 24 * 60 * 60 * 1000;
 /** After sleep: check shortly (the network needs a moment) unless one succeeded recently. */
 const WAKE_CHECK_DELAY_MS = 30 * 1000;
 const WAKE_MIN_GAP_MS = 60 * 60 * 1000;
 
 /**
- * When the automatic update checks run: after launch, then periodically; a failure is retried
- * with backoff; waking from sleep brings the next check forward. One timer at a time, unref'd.
- * @param {() => Promise<unknown>} check rejects when the check (or its download) failed
+ * When the automatic update checks run: after launch, then periodically; a failed check is retried
+ * with a short backoff, a failed download with a long one; waking from sleep brings the next check
+ * forward. One timer at a time, unref'd.
+ * @param {() => Promise<{ downloadPromise?: Promise<unknown> | null } | null | undefined>} check
+ *   autoUpdater.checkForUpdates(): rejects when the check failed, its downloadPromise when the download did
  */
 function createUpdateScheduler(check) {
   /** @type {ReturnType<typeof setTimeout> | null} */
   let timer = null;
   let failures = 0;
+  let downloadFailures = 0;
   let lastSuccess = -Infinity;
+  /** After a failed download, no check (each one downloads again) before this time — not even on wake. */
+  let downloadRetryAt = -Infinity;
   let running = false;
   let stopped = false;
 
@@ -41,15 +52,26 @@ function createUpdateScheduler(check) {
     // A check still running re-arms itself when it settles.
     if (stopped || running) return;
     running = true;
+    let phase = 'check';
     try {
-      await check();
+      const result = await check();
       failures = 0;
+      phase = 'download';
+      if (result && result.downloadPromise) await result.downloadPromise;
+      downloadFailures = 0;
       lastSuccess = Date.now();
       arm(RECHECK_INTERVAL_MS);
     } catch (err) {
-      failures += 1;
-      arm(Math.min(RETRY_BASE_MS * 2 ** (failures - 1), RETRY_MAX_MS));
-      console.warn('[updater] check', err && err.message ? err.message : err);
+      if (phase === 'check') {
+        failures += 1;
+        arm(Math.min(RETRY_BASE_MS * 2 ** (failures - 1), RETRY_MAX_MS));
+      } else {
+        downloadFailures += 1;
+        const ms = Math.min(RECHECK_INTERVAL_MS * 2 ** (downloadFailures - 1), DOWNLOAD_RETRY_MAX_MS);
+        downloadRetryAt = Date.now() + ms;
+        arm(ms);
+      }
+      console.warn(`[updater] ${phase}`, err && err.message ? err.message : err);
     } finally {
       running = false;
     }
@@ -61,7 +83,8 @@ function createUpdateScheduler(check) {
     },
     /** The computer woke up (a laptop that sleeps instead of shutting down keeps this process). */
     wake() {
-      if (stopped || Date.now() - lastSuccess < WAKE_MIN_GAP_MS) return;
+      const now = Date.now();
+      if (stopped || now - lastSuccess < WAKE_MIN_GAP_MS || now < downloadRetryAt) return;
       arm(WAKE_CHECK_DELAY_MS);
     },
     /** An update is downloaded and installs on quit; a later check would only ask to restart again. */
@@ -101,11 +124,8 @@ function setupAutoUpdater(opts = {}) {
     console.warn('[updater]', err && err.message ? err.message : err);
   });
 
-  const scheduler = createUpdateScheduler(async () => {
-    const result = await autoUpdater.checkForUpdates();
-    // Wait for the download too, so a broken download is retried like a failed check.
-    if (result && result.downloadPromise) await result.downloadPromise;
-  });
+  // The scheduler also waits for the download (autoDownload), so a broken one is retried later.
+  const scheduler = createUpdateScheduler(() => autoUpdater.checkForUpdates());
 
   autoUpdater.on('update-downloaded', (info) => {
     scheduler.stop();
