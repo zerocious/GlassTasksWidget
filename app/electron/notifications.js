@@ -13,7 +13,7 @@ const { execSync, execFile } = require('child_process');
 const { pathToFileURL } = require('url');
 const { markNotified } = require('../lib/reminder-store');
 const { childEnv } = require('../lib/child-env');
-const { shortcutAction } = require('../lib/shortcut-policy');
+const { shortcutAction, samePath } = require('../lib/shortcut-policy');
 const { clearRunAsFlag } = require('../lib/lnk-flags');
 
 const APP_USER_MODEL_ID = 'com.glasstasks.widget';
@@ -76,11 +76,23 @@ function allUsersStartMenuLink() {
 }
 
 /**
+ * @param {string} lnk
+ * @returns {string | null}
+ */
+function shortcutTarget(lnk) {
+  try {
+    return shell.readShortcutLink(lnk).target || null;
+  } catch {
+    return null; // unreadable link: treat as broken
+  }
+}
+
+/**
  * Ensure Start Menu + Desktop shortcuts carry AppUserModelID matching
  * app.setAppUserModelId — required for Windows Action Center toasts.
  * Runs once per session (or when forced). The Start Menu link is required and written unless
- * the all-users Start Menu already has one; the Desktop link is only refreshed if the user
- * still has one.
+ * the all-users Start Menu already has one (then a per-user duplicate is removed); the Desktop
+ * link is only refreshed if the user still has one.
  */
 function ensureWindowsNotificationShortcut(opts = {}) {
   if (process.platform !== 'win32') return;
@@ -115,17 +127,26 @@ function ensureWindowsNotificationShortcut(opts = {}) {
     const startMenuLnk = path.join(startMenuDir, 'Glass Tasks Widget.lnk');
     const desktopLnk = path.join(app.getPath('desktop'), 'Glass Tasks Widget.lnk');
     const allUsersLnk = allUsersStartMenuLink();
+    const skip = process.env.GT_SKIP_SHORTCUTS === '1';
     for (const lnk of [startMenuLnk, desktopLnk]) {
       const exists = fs.existsSync(lnk);
-      // A per-machine install's link already carries the AUMID. A per-user copy would only show
-      // up twice in Start and outlive the uninstaller, which removes just the all-users one.
-      if (!exists && lnk === startMenuLnk && allUsersLnk && fs.existsSync(allUsersLnk)) continue;
-      let currentTarget = null;
-      if (exists) {
-        try {
-          currentTarget = shell.readShortcutLink(lnk).target || null;
-        } catch {
-          /* unreadable link: treat as broken */
+      const currentTarget = exists ? shortcutTarget(lnk) : null;
+      if (lnk === startMenuLnk && allUsersLnk && fs.existsSync(allUsersLnk)) {
+        // A per-machine install's link already carries the AUMID. A per-user copy only shows up
+        // twice in Start and outlives the uninstaller, which removes just the all-users one: add
+        // none, and when the all-users link opens this exe, write none either and remove the
+        // one earlier versions added for this same exe.
+        if (!exists) continue;
+        if (samePath(shortcutTarget(allUsersLnk), process.execPath)) {
+          if (!skip && samePath(currentTarget, process.execPath)) {
+            try {
+              fs.rmSync(lnk);
+              console.log('[reminders] removed the per-user Start Menu link next to the all-users one');
+            } catch (err) {
+              console.warn('[reminders] shortcut remove', err && err.message ? err.message : err);
+            }
+          }
+          continue;
         }
       }
       const op = shortcutAction({
@@ -136,7 +157,7 @@ function ensureWindowsNotificationShortcut(opts = {}) {
         currentTarget,
         currentTargetExists: Boolean(currentTarget && fs.existsSync(currentTarget)),
         tmpDir: os.tmpdir(),
-        skip: process.env.GT_SKIP_SHORTCUTS === '1',
+        skip,
       });
       if (!op) continue;
       const ok = shell.writeShortcutLink(lnk, op, details);
