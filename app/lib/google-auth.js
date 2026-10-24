@@ -44,8 +44,8 @@ function isInvalidGrantError(err) {
     (data && data.error) || e.error || e.code || ''
   ).toLowerCase();
   if (
-    // invalid_token is an access-token problem the client refreshes on its own —
-    // treating it as a dead grant would wipe a still-valid refresh token.
+    // invalid_token is an access-token problem the client refreshes on its own
+    // (forceRefreshOnFailure) — treating it as a dead grant would wipe a still-valid refresh token.
     errorCode === 'invalid_grant' ||
     errorCode === 'invalid_rapt'
   ) {
@@ -150,8 +150,15 @@ function getOAuthClient() {
   }
   const google = getGoogle();
   return {
-    // Desktop clients send client_secret too: Google's token endpoint still requires it.
-    oauth2: new google.auth.OAuth2(creds.clientId, creds.clientSecret),
+    oauth2: new google.auth.OAuth2({
+      // Desktop clients send client_secret too: Google's token endpoint still requires it.
+      clientId: creds.clientId,
+      clientSecret: creds.clientSecret,
+      // A 401 / 403 forces one refresh and a retry. Without it the library trusts the saved
+      // expiry_date, so a revoked grant (or a clock moved back) passes the API's 401 through as
+      // «offline» until that date; the refresh instead recovers or ends in invalid_grant → sign in.
+      forceRefreshOnFailure: true,
+    }),
     fixedPort: creds.redirectPort,
   };
 }
@@ -257,8 +264,16 @@ function attachTokenSaver(oauth2) {
   const generation = authGeneration;
   oauth2.on('tokens', (tokens) => {
     if (generation !== authGeneration) return;
-    const merged = { ...(loadSavedTokens() || {}), ...tokens };
-    saveTokens(merged);
+    // The library emits before it keeps the new token: a throw here would discard Google's
+    // fresh token and fail every request while tokens.json cannot be written (disk full,
+    // file locked, DPAPI failing). Losing only the saved copy costs one refresh after restart.
+    try {
+      const merged = { ...(loadSavedTokens() || {}), ...tokens };
+      saveTokens(merged);
+    } catch (err) {
+      // Only the code: never the error object, which may carry the tokens.
+      console.warn('[auth] could not save refreshed tokens:', (err && (err.code || err.name)) || 'error');
+    }
   });
 }
 
