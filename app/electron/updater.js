@@ -110,7 +110,10 @@ async function checkForAppUpdates() {
     const info = result && result.updateInfo;
     const remote = info && info.version;
     const current = app.getVersion();
-    if (remote && remote !== current) {
+    // Only electron-updater's verdict means a download has started. A published version that
+    // merely differs — older than ours (a draft build installed for testing, a rolled-back
+    // release) or outside a staged rollout — is not offered and nothing is downloaded.
+    if (result && result.isUpdateAvailable && remote) {
       return {
         ok: true,
         reason: 'available',
