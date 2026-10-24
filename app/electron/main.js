@@ -51,6 +51,7 @@ const {
   DEFAULT_TOGGLE_HOTKEY,
   DEFAULT_SWITCH_HOTKEY,
 } = require('../lib/settings-store');
+const { loginItem, loginItemRegistered, startupWritesLoginItem } = require('../lib/autostart-policy');
 const { sampleWallpaperPalette } = require('../lib/wallpaper-palette');
 const {
   APP_USER_MODEL_ID,
@@ -165,16 +166,37 @@ function clamp(n, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
+/** This copy's login item: own name for dev runs, the portable exe for portable builds. */
+function currentLoginItem() {
+  return loginItem({
+    aumid: APP_USER_MODEL_ID,
+    isPackaged: app.isPackaged,
+    execPath: process.execPath,
+    appRoot: path.resolve(__dirname, '..'),
+    portableExe: process.env.PORTABLE_EXECUTABLE_FILE,
+    tmpDir: os.tmpdir(),
+  });
+}
+
+/** The settings toggle (and «delete all my data»): write or remove this copy's login item. */
 function applyAutostart(enabled) {
-  const openAtLogin = Boolean(enabled);
-  if (app.isPackaged) {
-    app.setLoginItemSettings({ openAtLogin });
-  } else {
-    app.setLoginItemSettings({
-      openAtLogin,
-      path: process.execPath,
-      args: [path.resolve(__dirname, '..')],
-    });
+  const item = currentLoginItem();
+  app.setLoginItemSettings({ openAtLogin: Boolean(enabled), name: item.name, ...item.options });
+}
+
+/**
+ * At start: restore a missing entry while autostart is on, and touch nothing else
+ * (see startupWritesLoginItem in lib/autostart-policy.js).
+ */
+function syncAutostartAtStartup(enabled) {
+  const item = currentLoginItem();
+  try {
+    const registered = loginItemRegistered(item.name, app.getLoginItemSettings(item.options));
+    if (startupWritesLoginItem({ wanted: Boolean(enabled), registered, exe: item.exe, tmpDir: os.tmpdir() })) {
+      applyAutostart(true);
+    }
+  } catch (err) {
+    console.warn('[autostart]', err && err.message ? err.message : err);
   }
 }
 
@@ -1149,7 +1171,7 @@ if (!gotTheLock) {
   app.whenReady().then(() => {
     ensureWindowsNotificationShortcut();
     const settings = loadSettings();
-    applyAutostart(settings.autostart);
+    syncAutostartAtStartup(settings.autostart);
     registerIpc();
     require('./data-ipc').registerDataIpc({ getWindow: () => mainWindow, applySettingsPatch });
     createWindow();
