@@ -11,7 +11,10 @@ const assert = require('node:assert/strict');
 const { freshGoogle } = require('./helpers/fake-google');
 const gt = require('../lib/google-tasks');
 const { getHabitStats } = require('../lib/streak-store');
+const { todayIso, addDaysIso } = require('../lib/dates');
+const { nextOccurrenceDue, applyDueTimeToNotes, applyRecurrenceToNotes } = require('../lib/task-parse');
 
+const dueOn = (key) => `${key}T00:00:00.000Z`;
 const childrenOf = (fake, parent) =>
   fake.items('L-tasks').filter((i) => i.parent === parent).map((i) => i.id);
 
@@ -85,6 +88,65 @@ test("habits and tasks completed in Google's own apps (hidden) still reach the w
   const data = await gt.getWidgetData({ force: true });
   assert.deepEqual(data.habits.map((h) => h.id), ['H1']);
   assert.ok(data.tasks.some((t) => t.id === 'T2' && t.completed), 'listed in the done section');
+});
+
+test('setting a time or a repeat keeps notes edited on the phone after the last sync', async () => {
+  const { fake } = freshGoogle();
+  fake.setItems('L-tasks', [{ id: 'T1', title: 'Магазин', notes: 'купить молоко' }]);
+  await gt.getWidgetData({ force: true });
+
+  fake.item('L-tasks', 'T1').notes = 'купить молоко и хлеб';
+  const timed = await gt.updateItem('tasks', 'T1', { dueTime: '09:00' });
+  assert.equal(fake.item('L-tasks', 'T1').notes, 'время 09:00\nкупить молоко и хлеб');
+  assert.equal(timed.item.dueTime, '09:00');
+
+  fake.item('L-tasks', 'T1').notes += '\nи яйца';
+  await gt.updateItem('tasks', 'T1', { recurrence: 'daily' });
+  assert.equal(
+    fake.item('L-tasks', 'T1').notes,
+    applyRecurrenceToNotes(applyDueTimeToNotes('купить молоко и хлеб\nи яйца', '09:00'), 'daily')
+  );
+});
+
+test('completing a recurring task uses the date and the rule Google has now', async () => {
+  const { fake } = freshGoogle();
+  const today = todayIso();
+  const repeat = applyRecurrenceToNotes('', 'daily');
+  fake.setItems('L-tasks', [
+    { id: 'R1', title: 'Полить цветы', notes: repeat, due: dueOn(today) },
+    { id: 'R2', title: 'Отчёт', notes: repeat, due: dueOn(today) },
+  ]);
+  await gt.getWidgetData({ force: true });
+
+  const moved = dueOn(addDaysIso(today, 5));
+  fake.item('L-tasks', 'R1').due = moved; // moved on the phone
+  fake.item('L-tasks', 'R2').notes = ''; // repeat removed on the phone
+
+  const r1 = await gt.setTaskCompleted('tasks', 'R1', true);
+  assert.equal(r1.rescheduled, true);
+  assert.equal(fake.item('L-tasks', 'R1').due, nextOccurrenceDue(moved, 'daily'));
+
+  const r2 = await gt.setTaskCompleted('tasks', 'R2', true);
+  assert.equal(r2.rescheduled, false);
+  assert.equal(fake.item('L-tasks', 'R2').status, 'completed');
+  assert.equal(fake.item('L-tasks', 'R2').due, dueOn(today));
+});
+
+test('a time line never cuts the end off long notes', async () => {
+  const { fake } = freshGoogle();
+  const widgetMax = `${'а'.repeat(7995)}КОНЕЦ`; // 8000: the most the notes editor accepts
+  const googleMax = 'б'.repeat(8190);
+  fake.setItems('L-tasks', [
+    { id: 'T1', title: 'Длинная', notes: widgetMax },
+    { id: 'T2', title: 'С телефона', notes: googleMax },
+  ]);
+  await gt.getWidgetData({ force: true });
+
+  await gt.updateItem('tasks', 'T1', { dueTime: '10:00' });
+  assert.equal(fake.item('L-tasks', 'T1').notes, `время 10:00\n${widgetMax}`);
+
+  await assert.rejects(gt.updateItem('tasks', 'T2', { dueTime: '10:00' }), /слишком длинные/);
+  assert.equal(fake.item('L-tasks', 'T2').notes, googleMax, 'nothing was written');
 });
 
 test('a habit ticked just before midnight counts for that day when Google answers after it', async (t) => {
