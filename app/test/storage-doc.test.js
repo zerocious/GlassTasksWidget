@@ -104,6 +104,86 @@ test('corrupt file and corrupt .bak: both quarantined, defaults, reported as err
   assert.equal(issue.level, 'error');
 });
 
+test('corrupt file whose restore cannot be saved (disk full): the next start restores again', (t) => {
+  const root = freshDataRoot();
+  const doc = testDoc({ lastGood: true });
+  doc.write({ items: ['good'] });
+  writeRaw(root, doc.spec.name, '\u0000\u0000\u0000');
+  const diskFull = () => Object.assign(new Error('no space'), { code: 'ENOSPC' });
+  const realOpen = fs.openSync;
+  const realCopy = fs.copyFileSync;
+  const open = t.mock.method(fs, 'openSync', function (p, ...rest) {
+    if (String(p).startsWith(doc.file())) throw diskFull();
+    return realOpen.call(this, p, ...rest);
+  });
+  const copy = t.mock.method(fs, 'copyFileSync', function (...args) {
+    if (String(args[0]).startsWith(doc.file())) throw diskFull();
+    return realCopy.apply(this, args);
+  });
+  assert.deepEqual(doc.read(), { items: ['good'] }, 'this session works from the last good copy');
+  assert.ok(kinds().includes('write-failed'));
+  open.mock.restore();
+  copy.mock.restore();
+  assert.ok(fs.existsSync(doc.file()), 'the damaged file stays until a restore replaces it');
+  assert.deepEqual(readRaw(root, `${doc.spec.name}.bak`).items, ['good']);
+
+  // Next start, space freed: still damaged, so restored again instead of «missing → reset».
+  assert.deepEqual(doc.read(), { items: ['good'] });
+  assert.deepEqual(readRaw(root, doc.spec.name).items, ['good']);
+  doc.write({ items: ['good', 'new'] });
+  assert.deepEqual(readRaw(root, `${doc.spec.name}.bak`).items, ['good', 'new'], 'history kept by the first save');
+});
+
+test('corrupt file whose .bak is locked: not reset, the .bak is retried and never overwritten unread', (t) => {
+  const root = freshDataRoot();
+  const doc = testDoc({ lastGood: true });
+  doc.write({ items: ['good'] });
+  writeRaw(root, doc.spec.name, '\u0000\u0000\u0000');
+  const busy = () => Object.assign(new Error('busy'), { code: 'EBUSY' });
+  const realRead = fs.readFileSync;
+  const realCopy = fs.copyFileSync;
+  const lockRead = t.mock.method(fs, 'readFileSync', function (p, ...rest) {
+    if (p === doc.bakFile()) throw busy();
+    return realRead.call(this, p, ...rest);
+  });
+  const lockCopy = t.mock.method(fs, 'copyFileSync', function (...args) {
+    if (args[0] === doc.bakFile()) throw busy();
+    return realCopy.apply(this, args);
+  });
+  const view = doc.read();
+  assert.deepEqual(view, { items: [] });
+  const issue = getStorageIssues().find((i) => i.kind === 'backup-unreadable');
+  assert.equal(issue && issue.level, 'error');
+  assert.match(issue.message, /перезапустите виджет/);
+  assert.equal(kinds().includes('reset-corrupt'), false, 'the user is not told there is no good copy');
+  assert.ok(fs.existsSync(doc.file()), 'damaged file kept in place: the next start retries the .bak');
+  assert.ok(names(root).some((n) => n.startsWith(`${doc.spec.name}.corrupt-`)), 'and copied aside');
+  // A save now would make the next start skip the .bak, which still cannot be copied: refused.
+  assert.throws(() => doc.write({ ...view, items: ['today'] }), /still locked/);
+  lockRead.mock.restore();
+  lockCopy.mock.restore();
+  assert.deepEqual(readRaw(root, `${doc.spec.name}.bak`).items, ['good']);
+
+  // Lock gone: the owner saves what it has, and the last good copy is kept first.
+  doc.write({ ...view, items: ['today'] });
+  const kept = names(root).find((n) => n.startsWith(`${doc.spec.name}.unread-`));
+  assert.ok(kept, 'last good copy preserved before its first overwrite');
+  assert.deepEqual(readRaw(root, kept).items, ['good']);
+  assert.ok(getStorageIssues().some((i) => i.kind === 'unread-preserved' && i.message.includes(kept)));
+
+  // Restart without saving: the .bak is simply restored.
+  const doc2 = testDoc({ lastGood: true });
+  doc2.write({ items: ['history'] });
+  writeRaw(root, doc2.spec.name, '{"items": [');
+  const lock2 = t.mock.method(fs, 'readFileSync', function (p, ...rest) {
+    if (p === doc2.bakFile()) throw busy();
+    return realRead.call(this, p, ...rest);
+  });
+  assert.deepEqual(doc2.read(), { items: [] });
+  lock2.mock.restore();
+  assert.deepEqual(doc2.read(), { items: ['history'] }, 'next read: restored from the .bak');
+});
+
 test('a missing file means defaults, even when a .bak exists (deleting the file resets it)', () => {
   const root = freshDataRoot();
   const doc = testDoc({ lastGood: true });
