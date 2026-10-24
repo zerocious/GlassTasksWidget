@@ -250,8 +250,13 @@ function createJsonDoc(spec) {
     return m.data;
   }
 
-  /** @returns {Record<string, any>} document without `schemaVersion` */
-  function read() {
+  /**
+   * @param {{ probe?: boolean }} [opts] probe: the caller throws the result away (startup
+   *   migration). It migrates and repairs, but a locked file is left to the owner's own read:
+   *   that read decides what the owner holds, so only it reports and arms the overwrite guard.
+   * @returns {Record<string, any>} document without `schemaVersion`
+   */
+  function read(opts = {}) {
     if (pending !== undefined) return clone(pending);
     if (memory !== undefined) return clone(memory);
     const recentlyLocked = unreadableAt && Date.now() - unreadableAt < UNREADABLE_COOLDOWN_MS;
@@ -273,8 +278,9 @@ function createJsonDoc(spec) {
     }
     if (main.status === 'unreadable') {
       // Locked by another program: leave it alone, fall back to the last good copy if any.
-      unreadOnDisk = true;
       unreadableAt = Date.now();
+      if (opts.probe) return spec.defaults();
+      unreadOnDisk = true;
       // Tools that lock a file at login often lock its sibling too: retry the copy as well,
       // unless it is a repeat within the cooldown.
       const bak = spec.lastGood ? parseDocFile(bakFile(), recentlyLocked ? 0 : READ_RETRIES) : null;
@@ -308,6 +314,7 @@ function createJsonDoc(spec) {
     }
     if (bak && bak.status === 'unreadable') {
       // Locked by another program: there is a good copy, it just cannot be opened right now.
+      if (opts.probe) return spec.defaults();
       bakUnread = true;
       const copiedTo = copyAside(file(), `corrupt-${Date.now()}`);
       reportStorageIssue({
@@ -547,13 +554,15 @@ function removeStaleTempFiles() {
 
 /**
  * Read every registered document once, so old files are migrated (and backed up) at startup
- * instead of whenever a feature first touches them. Call after the stores are loaded.
+ * instead of whenever a feature first touches them. Some owners read before this (settings),
+ * others only later (streaks), so these reads are probes: a file locked at this moment is
+ * left alone, and the owner's own read decides whether what it holds needs the guard.
  */
 function migrateAllDocs() {
   removeStaleTempFiles();
   for (const doc of registry.values()) {
     try {
-      doc.read();
+      doc.read({ probe: true });
     } catch (err) {
       console.warn(`[storage] ${doc.spec.name}:`, err && err.message ? err.message : err);
     }

@@ -474,6 +474,37 @@ test('lock lifted: a doc read before every write drops the guard, a cached one k
   assert.deepEqual(readRaw(root, copy).items, ['real']);
 });
 
+test('a file locked only during the startup probe (migrateAllDocs) leaves no guard, copy or warning', (t) => {
+  const root = freshDataRoot();
+  const streaks = require('../lib/streak-store');
+  writeRaw(root, 'streaks.json', { schemaVersion: 1, ...streaks.encodeStore({ habits: { h: { dates: ['2026-10-01'] } } }) });
+  const realRead = fs.readFileSync;
+  const lock = t.mock.method(fs, 'readFileSync', function (p, ...rest) {
+    if (String(p).startsWith(path.join(root, 'streaks.json'))) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    return realRead.call(this, p, ...rest);
+  });
+  require('../lib/storage-doc').migrateAllDocs(); // at startup it runs before the streak store loads
+  lock.mock.restore();
+  assert.deepEqual(streaks.loadStore().habits.h.dates, ['2026-10-01'], 'the owner reads the real history');
+  streaks.markCompleted('h', '2026-10-02');
+  assert.equal(names(root).some((n) => n.includes('.unread-')), false, 'no spurious copy to «restore manually»');
+  assert.equal(kinds().includes('unreadable'), false, 'no «defaults are used» warning');
+  assert.deepEqual(streaks.decodeStore(readRaw(root, 'streaks.json')).habits.h.dates, ['2026-10-01', '2026-10-02']);
+
+  // Damaged file and a .bak locked only during the probe: the owner's read restores it.
+  streaks.resetStreakCache();
+  writeRaw(root, 'streaks.json', '{"habits": {');
+  const lockBak = t.mock.method(fs, 'readFileSync', function (p, ...rest) {
+    if (p === streaks.streaksDoc.bakFile()) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+    return realRead.call(this, p, ...rest);
+  });
+  require('../lib/storage-doc').migrateAllDocs();
+  lockBak.mock.restore();
+  assert.equal(kinds().includes('backup-unreadable'), false);
+  assert.deepEqual(streaks.loadStore().habits.h.dates, ['2026-10-01', '2026-10-02']);
+  assert.equal(names(root).filter((n) => n.includes('.corrupt-')).length, 1);
+});
+
 test('encrypted doc copies: an existing envelope (any key order) is not wrapped twice; encryption errors never escape read()', () => {
   const root = freshDataRoot();
   const doc = testDoc({ encrypt: true });
