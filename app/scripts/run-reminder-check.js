@@ -2,9 +2,7 @@
  * Force-run the same reminder toast path as IPC widget:check-reminders.
  * Usage: npx electron scripts/run-reminder-check.js
  */
-const { app, Notification, shell } = require('electron');
-const path = require('path');
-const fs = require('fs');
+const { app, Notification } = require('electron');
 const { execSync } = require('child_process');
 
 const APP_USER_MODEL_ID = 'com.glasstasks.widget';
@@ -30,31 +28,11 @@ app.whenReady().then(async () => {
   const { getWidgetData } = require('../lib/google-tasks');
   const { loadReminderState, markNotified } = require('../lib/reminder-store');
   const { collectReminderCandidates, formatReminderToast } = require('../electron/reminders');
+  const { ensureWindowsNotificationShortcut } = require('../electron/notifications');
 
-  // Ensure Start Menu shortcut (same as main)
-  try {
-    const startMenuDir = path.join(
-      app.getPath('appData'),
-      'Microsoft',
-      'Windows',
-      'Start Menu',
-      'Programs'
-    );
-    fs.mkdirSync(startMenuDir, { recursive: true });
-    const appRoot = path.resolve(__dirname, '..');
-    const startMenuLnk = path.join(startMenuDir, 'Glass Tasks Widget.lnk');
-    shell.writeShortcutLink(startMenuLnk, fs.existsSync(startMenuLnk) ? 'update' : 'create', {
-      target: process.execPath,
-      cwd: appRoot,
-      args: `"${appRoot}"`,
-      appUserModelId: APP_USER_MODEL_ID,
-      description: 'Glass Tasks Widget',
-      icon: process.execPath,
-      iconIndex: 0,
-    });
-  } catch (e) {
-    console.warn('shortcut', e.message);
-  }
+  // Start Menu shortcut with the AUMID, same as main: a dev run like this one only creates a
+  // missing link and never repoints the installed widget's link at node_modules\electron.
+  ensureWindowsNotificationShortcut();
 
   const settings = loadSettings();
   const toastOs = windowsToastsGloballyEnabled();
