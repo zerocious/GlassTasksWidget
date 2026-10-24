@@ -7,6 +7,7 @@ const {
 } = require('./google-auth');
 const {
   enrichHabits,
+  getHabitStats,
   markCompleted,
   unmarkCompleted,
   removeHabit,
@@ -612,7 +613,13 @@ async function resetCompletedHabitsForNewDay() {
         showCompleted: true,
         showHidden: true,
       });
-      const items = all.filter((i) => i && i.id && i.status === 'completed');
+      // Only completions from before today: a reset that runs late (no network at midnight,
+      // retried minutes later) must not un-tick habits the user has already done today.
+      const [y, m, d] = today.split('-').map(Number);
+      const dayStart = new Date(y, m - 1, d).getTime();
+      const doneToday = (i) =>
+        Date.parse(i.completed || '') >= dayStart || getHabitStats(i.id).completedToday;
+      const items = all.filter((i) => i && i.id && i.status === 'completed' && !doneToday(i));
 
       for (const item of items) {
         await tasksApi.tasks.patch({
@@ -890,6 +897,10 @@ async function setTaskCompleted(listKind, taskId, completed) {
   if (typeof taskId !== 'string' || !taskId.trim()) {
     throw new Error('Некорректный id задачи');
   }
+  // The day of the click, not of the reply: a tick at 23:59:59 whose request finishes
+  // after midnight still counts for the day the user meant (habit streaks).
+  const clickedAt = new Date();
+  const clickDay = todayIso(clickedAt);
 
   return runMutation(`set:${listKind}:${taskId}:${completed}`, `${listKind}:${taskId}`, async () => {
     const config = loadConfig();
@@ -923,7 +934,7 @@ async function setTaskCompleted(listKind, taskId, completed) {
           item: { id: taskId, ...itemPatch },
         };
       }
-      const result = setMockCompleted(listKind, taskId, completed);
+      const result = setMockCompleted(listKind, taskId, completed, { day: clickDay });
       const itemPatch = buildCompletedItemPatch(
         listKind,
         cached,
@@ -975,7 +986,7 @@ async function setTaskCompleted(listKind, taskId, completed) {
       requestBody.due = nextDue;
     } else {
       requestBody.status = completed ? 'completed' : 'needsAction';
-      requestBody.completed = completed ? new Date().toISOString() : null;
+      requestBody.completed = completed ? clickedAt.toISOString() : null;
     }
 
     await tasksApi.tasks.patch({
@@ -986,7 +997,7 @@ async function setTaskCompleted(listKind, taskId, completed) {
 
     let stats = null;
     if (listKind === 'habits') {
-      stats = completed ? markCompleted(taskId) : unmarkCompleted(taskId);
+      stats = completed ? markCompleted(taskId, clickDay) : unmarkCompleted(taskId, clickDay);
     }
 
     const effectiveCompleted = reschedule ? false : completed;

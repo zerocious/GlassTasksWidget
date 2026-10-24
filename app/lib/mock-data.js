@@ -249,6 +249,13 @@ function addMockItem(listKind, title, opts = {}) {
   return { ok: true, mode: 'mock', item };
 }
 
+/**
+ * @param {'tasks' | 'habits'} listKind
+ * @param {string} taskId
+ * @param {boolean} completed
+ * @param {{ due?: string | null, day?: string }} [opts]
+ *   due: reschedule a task; day: local YYYY-MM-DD of the click for habit streaks (default today)
+ */
 function setMockCompleted(listKind, taskId, completed, opts = {}) {
   const store = loadMockStore();
   if (listKind === 'habits') {
@@ -258,7 +265,8 @@ function setMockCompleted(listKind, taskId, completed, opts = {}) {
       habit.status = completed ? 'completed' : 'needsAction';
       saveMockStore(store);
     }
-    const stats = completed ? markCompleted(taskId) : unmarkCompleted(taskId);
+    const day = (opts && opts.day) || todayIso();
+    const stats = completed ? markCompleted(taskId, day) : unmarkCompleted(taskId, day);
     return { ok: true, mode: 'mock', stats };
   }
   const task = store.tasks.find((t) => t.id === taskId);
