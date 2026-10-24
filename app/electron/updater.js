@@ -1,9 +1,77 @@
 'use strict';
 
-const { app, dialog } = require('electron');
+const { app, dialog, powerMonitor } = require('electron');
 
 /** @type {boolean} */
 let updateCheckInFlight = false;
+
+/** First automatic check, once the widget (and usually the network) has settled after launch. */
+const STARTUP_CHECK_DELAY_MS = 12_000;
+/** A tray widget runs for weeks without a restart: look for new releases again this often. */
+const RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** A failed check (autostart at login before Wi-Fi/VPN is up) is retried after 1, 2, 4 … min. */
+const RETRY_BASE_MS = 60 * 1000;
+const RETRY_MAX_MS = 60 * 60 * 1000;
+/** After sleep: check shortly (the network needs a moment) unless one succeeded recently. */
+const WAKE_CHECK_DELAY_MS = 30 * 1000;
+const WAKE_MIN_GAP_MS = 60 * 60 * 1000;
+
+/**
+ * When the automatic update checks run: after launch, then periodically; a failure is retried
+ * with backoff; waking from sleep brings the next check forward. One timer at a time, unref'd.
+ * @param {() => Promise<unknown>} check rejects when the check (or its download) failed
+ */
+function createUpdateScheduler(check) {
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let timer = null;
+  let failures = 0;
+  let lastSuccess = -Infinity;
+  let running = false;
+  let stopped = false;
+
+  function arm(ms) {
+    if (stopped) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(run, ms);
+    if (typeof timer.unref === 'function') timer.unref();
+  }
+
+  async function run() {
+    timer = null;
+    // A check still running re-arms itself when it settles.
+    if (stopped || running) return;
+    running = true;
+    try {
+      await check();
+      failures = 0;
+      lastSuccess = Date.now();
+      arm(RECHECK_INTERVAL_MS);
+    } catch (err) {
+      failures += 1;
+      arm(Math.min(RETRY_BASE_MS * 2 ** (failures - 1), RETRY_MAX_MS));
+      console.warn('[updater] check', err && err.message ? err.message : err);
+    } finally {
+      running = false;
+    }
+  }
+
+  return {
+    start() {
+      arm(STARTUP_CHECK_DELAY_MS);
+    },
+    /** The computer woke up (a laptop that sleeps instead of shutting down keeps this process). */
+    wake() {
+      if (stopped || Date.now() - lastSuccess < WAKE_MIN_GAP_MS) return;
+      arm(WAKE_CHECK_DELAY_MS);
+    },
+    /** An update is downloaded and installs on quit; a later check would only ask to restart again. */
+    stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+  };
+}
 
 /**
  * Auto-update via GitHub Releases (packaged builds only).
@@ -33,7 +101,14 @@ function setupAutoUpdater(opts = {}) {
     console.warn('[updater]', err && err.message ? err.message : err);
   });
 
+  const scheduler = createUpdateScheduler(async () => {
+    const result = await autoUpdater.checkForUpdates();
+    // Wait for the download too, so a broken download is retried like a failed check.
+    if (result && result.downloadPromise) await result.downloadPromise;
+  });
+
   autoUpdater.on('update-downloaded', (info) => {
+    scheduler.stop();
     const ver = (info && info.version) || '';
     dialog
       .showMessageBox({
@@ -60,11 +135,8 @@ function setupAutoUpdater(opts = {}) {
       );
   });
 
-  setTimeout(() => {
-    autoUpdater.checkForUpdates().catch((err) =>
-      console.warn('[updater] check', err && err.message ? err.message : err)
-    );
-  }, 12_000);
+  powerMonitor.on('resume', () => scheduler.wake());
+  scheduler.start();
 }
 
 /**
