@@ -1079,13 +1079,10 @@ async function createItem(listKind, title, opts = {}) {
       mapped = withHabits([mapped])[0];
     }
 
-    if (listKind === 'tasks' && parentId) {
-      invalidatePayloadCache();
-      invalidateListCache();
-    } else {
-      patchOfflineCache(listKind, mapped.id, null, mapped);
-      patchPayloadCache(listKind, mapped.id, null, mapped);
-    }
+    // Subtasks too (patchPayloadCache re-nests them): a drag right after creating one must
+    // find its parent in the caches, or tasks.move would lift it to the top level.
+    patchOfflineCache(listKind, mapped.id, null, mapped);
+    patchPayloadCache(listKind, mapped.id, null, mapped);
 
     return { ok: true, mode: 'google', item: mapped };
   });
@@ -1325,10 +1322,10 @@ async function deleteItem(listKind, taskId) {
  * @param {string} taskId
  * @param {string[]} orderedIds
  * @param {string | null} [hintPreviousId]
+ * @param {{ parent?: string | null } | null} [moved] the moved item (its parent decides siblings)
  * @returns {string | null}
  */
-function resolveMovePreviousSibling(listKind, taskId, orderedIds, hintPreviousId) {
-  const moved = lookupCachedItem(listKind, taskId);
+function resolveMovePreviousSibling(listKind, taskId, orderedIds, hintPreviousId, moved = null) {
   const parent = (moved && moved.parent) || null;
   const ids = Array.isArray(orderedIds) ? orderedIds : [];
   const idx = ids.indexOf(taskId);
@@ -1399,8 +1396,15 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
 
     const { tasksApi, listId } = await openList(config, listKind);
 
-    const cached = lookupCachedItem(listKind, taskId);
-    const prev = resolveMovePreviousSibling(listKind, taskId, ids, prevHint);
+    let cached = lookupCachedItem(listKind, taskId);
+    if (!cached) {
+      // Not in the caches (created elsewhere since the last load): ask Google for its parent,
+      // since a move without `parent` would lift a subtask to the top level.
+      const existing = await tasksApi.tasks.get({ tasklist: listId, task: taskId });
+      const data = (existing && existing.data) || {};
+      cached = { id: taskId, parent: data.parent || null };
+    }
+    const prev = resolveMovePreviousSibling(listKind, taskId, ids, prevHint, cached);
 
     const moveParams = {
       tasklist: listId,
