@@ -7,8 +7,9 @@
  *   node scripts/smoke-packaged.js --exe "C:\path\Glass Tasks Widget.exe"   test an existing build
  *
  * Safe by construction: output goes to a temp folder (never app/dist), the app runs with
- * --user-data-dir on an empty temp profile (never %APPDATA%\glass-tasks-widget), and no
- * shortcut / process-killing script is involved.
+ * --user-data-dir on an empty temp profile (never %APPDATA%\glass-tasks-widget), it runs with
+ * GT_SKIP_SHORTCUTS=1 and checks the user's Start Menu / Desktop links are unchanged, and no
+ * process-killing script is involved.
  *
  * Checks what only a packaged build can break: every module is inside app.asar, the first
  * launch works without any data files, Electron fuses are set, the log is written.
@@ -26,6 +27,24 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function arg(name) {
   const i = process.argv.indexOf(name);
   return i >= 0 ? process.argv[i + 1] : null;
+}
+
+/** sha256 of the widget's Start Menu and Desktop links (missing = null), keyed by path. */
+function snapshotShortcuts() {
+  const name = 'Glass Tasks Widget.lnk';
+  const files = [
+    path.join(process.env.APPDATA || '', 'Microsoft', 'Windows', 'Start Menu', 'Programs', name),
+    path.join(os.homedir(), 'Desktop', name),
+  ];
+  const out = {};
+  for (const f of files) {
+    try {
+      out[f] = require('crypto').createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+    } catch {
+      out[f] = null;
+    }
+  }
+  return out;
 }
 
 function freePort() {
@@ -121,7 +140,14 @@ async function main() {
 
   const port = await freePort();
   console.log(`• launching on a clean profile (debug port ${port}) …`);
-  const child = spawn(exe, [`--user-data-dir=${userData}`, `--remote-debugging-port=${port}`], { stdio: 'ignore', detached: false });
+  // The widget keeps its Start Menu link pointed at itself; a throw-away build must leave the
+  // user's real shortcuts alone (it used to repoint them at this temp folder).
+  const shortcutsBefore = snapshotShortcuts();
+  const child = spawn(exe, [`--user-data-dir=${userData}`, `--remote-debugging-port=${port}`], {
+    stdio: 'ignore',
+    detached: false,
+    env: { ...process.env, GT_SKIP_SHORTCUTS: '1' },
+  });
   let exited = null;
   child.on('exit', (code) => {
     exited = code;
@@ -185,6 +211,9 @@ async function main() {
   const errors = log.split('\n').filter((l) => /\sERROR\s/.test(l) && !/app-update\.yml|\[updater\]|Checking for update/.test(l));
   check('no unexpected errors in the log', errors.length === 0, errors[0] ? errors[0].slice(0, 140) : '');
   check('app was still running until we stopped it', exited === null);
+  const shortcutsAfter = snapshotShortcuts();
+  const touched = Object.keys({ ...shortcutsBefore, ...shortcutsAfter }).filter((k) => shortcutsBefore[k] !== shortcutsAfter[k]);
+  check('user shortcuts left untouched', touched.length === 0, touched.map((k) => path.basename(path.dirname(k))).join(', '));
 
   try {
     fs.rmSync(tmp, { recursive: true, force: true });
