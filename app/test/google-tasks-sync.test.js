@@ -73,6 +73,20 @@ test('a late habits reset leaves habits already ticked today alone', async () =>
   assert.equal(fake.item('L-habits', 'H2').status, 'completed', "today's tick stays in Google");
 });
 
+test("habits and tasks completed in Google's own apps (hidden) still reach the widget", async () => {
+  const { fake } = freshGoogle();
+  const now = new Date().toISOString();
+  fake.setItems('L-habits', [{ id: 'H1', title: 'Чтение', status: 'completed', completed: now, hidden: true }]);
+  fake.setItems('L-tasks', [
+    { id: 'T1', title: 'Открытая' },
+    { id: 'T2', title: 'Сделана на телефоне', status: 'completed', completed: now, hidden: true },
+  ]);
+
+  const data = await gt.getWidgetData({ force: true });
+  assert.deepEqual(data.habits.map((h) => h.id), ['H1']);
+  assert.ok(data.tasks.some((t) => t.id === 'T2' && t.completed), 'listed in the done section');
+});
+
 test('a habit ticked just before midnight counts for that day when Google answers after it', async (t) => {
   const { fake } = freshGoogle();
   fake.setItems('L-habits', [{ id: 'H1', title: 'Медитация' }]);
