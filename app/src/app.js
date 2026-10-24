@@ -1700,15 +1700,27 @@ let lastLoadAt = 0;
 const BG_SYNC_MS = 3 * 60 * 1000;
 const BG_STALE_MS = 60 * 1000;
 
-/** What the user can see; a background refresh with the same signature skips re-rendering. */
+/**
+ * What the user can see; a background refresh with the same signature skips re-rendering.
+ * The server works out «Сегодня» / «Просрочено», the meta line and the week strip for the
+ * current day, so they count too: after midnight they are all that changes.
+ */
 function dataSignature(data) {
   if (!data) return '';
   return JSON.stringify([
     data.mode,
     Boolean(data.offline),
     data.warning || '',
-    (data.tasks || []).map((t) => t && [t.id, t.title, t.notes, t.due, t.completed, t.parent, t.position]),
-    (data.habits || []).map((h) => h && [h.id, h.title, h.notes, h.completed, h.streak, h.position]),
+    data.message || '',
+    data.tasksListFound,
+    data.habitsListFound,
+    (data.tasks || []).map(
+      (t) =>
+        t && [t.id, t.title, t.notes, t.due, t.completed, t.parent, t.position, t.dueKind, t.meta, t.dueTime, t.recurrence]
+    ),
+    (data.habits || []).map(
+      (h) => h && [h.id, h.title, h.notes, h.completed, h.streak, h.position, h.meta, h.dueTime, h.week]
+    ),
   ]);
 }
 
