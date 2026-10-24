@@ -76,7 +76,7 @@
         }
       ],
       "artifactName": "Glass-Tasks-Widget-Setup-${version}.${ext}",
-      "signAndEditExecutable": false
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": false,

@@ -29,7 +29,7 @@ npm run pack    # app\dist\win-unpacked\ + ярлык
 
 После `dist` / `pack` скрипт `scripts/update-desktop-shortcut.ps1` обновляет ярлык на Desktop (и Start Menu). Только ярлык: `npm run shortcut`.
 
-Если ошибка `winCodeSign` / symbolic link — включите **Режим разработчика** Windows и повторите. В конфиге `signAndEditExecutable: false`. Если `app.asar` занят — закройте виджет, удалите `app\dist`, снова `npm run dist`.
+Если ошибка `winCodeSign` / symbolic link — включите **Режим разработчика** Windows и повторите. В конфиге `signExecutable: false`: exe не подписывается, но иконка и сведения о версии в него записываются. Если `app.asar` занят — закройте виджет, удалите `app\dist`, снова `npm run dist`.
 
 | Команда | Результат |
 |---------|-----------|
@@ -109,7 +109,7 @@ Dev-запуск не перезаписывает существующие яр
 - Только **упакованная** сборка (`app.isPackaged`); `npm start` проверки пропускает.
 - Провайдер: GitHub Releases публичного `zerocious/GlassTasksWidget-releases` (исходный репозиторий приватный, его релизы виджету не видны; см. `RELEASING.md`). NSIS `dist` пишет `latest.yml` + blockmap.
 - Публикация: создайте GitHub Release с артефактами из `npm run dist` (Setup.exe, `.blockmap`, `latest.yml`). Без опубликованного релиза проверка ничего не найдёт.
-- Сборка **без подписи** (`signAndEditExecutable: false`): SmartScreen может ругаться; updater отключает проверку publisher signature, иначе обновления не встанут. Для продакшена лучше code signing.
+- Сборка **без подписи** (`signExecutable: false`): SmartScreen может ругаться; updater отключает проверку publisher signature, иначе обновления не встанут. Для продакшена лучше code signing.
 
 ### Горячие клавиши
 
