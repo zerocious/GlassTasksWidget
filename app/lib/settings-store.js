@@ -2,9 +2,11 @@
 
 const { createJsonDoc } = require('./storage-doc');
 const { reportStorageIssue } = require('./storage-events');
+const { DEFAULT_WORK_HOURS_SITES, normalizeSitesList, normalizeTime } = require('./work-hours');
 
 /**
  * @typedef {'dark' | 'light'} Theme
+ * @typedef {'geist' | 'system' | 'mono' | 'serif'} FontFamily
  * @typedef {'normal' | 'compact'} WidgetSize
  * @typedef {{ x: number, y: number }} WindowPos
  * @typedef {{
@@ -24,8 +26,22 @@ const { reportStorageIssue } = require('./storage-events');
  *   toggleHotkey: string,
  *   switchViewHotkey: string,
  *   onboardingSkipped: boolean,
+ *   fontFamily: FontFamily,
+ *   workHoursEnabled: boolean,
+ *   workHoursStart: string,
+ *   workHoursEnd: string,
+ *   workHoursSites: string[],
+ *   workHoursMode: 'instant' | 'warn',
  * }} AppSettings
  */
+
+/*
+ * fontFamily and workHours* come from the feature/work-hours-blocker builds, which save them
+ * in the same settings.json. They are kept (same names, defaults and validation) so moving from
+ * such a build to this one does not erase them on the first save; this build has no UI for them yet.
+ */
+const FONT_FAMILIES = ['geist', 'system', 'mono', 'serif'];
+const DEFAULT_FONT_FAMILY = 'geist';
 
 /** Glass fill alpha — matches default dark --glass-fill (0.72). */
 const DEFAULT_BG_OPACITY = 0.72;
@@ -52,6 +68,12 @@ const DEFAULTS = /** @type {AppSettings} */ ({
   toggleHotkey: DEFAULT_TOGGLE_HOTKEY,
   switchViewHotkey: DEFAULT_SWITCH_HOTKEY,
   onboardingSkipped: false,
+  fontFamily: DEFAULT_FONT_FAMILY,
+  workHoursEnabled: false,
+  workHoursStart: '09:00',
+  workHoursEnd: '18:00',
+  workHoursSites: DEFAULT_WORK_HOURS_SITES.slice(),
+  workHoursMode: 'warn',
 });
 
 /**
@@ -235,7 +257,27 @@ function normalizeSettings(raw) {
     toggleHotkey: normalizeHotkey(raw.toggleHotkey, DEFAULT_TOGGLE_HOTKEY),
     switchViewHotkey: normalizeHotkey(raw.switchViewHotkey, DEFAULT_SWITCH_HOTKEY),
     onboardingSkipped: Boolean(raw.onboardingSkipped),
+    fontFamily: FONT_FAMILIES.includes(raw.fontFamily) ? raw.fontFamily : DEFAULT_FONT_FAMILY,
+    workHoursEnabled: Boolean(raw.workHoursEnabled),
+    workHoursStart: normalizeTime(raw.workHoursStart, '09:00'),
+    workHoursEnd: normalizeTime(raw.workHoursEnd, '18:00'),
+    // An explicit empty list stays empty; only a missing key gets the defaults.
+    workHoursSites: normalizeSitesList(
+      raw.workHoursSites !== undefined ? raw.workHoursSites : DEFAULTS.workHoursSites
+    ).sites,
+    workHoursMode: raw.workHoursMode === 'instant' ? 'instant' : 'warn',
   };
+}
+
+/** Settings values compare by value (pos and the site list are not primitives). */
+function sameSetting(key, a, b) {
+  if (key === 'pos') {
+    return (a === null && b === null) || Boolean(a && b && a.x === b.x && a.y === b.y);
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
+  }
+  return a === b;
 }
 
 /**
@@ -271,12 +313,7 @@ function saveSettings(patch) {
 
   // Skip disk write when nothing meaningful changed (e.g. same pos after snap).
   // DEFAULTS lists every setting, so a new key can't be forgotten here.
-  const unchanged = Object.keys(DEFAULTS).every((key) =>
-    key === 'pos'
-      ? (next.pos === null && current.pos === null) ||
-        Boolean(next.pos && current.pos && next.pos.x === current.pos.x && next.pos.y === current.pos.y)
-      : next[key] === current[key]
-  );
+  const unchanged = Object.keys(DEFAULTS).every((key) => sameSetting(key, next[key], current[key]));
   if (unchanged) return current;
 
   settingsDoc.write(next);
