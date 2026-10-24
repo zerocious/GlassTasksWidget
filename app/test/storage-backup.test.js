@@ -132,6 +132,33 @@ test('weekly backups: one per 7 days, newest N kept, nothing for an empty profil
   assert.equal(JSON.parse(text).format, 'glass-tasks-backup');
 });
 
+test('a backup made while the clock was ahead neither forces a backup at every check nor evicts real weekly ones', () => {
+  freshDataRoot();
+  streaks.markCompleted('h', '2026-01-01');
+  const hour = 60 * 60 * 1000;
+  const day = 24 * hour;
+  const start = new Date(2026, 0, 1, 12).getTime();
+  for (let week = 0; week < backup.BACKUP_KEEP.weekly; week += 1) {
+    assert.ok(backup.runScheduledBackup(new Date(start + week * 7 * day)), `week ${week}`);
+  }
+  const ahead = new Date(2030, 0, 1, 12).getTime();
+  assert.ok(backup.runScheduledBackup(new Date(ahead)), 'one session with the clock in 2030');
+  assert.equal(backup.runScheduledBackup(new Date(ahead + 6 * hour)), null, 'that session keeps the weekly pace');
+
+  // The clock is right again, a day after the last real weekly backup: checks every 6 h for 3 days.
+  const lastReal = start + 7 * 7 * day;
+  for (let t = lastReal + day; t <= lastReal + 4 * day; t += 6 * hour) {
+    assert.equal(backup.runScheduledBackup(new Date(t)), null, `no backup at ${new Date(t).toISOString()}`);
+  }
+  assert.ok(backup.runScheduledBackup(new Date(lastReal + 7 * day)), 'a week later, the next one');
+
+  const weekly = backup.listBackups().filter((b) => b.reason === 'weekly');
+  const real = weekly.filter((b) => b.createdAtMs < ahead).map((b) => (b.createdAtMs - start) / (7 * day));
+  // Week 0 went when the 2030 session made its backup; the rest of the history is still there.
+  assert.deepEqual(real, [8, 7, 6, 5, 4, 3, 2, 1]);
+  assert.equal(weekly.length, backup.BACKUP_KEEP.weekly + 1, 'the 2030 file is kept apart, not instead of a real one');
+});
+
 test('backups never contain secrets or task content', () => {
   const root = populatedProfile();
   require('../lib/offline-cache').saveOfflineCache({ mode: 'google', tasks: [{ id: 't', title: 'Личная задача' }], habits: [] });

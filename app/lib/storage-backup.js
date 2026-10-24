@@ -530,11 +530,18 @@ function listBackups() {
   return out.sort((a, b) => b.createdAtMs - a.createdAtMs || (a.name < b.name ? 1 : -1));
 }
 
-function pruneBackups() {
+/**
+ * Keep the newest BACKUP_KEEP per reason. Backups stamped after `now` (written while the PC
+ * clock was ahead) are counted on their own: one 2030 file would otherwise stay «the newest»
+ * for years and push the real weekly history out.
+ * @param {Date} [now]
+ */
+function pruneBackups(now = new Date()) {
   const seen = /** @type {Record<string, number>} */ ({});
   for (const b of listBackups()) {
-    seen[b.reason] = (seen[b.reason] || 0) + 1;
-    if (seen[b.reason] > (BACKUP_KEEP[b.reason] || 3)) {
+    const key = b.createdAtMs > now.getTime() ? `${b.reason}:future` : b.reason;
+    seen[key] = (seen[key] || 0) + 1;
+    if (seen[key] > (BACKUP_KEEP[b.reason] || 3)) {
       try {
         fs.unlinkSync(b.path);
       } catch {
@@ -563,19 +570,19 @@ function createBackup(opts = {}) {
   const file = path.join(backupsDir(), name);
   const text = finalizeJson(snapshot, snapshotSecrets);
   writeFileAtomic(file, text);
-  pruneBackups();
+  pruneBackups(now);
   return { name, path: file, bytes: Buffer.byteLength(text) };
 }
 
 /**
- * Weekly backup: runs when the newest weekly one is older than 7 days.
+ * Weekly backup: runs when the newest weekly one is older than 7 days. One stamped in the
+ * future (the clock was ahead once) does not count: it would never get 7 days old and make
+ * every check (each start, then every 6 h) back up again.
  * @param {Date} [now]
  */
 function runScheduledBackup(now = new Date()) {
-  const latest = listBackups().find((b) => b.reason === 'weekly');
-  if (latest && now.getTime() - latest.createdAtMs < BACKUP_INTERVAL_MS && latest.createdAtMs <= now.getTime()) {
-    return null;
-  }
+  const latest = listBackups().find((b) => b.reason === 'weekly' && b.createdAtMs <= now.getTime());
+  if (latest && now.getTime() - latest.createdAtMs < BACKUP_INTERVAL_MS) return null;
   return createBackup({ reason: 'weekly', now });
 }
 
