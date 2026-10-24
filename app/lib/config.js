@@ -353,9 +353,27 @@ function freezeWrites(on = true) {
   writesFrozen = Boolean(on);
 }
 
+const RENAME_RETRIES = 3;
+const RENAME_RETRY_MS = 40;
+/** Rename errors caused by another program holding the target open. */
+const TARGET_LOCK_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function unlinkQuiet(p) {
+  try {
+    fs.unlinkSync(p);
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * Crash-safe write: temp file in the same directory, flushed to disk, then renamed over
  * the target. Without the flush a power cut after the rename can leave a zero-filled file.
+ * A target that stays held by another program is written in place, flushed the same way.
  * @param {string} filePath
  * @param {string} body
  * @param {{ mode?: number }} [opts]
@@ -370,31 +388,42 @@ function writeFileAtomic(filePath, body, opts = {}) {
     fs.fsyncSync(fd);
   } catch (err) {
     fs.closeSync(fd);
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      /* ignore */
-    }
+    unlinkQuiet(tmp);
     throw err;
   }
   fs.closeSync(fd);
-  try {
-    fs.renameSync(tmp, filePath);
-  } catch (err) {
-    // Windows: AV / indexer can briefly lock the target. Fall back to a direct write.
+  // Windows: AV / indexer can briefly hold the target open without delete sharing, which
+  // blocks the rename but not a write. Ride out short locks first (≤ 240 ms, like reads).
+  let renameError;
+  for (let attempt = 0; ; attempt += 1) {
     try {
-      fs.writeFileSync(filePath, body, { encoding: 'utf8', mode: opts.mode });
-    } finally {
-      try {
-        fs.unlinkSync(tmp);
-      } catch {
-        /* ignore */
-      }
-    }
-    if (err && err.code !== 'EPERM' && err.code !== 'EACCES' && err.code !== 'EBUSY') {
-      console.warn('[config] atomic rename failed:', err.message || err);
+      fs.renameSync(tmp, filePath);
+      return;
+    } catch (err) {
+      renameError = err;
+      if (!err || !TARGET_LOCK_CODES.has(err.code) || attempt >= RENAME_RETRIES) break;
+      sleepSync(RENAME_RETRY_MS * (attempt + 1));
     }
   }
+  if (!renameError || !TARGET_LOCK_CODES.has(renameError.code)) {
+    console.warn('[config] atomic rename failed:', renameError && renameError.message ? renameError.message : renameError);
+  }
+  // Still held: write the target in place, flushed like the temp file. The temp file is the
+  // only complete copy while that write runs, so it goes only once the target is on disk.
+  let target;
+  try {
+    target = fs.openSync(filePath, 'w', opts.mode);
+  } catch (err) {
+    unlinkQuiet(tmp); // the target was not touched
+    throw err;
+  }
+  try {
+    fs.writeSync(target, body, null, 'utf8');
+    fs.fsyncSync(target);
+  } finally {
+    fs.closeSync(target);
+  }
+  unlinkQuiet(tmp);
 }
 
 function writeJson(filePath, data) {
