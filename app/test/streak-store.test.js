@@ -119,6 +119,38 @@ test('mark / unmark / remove still persist through the new format', () => {
   assert.equal(readRaw(root, 'streaks.json').habits.gone, undefined);
 });
 
+test('a change whose save failed is saved by the retry, not reported done from memory only', (t) => {
+  const root = freshDataRoot();
+  streaks.markCompleted('h', '2026-10-01');
+  streaks.markCompleted('gone', '2026-10-01');
+  const realOpen = fs.openSync;
+  let failures = 0;
+  t.mock.method(fs, 'openSync', function (p, ...rest) {
+    if (failures > 0 && String(p).startsWith(path.join(root, 'streaks.json'))) {
+      failures -= 1;
+      throw Object.assign(new Error('no space'), { code: 'ENOSPC' });
+    }
+    return realOpen.call(this, p, ...rest);
+  });
+  const onDisk = () => streaks.decodeStore(readRaw(root, 'streaks.json')).habits;
+
+  failures = 1;
+  assert.throws(() => streaks.markCompleted('h', '2026-10-02'), /no space/);
+  assert.deepEqual(streaks.loadStore().habits.h.dates, ['2026-10-01'], 'the cache still matches the file');
+  assert.deepEqual(streaks.markCompleted('h', '2026-10-02').completedDates, ['2026-10-01', '2026-10-02']);
+  assert.deepEqual(onDisk().h.dates, ['2026-10-01', '2026-10-02'], 'the retry saved the day');
+
+  failures = 1;
+  assert.throws(() => streaks.mergeHistory({ habits: { h: { dates: ['2026-09-30'] } } }), /no space/);
+  assert.deepEqual(streaks.mergeHistory({ habits: { h: { dates: ['2026-09-30'] } } }), { habits: 1, daysAdded: 1 });
+  assert.ok(onDisk().h.dates.includes('2026-09-30'));
+
+  failures = 1;
+  assert.throws(() => streaks.removeHabit('gone'), /no space/);
+  streaks.removeHabit('gone');
+  assert.equal(onDisk().gone, undefined, 'the retry removed it from the file');
+});
+
 test('habit ids that name Object.prototype members are stored as plain entries', () => {
   const root = freshDataRoot();
   for (const id of ['toString', 'hasOwnProperty', 'valueOf', '__defineGetter__']) {
