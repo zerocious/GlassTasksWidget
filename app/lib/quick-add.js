@@ -129,8 +129,11 @@ function parseQuickAdd(input, now = new Date()) {
   const title = text.replace(/\s{2,}/g, ' ').replace(/\s+([,.;:!?])/g, '$1').trim().replace(/[,;:\s-]+$/, '');
   if (!title) return { title: original, dueKey: null, time: null, recurrence: null };
 
-  // A time or repeat rule without a day means «starting today».
-  if (!dueKey && (time || recurrence)) dueKey = today;
+  // A time or repeat rule without a day means «starting today» (Monday for «по будням» at a weekend).
+  if (!dueKey && (time || recurrence)) {
+    const weekend = weekdayOf(today) === 0 || weekdayOf(today) === 6;
+    dueKey = recurrence === 'weekdays' && weekend ? nextWeekday(today, 1) : today;
+  }
   return { title, dueKey, time, recurrence };
 }
 
