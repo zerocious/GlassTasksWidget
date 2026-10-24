@@ -93,6 +93,28 @@ test('weekday words and abbreviations inside ordinary text are not dates', () =>
   });
 });
 
+test('DD.MM.YY dates take the year', () => {
+  assert.deepEqual(ps('Отчёт 01.11.27'), { title: 'Отчёт', dueKey: '2027-11-01', time: null, recurrence: null });
+  assert.equal(ps('Сдать отчёт 15.11.26').title, 'Сдать отчёт');
+  assert.equal(ps('Сдать 15.10.26').dueKey, '2026-10-15');
+  assert.equal(ps('Отчёт 1.5.2027').dueKey, '2027-05-01');
+  assert.deepEqual(ps('Сборка 01.11.202'), plain('Сборка 01.11.202'));
+});
+
+test('decimal numbers are not dates', () => {
+  assert.deepEqual(ps('Купить молоко 2.5%'), plain('Купить молоко 2.5%'));
+  assert.deepEqual(ps('Купить молоко 1.5 л'), plain('Купить молоко 1.5 л'));
+  assert.deepEqual(ps('Обновить до 2.5'), plain('Обновить до 2.5'));
+  assert.deepEqual(ps('Купить 1.10 кг яблок'), plain('Купить 1.10 кг яблок'));
+  assert.deepEqual(ps('Скидка 12.10%'), plain('Скидка 12.10%'));
+});
+
+test('«в» / «на» before a dotted date leave the title too', () => {
+  assert.deepEqual(ps('Встреча в 12.10'), { title: 'Встреча', dueKey: '2027-10-12', time: null, recurrence: null });
+  assert.equal(ps('Встреча на 30.10').title, 'Встреча');
+  assert.equal(ps('В 30.10 сдать отчёт').dueKey, '2026-10-30');
+});
+
 test('«по будням» entered at a weekend starts on Monday', () => {
   assert.deepEqual(ps('Стендап по будням 9:30'), {
     title: 'Стендап', dueKey: '2026-10-26', time: '09:30', recurrence: 'weekdays',

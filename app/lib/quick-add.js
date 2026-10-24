@@ -32,6 +32,9 @@ const REPEATS = [
   { rule: 'weekly', re: 'каждую неделю|еженедельно' },
 ];
 
+/** «2.5%», «1.10 кг»: a number with a unit, not a date. */
+const UNIT = `\\s*(?:%|(?:л|мл|кг|км|м|см|мм|шт|руб)${E}|₽)`;
+
 function rx(body) {
   return new RegExp(`${B}(?:${body})${E}`, 'iu');
 }
@@ -136,11 +139,13 @@ function parseQuickAdd(input, now = new Date()) {
   }
 
   if (!dueKey) {
-    // «12.10», «12.10.2026», «до 12.10»; a past day without a year means next year.
-    take(rx('(?:до\\s+|к\\s+)?(\\d{1,2})\\.(\\d{1,2})(?:\\.(\\d{4}))?'), (m) => {
+    // «12.10», «12.10.2026», «12.10.26», «в / до / к / на 12.10»; a past day without a year
+    // means next year. A one-digit month needs a year: «2.5%», «1.5 л», «до 2.5» are numbers.
+    const date = '(\\d{1,2})\\.(?:(\\d{1,2})\\.(\\d{4}|\\d{2})|(\\d{2}))(?!\\.\\d)';
+    take(rx(`(?:(?:до|к|в|на)\\s+)?${date}(?!${UNIT})`), (m) => {
       const d = Number(m[1]);
-      const mo = Number(m[2]);
-      const y0 = m[3] ? Number(m[3]) : now.getFullYear();
+      const mo = Number(m[2] || m[4]);
+      const y0 = m[3] ? Number(m[3]) + (m[3].length === 2 ? 2000 : 0) : now.getFullYear();
       let key = validDateKey(y0, mo, d);
       if (key && !m[3] && key < today) key = validDateKey(y0 + 1, mo, d);
       if (!key) return false;
