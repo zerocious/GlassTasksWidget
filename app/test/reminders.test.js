@@ -68,7 +68,7 @@ function fresh(t, now) {
   toastShown = null;
   idleState = 'active';
   load = async () => ({ tasks: [], habits: [] });
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now });
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now });
 }
 
 test('a morning sweep toast does not swallow the timed reminder set later that day', async (t) => {
@@ -153,29 +153,47 @@ const dayItems = async () => ({
   habits: [{ id: 'h1', title: 'Зарядка', completed: false }],
 });
 
-test('a sweep just after midnight waits for the user instead of using up the day', async (t) => {
+test('on a PC left on overnight the day’s reminders wait until the user sits down', async (t) => {
   fresh(t, at(0, 15));
   load = dayItems;
-  for (const state of ['idle', 'locked', 'unknown']) {
+  idleState = 'locked';
+  assert.equal((await reminders.runReminderCheck()).reason, 'away');
+
+  // 07:15: the 45-min tick after 07:00 finds the screen still locked, or nobody touching it.
+  t.mock.timers.tick(at(7, 15) - at(0, 15));
+  await flush();
+  for (const state of ['locked', 'idle']) {
     idleState = state;
-    assert.equal((await reminders.runReminderCheck()).reason, 'night', state);
+    assert.equal((await reminders.runReminderCheck()).reason, 'away', state);
   }
+  t.mock.timers.tick(at(8) - at(7, 15));
+  await flush();
   assert.equal(toasts.length, 0);
 
-  // 08:00, nobody at the PC yet: the day's reminders are all still there.
-  t.mock.timers.tick(at(8) - at(0, 15));
-  const morning = await reminders.runReminderCheck();
-  assert.equal(morning.shown, true);
-  assert.equal(morning.count, 2);
+  // 08:00 the user sits down: within a minute the waiting sweep toasts the whole day.
+  idleState = 'active';
+  t.mock.timers.tick(60 * 1000);
+  await flush();
+  assert.deepEqual(toasts.map((x) => x.body), ['на сегодня: 1 · привычки: 1. Оплатить счёт, Зарядка']);
 });
 
-test('at night the sweep still toasts someone at the PC, and «Проверить» always does', async (t) => {
+test('a sweep toasts whoever is at the PC, even at night, and «Проверить» always does', async (t) => {
   fresh(t, at(1));
   load = dayItems;
   assert.equal((await reminders.runReminderCheck()).shown, true);
   idleState = 'idle';
   assert.equal((await reminders.runReminderCheck({ force: true })).shown, true);
   assert.equal(toasts.length, 2);
+});
+
+test('when Windows cannot tell whether anyone is there, only the night counts as away', async (t) => {
+  fresh(t, at(3));
+  load = dayItems;
+  idleState = 'unknown';
+  assert.equal((await reminders.runReminderCheck()).reason, 'away');
+  t.mock.timers.tick(at(9) - at(3)); // the waiting sweep runs once the night is over
+  await flush();
+  assert.equal(toasts.length, 1);
 });
 
 /**
