@@ -87,3 +87,12 @@ test('ranges and hyphenated words are left in the title', () => {
     assert.deepEqual(p(s), { title: s, dueKey: null, time: null, recurrence: null }, s);
   }
 });
+
+test('a score or a chapter:verse is not a clock time', () => {
+  for (const s of ['Счёт матча 2:10 записать', 'Записать счет 3:15', 'Прочитать Глава 3:16']) {
+    assert.deepEqual(p(s), { title: s, dueKey: null, time: null, recurrence: null }, s);
+  }
+  assert.equal(p('Матч в 19:00').time, '19:00');
+  assert.equal(p('Счёт выставить в 10:30').time, '10:30');
+  assert.equal(p('Зарядка 7:00').time, '07:00');
+});

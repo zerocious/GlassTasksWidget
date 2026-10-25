@@ -117,6 +117,12 @@ test('resolveTaskDueAt combines due day with notes time', () => {
   assert.equal(tp.resolveTaskDueAt({ due: dueOn('2026-11-02'), notes: '' }), null);
 });
 
+test('the notes preview is cut between characters, never inside an emoji', () => {
+  const meta = tp.formatMeta({ notes: `${'a'.repeat(36)}😀 конец строки для обрезки` });
+  assert.equal(meta, `${'a'.repeat(36)}😀…`);
+  assert.equal(tp.formatMeta({ notes: '😀'.repeat(40) }), '😀'.repeat(40));
+});
+
 test('formatMeta skips managed lines when previewing notes', () => {
   assert.equal(tp.formatMeta({ notes: 'время 10:00\nповтор: будни\nпервая строка' }), 'первая строка');
   assert.equal(tp.formatMeta({ due: dueOn(today), notes: '' }), 'Сегодня');

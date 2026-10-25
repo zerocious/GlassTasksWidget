@@ -1,6 +1,6 @@
 'use strict';
 
-const { META_TASK, META_DONE, META_HABIT, localizeMeta } = require('./task-parse');
+const { META_TASK, META_DONE, META_HABIT, localizeMeta, isUtcMidnight } = require('./task-parse');
 
 const {
   enrichHabits,
@@ -8,7 +8,7 @@ const {
   unmarkCompleted,
   removeHabit,
 } = require('./streak-store');
-const { todayIso } = require('./dates');
+const { todayIso, addDaysIso } = require('./dates');
 const { createJsonDoc } = require('./storage-doc');
 
 /** mock-items.json — demo-mode lists. Schema 1 = `{ tasks, habits }` (same as schema 0). */
@@ -19,11 +19,16 @@ const mockDoc = createJsonDoc({
   defaults: () => ({}),
 });
 
+/** Date-only, like Google's dues: any other UTC time would read as a clock time («12:00»). */
 function dueIsoDaysFromNow(delta) {
-  const d = new Date();
-  d.setHours(12, 0, 0, 0);
-  d.setDate(d.getDate() + delta);
-  return d.toISOString();
+  return `${addDaysIso(todayIso(), delta)}T00:00:00.000Z`;
+}
+
+/** Demo files written by older versions hold local-noon dues: keep the day, drop the clock. */
+function dateOnlyDue(due) {
+  const d = typeof due === 'string' && due ? new Date(due) : null;
+  if (!d || Number.isNaN(d.getTime()) || isUtcMidnight(d)) return due || null;
+  return `${todayIso(d)}T00:00:00.000Z`;
 }
 
 const DEFAULT_TASKS = [
@@ -96,6 +101,7 @@ const DEFAULT_HABITS = [
 function loadMockStore() {
   const stored = mockDoc.read();
   if (stored && Array.isArray(stored.tasks) && Array.isArray(stored.habits)) {
+    stored.tasks = stored.tasks.map((t) => (t && t.due ? { ...t, due: dateOnlyDue(t.due) } : t));
     return stored;
   }
   const fresh = {

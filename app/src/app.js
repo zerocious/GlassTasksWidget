@@ -1869,9 +1869,17 @@ function insertCreatedItem(listKind, item) {
   }
 }
 
+/** Enter pressed while the previous add was still saving: submit that field next. */
+let addQueued = null;
+
 async function onAddSubmit(listKind, input) {
-  if (addBusy || !window.widgetApi) return;
-  const title = String(input.value || '').trim();
+  if (!window.widgetApi) return;
+  if (addBusy) {
+    if (String(input.value || '').trim()) addQueued = { listKind, input };
+    return;
+  }
+  const raw = String(input.value || '');
+  const title = raw.trim();
   if (!title) return;
   if (state.offline && state.mode === 'google') {
     setBanner('Офлайн: нельзя создать задачу в Google.');
@@ -1883,18 +1891,24 @@ async function onAddSubmit(listKind, input) {
     return;
   }
   addBusy = true;
+  // Cleared now, not after Google answers: what is typed meanwhile is the next task.
+  input.value = '';
   try {
     const result = await window.widgetApi.createItem(listKind, title, { parse: listKind === 'tasks' });
-    input.value = '';
     if (result && result.item) {
       insertCreatedItem(listKind, result.item);
     } else {
       await loadData(true);
     }
   } catch (err) {
+    // Give the text back, unless the field already holds something new.
+    if (!input.value) input.value = raw;
     setBanner(`Не удалось добавить: ${errText(err)}`);
   } finally {
     addBusy = false;
+    const next = addQueued;
+    addQueued = null;
+    if (next) onAddSubmit(next.listKind, next.input);
   }
 }
 
@@ -2243,14 +2257,17 @@ function hideUndoToast() {
   if (undoToast) undoToast.hidden = true;
 }
 
-/** Run the pending action now (another undoable action started, or the window is closing). */
+/**
+ * Run the pending action now (another undoable action started, or the app is quitting).
+ * @returns {Promise<void> | void} settles when the action (e.g. the delete in Google) is done
+ */
 function commitPendingUndo() {
   const entry = undoState;
   if (!entry) return;
   undoState = null;
   clearTimeout(entry.timer);
   hideUndoToast();
-  entry.commit();
+  return entry.commit();
 }
 
 /**
@@ -2288,7 +2305,11 @@ undoToastBtn?.addEventListener('click', (e) => {
   hideUndoToast();
   entry.undo();
 });
-window.addEventListener('beforeunload', () => commitPendingUndo());
+window.addEventListener('beforeunload', () => {
+  commitPendingUndo();
+});
+// Quitting: the main process waits for this, so a delete still in its undo window is not lost.
+window.widgetApi?.onFlushPending?.(() => commitPendingUndo());
 
 async function removeItem(listKind, item) {
   if (!guardMutate('удалить задачу')) return;

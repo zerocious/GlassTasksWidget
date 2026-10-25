@@ -14,8 +14,19 @@ const { freshDataRoot } = require('./storage');
 const TASKS_LIST = { id: 'L-tasks', title: 'Tasks' };
 const HABITS_LIST = { id: 'L-habits', title: 'Habits' };
 
-/** @type {{ lists: Record<string, any[]>, calls: { method: string, params: any }[] }} */
-const server = { lists: {}, calls: [] };
+/**
+ * loseResponse: the next call of that method is applied, then fails like a dropped connection.
+ * @type {{ lists: Record<string, any[]>, calls: { method: string, params: any }[], loseResponse: string | null }}
+ */
+const server = { lists: {}, calls: [], loseResponse: null };
+
+function dropConnectionIfAsked(method) {
+  if (server.loseResponse !== method) return;
+  server.loseResponse = null;
+  const err = new Error('socket hang up');
+  /** @type {any} */ (err).code = 'ECONNRESET';
+  throw err;
+}
 
 function notFound() {
   const err = new Error('Not Found');
@@ -51,6 +62,13 @@ const fakeTasksApi = {
       Object.assign(task, params.requestBody);
       return { data: { ...task } };
     },
+    delete: async (params) => {
+      server.calls.push({ method: 'tasks.delete', params });
+      const list = server.lists[params.tasklist] || [];
+      list.splice(list.indexOf(findTask(params)), 1);
+      dropConnectionIfAsked('tasks.delete');
+      return { data: '' };
+    },
   },
 };
 
@@ -74,6 +92,7 @@ function signedInWith(lists = {}) {
     [HABITS_LIST.id]: (lists.habits || []).map((t) => ({ ...t })),
   };
   server.calls = [];
+  server.loseResponse = null;
   return server;
 }
 

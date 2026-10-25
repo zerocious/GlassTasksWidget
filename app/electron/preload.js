@@ -65,6 +65,18 @@ contextBridge.exposeInMainWorld('widgetApi', {
     ipcRenderer.on('widget:in-app-reminder', listener);
     return () => ipcRenderer.removeListener('widget:in-app-reminder', listener);
   },
+  /** Before quitting: run `handler` (may return a promise), then tell the main process. */
+  onFlushPending: (handler) => {
+    const listener = async () => {
+      try {
+        await handler();
+      } finally {
+        ipcRenderer.send('widget:flush-done');
+      }
+    };
+    ipcRenderer.on('widget:flush-pending', listener);
+    return () => ipcRenderer.removeListener('widget:flush-pending', listener);
+  },
   minimize: () => ipcRenderer.send('widget:minimize'),
   close: () => ipcRenderer.send('widget:close'),
   openExternal: (url) => ipcRenderer.send('widget:open-external', url),
