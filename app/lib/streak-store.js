@@ -215,8 +215,10 @@ function markCompleted(habitId, isoDate = todayIso()) {
 function unmarkCompleted(habitId, isoDate = todayIso()) {
   const store = loadStore();
   const habit = ensureHabit(store, habitId);
-  habit.dates = habit.dates.filter((d) => d !== isoDate);
-  saveStore(store);
+  if (habit.dates.includes(isoDate)) {
+    habit.dates = habit.dates.filter((d) => d !== isoDate);
+    saveStore(store);
+  }
   return getHabitStats(habitId, store);
 }
 

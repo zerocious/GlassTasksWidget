@@ -232,7 +232,11 @@ function formatMeta(task) {
       .split(/\r?\n/)
       .map((l) => l.trim())
       .find((l) => l && !isManagedNotesLine(l));
-    if (line) return line.length > 40 ? `${line.slice(0, 37)}…` : line;
+    if (line) {
+      // By code points: a UTF-16 cut could split an emoji into a lone surrogate («�»).
+      const chars = Array.from(line);
+      return chars.length > 40 ? `${chars.slice(0, 37).join('')}…` : line;
+    }
   }
   return '';
 }

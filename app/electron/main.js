@@ -32,6 +32,7 @@ const {
   invalidatePayloadCache,
   clearOfflineCache,
   resetCompletedHabitsForNewDay,
+  whenIdle,
 } = require('../lib/google-tasks');
 const {
   revokeAndClearTokens,
@@ -67,6 +68,8 @@ const {
 } = require('./reminders');
 const { setupAutoUpdater, checkForAppUpdates } = require('./updater');
 const { createWakeDetector } = require('./power');
+const { clampIntoWorkArea, snapToNearestEdge: snapPosition } = require('../lib/window-bounds');
+const { createQuitGate } = require('../lib/quit-gate');
 
 function credentialsPayload() {
   const status = getGoogleCredentialsStatus();
@@ -161,10 +164,6 @@ function isFromWidget(event) {
   return event.sender === mainWindow.webContents;
 }
 
-function clamp(n, min, max) {
-  return Math.min(max, Math.max(min, n));
-}
-
 function applyAutostart(enabled) {
   const openAtLogin = Boolean(enabled);
   if (app.isPackaged) {
@@ -200,28 +199,7 @@ function snapToNearestEdge() {
   if (!settings.snapToEdge) return;
 
   const bounds = mainWindow.getBounds();
-  const display = screen.getDisplayMatching(bounds);
-  const wa = display.workArea;
-  const margin = 8;
-
-  const maxX = wa.x + wa.width - bounds.width - margin;
-  const minX = wa.x + margin;
-  const minY = wa.y + margin;
-  const maxY = wa.y + wa.height - bounds.height - margin;
-
-  const distLeft = Math.abs(bounds.x - minX);
-  const distRight = Math.abs(bounds.x - maxX);
-  const distTop = Math.abs(bounds.y - minY);
-
-  let x = bounds.x;
-  let y = bounds.y;
-  const nearest = Math.min(distLeft, distRight, distTop);
-  if (nearest === distLeft) x = minX;
-  else if (nearest === distRight) x = maxX;
-  else y = minY;
-
-  x = Math.round(clamp(x, minX, maxX));
-  y = Math.round(clamp(y, minY, maxY));
+  const { x, y } = snapPosition(bounds, screen.getDisplayMatching(bounds).workArea);
 
   if (x !== bounds.x || y !== bounds.y) {
     applyingBounds = true;
@@ -430,16 +408,7 @@ function createTray() {
 
 function clampPosToDisplays(x, y, width, height) {
   const display = screen.getDisplayNearestPoint({ x, y });
-  const wa = display.workArea;
-  const margin = 8;
-  const maxX = wa.x + wa.width - width - margin;
-  const minX = wa.x + margin;
-  const minY = wa.y + margin;
-  const maxY = wa.y + wa.height - height - margin;
-  return {
-    x: Math.round(clamp(x, minX, Math.max(minX, maxX))),
-    y: Math.round(clamp(y, minY, Math.max(minY, maxY))),
-  };
+  return clampIntoWorkArea({ x, y, width, height }, display.workArea);
 }
 
 const RENDERER_RESTARTS = [];
@@ -1126,6 +1095,28 @@ function registerIpc() {
   });
 }
 
+/** Longest a quit waits for a pending delete or an edit still on its way to Google. */
+const QUIT_FLUSH_MS = 5000;
+
+/**
+ * Ask the widget page to run its pending undoable action now (a delete waiting out the five
+ * seconds of «Отменить»); resolves once the page says it is done.
+ */
+function flushRendererBeforeQuit() {
+  const win = mainWindow;
+  if (!win || win.isDestroyed() || win.webContents.isLoadingMainFrame()) return Promise.resolve();
+  const wc = win.webContents;
+  return new Promise((resolve) => {
+    const onDone = (event) => {
+      if (event.sender !== wc) return;
+      ipcMain.removeListener('widget:flush-done', onDone);
+      resolve();
+    };
+    ipcMain.on('widget:flush-done', onDone);
+    wc.send('widget:flush-pending');
+  });
+}
+
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
@@ -1168,10 +1159,20 @@ if (!gotTheLock) {
     console.error('[startup]', err);
   });
 
-  app.on('before-quit', () => {
+  const quitGate = createQuitGate({
+    flush: async () => {
+      await flushRendererBeforeQuit();
+      await whenIdle();
+    },
+    quit: () => app.quit(),
+    timeoutMs: QUIT_FLUSH_MS,
+  });
+
+  app.on('before-quit', (event) => {
     isQuitting = true;
     stopRemindersScheduler();
     stopHabitsDayRollover();
+    quitGate.onBeforeQuit(event);
   });
 
   app.on('will-quit', () => {

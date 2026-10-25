@@ -96,3 +96,21 @@ test('runMutation runs different items in parallel', async () => {
   gate.resolve();
   assert.equal(await slow, 'a');
 });
+
+test('whenIdle waits for every queued mutation, failed ones included', async () => {
+  const { whenIdle } = require('../lib/google-tasks');
+  const gateA = deferred();
+  const gateB = deferred();
+  const settled = [];
+  runMutation('idle:a', 'tasks:idle-a', async () => { await gateA.promise; settled.push('a'); }).catch(() => {});
+  runMutation('idle:b', 'tasks:idle-b', async () => { await gateB.promise; settled.push('b'); throw new Error('x'); }).catch(() => {});
+
+  let idle = false;
+  const waiting = whenIdle().then(() => { idle = true; });
+  gateA.resolve();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(idle, false);
+  gateB.resolve();
+  await waiting;
+  assert.deepEqual(settled.sort(), ['a', 'b']);
+});

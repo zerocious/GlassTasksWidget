@@ -128,6 +128,13 @@ function runMutation(flightKey, queueKey, task) {
   return run;
 }
 
+/** Resolves once every queued edit (and a running habit reset) has settled — before quitting. */
+async function whenIdle() {
+  while (itemQueues.size || habitsResetInFlight) {
+    await Promise.allSettled([...itemQueues.values(), habitsResetInFlight]);
+  }
+}
+
 /**
  * Collect every page of a Google list call (`tasks.list`, `tasklists.list`).
  * @param {(params: object) => Promise<{ data: { items?: any[], nextPageToken?: string } }>} listFn
@@ -314,11 +321,10 @@ function decorateTasks(tasks) {
         Object.prototype.hasOwnProperty.call(t, 'recurrence') && t.recurrence !== undefined
           ? t.recurrence
           : parseRecurrence(t.notes);
+      // Always from the item itself: a stored meta goes stale when the notes change (demo mode).
       const meta =
-        t.due || dueTime || !t.meta
-          ? formatMeta({ ...t, status: t.completed ? 'completed' : 'needsAction' }) ||
-            (t.completed ? META_DONE : META_TASK)
-          : t.meta;
+        formatMeta({ ...t, status: t.completed ? 'completed' : 'needsAction' }) ||
+        (t.completed ? META_DONE : META_TASK);
       return { ...t, dueKind, dueTime, recurrence, meta };
     })
   );
@@ -496,6 +502,20 @@ async function fetchLivePayload(config) {
   }
 }
 
+/**
+ * Today's mark of a habit follows Google, so a check or uncheck on the phone shows here:
+ * completed today there → done today here; open there → not done today. Earlier days stay.
+ * @param {Array<{ id: string, completed: boolean, completedAt?: string | null }>} habitsRaw
+ */
+function syncHabitsTodayFromGoogle(habitsRaw) {
+  const today = todayIso();
+  for (const h of habitsRaw) {
+    if (!h || !h.id) continue;
+    if (h.completed && localDayOf(h.completedAt) === today) markCompleted(h.id, today);
+    else if (!h.completed) unmarkCompleted(h.id, today);
+  }
+}
+
 async function fetchLivePayloadOnce(config) {
   const auth = await getAuthorizedClient({ interactive: false });
   if (!auth) {
@@ -516,10 +536,13 @@ async function fetchLivePayloadOnce(config) {
   const tasksListId = listMap.get(String(config.tasksListName || '').trim()) || null;
   const habitsListId = listMap.get(String(config.habitsListName || '').trim()) || null;
 
+  const genStart = mutationGeneration;
   const [tasksRaw, habitsRaw] = await Promise.all([
     fetchListItems(tasksApi, tasksListId),
     fetchListItems(tasksApi, habitsListId),
   ]);
+  // Skipped when an edit here raced the fetch: the snapshot may predate it.
+  if (genStart === mutationGeneration && mutationsActive === 0) syncHabitsTodayFromGoogle(habitsRaw);
 
   const tasks = decorateTasks(tasksRaw);
   // Habits skip the tasks "open + 5 done" truncation.
@@ -588,13 +611,13 @@ function fromPayloadCache() {
 }
 
 /**
- * @param {string | null | undefined} completed  Google's completion timestamp (RFC 3339)
- * @param {string} dayKey  local YYYY-MM-DD
+ * Local calendar day of Google's completion timestamp (RFC 3339), or null.
+ * @param {string | null | undefined} completed
  */
-function completedOnLocalDay(completed, dayKey) {
-  if (!completed) return false;
+function localDayOf(completed) {
+  if (!completed) return null;
   const d = new Date(completed);
-  return !Number.isNaN(d.getTime()) && todayIso(d) === dayKey;
+  return Number.isNaN(d.getTime()) ? null : todayIso(d);
 }
 
 /**
@@ -652,10 +675,13 @@ async function resetCompletedHabitsForNewDay() {
       });
       // A habit completed today (on the phone, or here after midnight) belongs to the new day.
       const items = all.filter(
-        (i) => i && i.id && i.status === 'completed' && !completedOnLocalDay(i.completed, today)
+        (i) => i && i.id && i.status === 'completed' && localDayOf(i.completed) !== today
       );
 
       for (const item of items) {
+        // Completed on another device on an earlier day: keep that day in the history.
+        const day = localDayOf(item.completed);
+        if (day && day < today) markCompleted(item.id, day);
         await tasksApi.tasks.patch({
           tasklist: listId,
           task: item.id,
@@ -1321,6 +1347,12 @@ async function updateItem(listKind, taskId, patchOrTitle) {
   });
 }
 
+/** Google's answer for an item that does not exist (any more). */
+function isNotFoundError(err) {
+  const e = /** @type {any} */ (err) || {};
+  return Number((e.response && e.response.status) || e.status || e.code) === 404;
+}
+
 async function deleteItem(listKind, taskId) {
   if (listKind !== 'tasks' && listKind !== 'habits') {
     throw new Error('Некорректный тип списка');
@@ -1340,10 +1372,15 @@ async function deleteItem(listKind, taskId) {
 
     const { tasksApi, listId } = await openList(config, listKind);
 
-    await tasksApi.tasks.delete({
-      tasklist: listId,
-      task: taskId,
-    });
+    try {
+      await tasksApi.tasks.delete({
+        tasklist: listId,
+        task: taskId,
+      });
+    } catch (err) {
+      // Already gone: a retried call whose first answer was lost, or deleted on another device.
+      if (!isNotFoundError(err)) throw err;
+    }
 
     if (listKind === 'habits') removeHabit(taskId);
 
@@ -1484,6 +1521,7 @@ module.exports = {
   applyRecurrenceToNotes,
   nextOccurrenceDue,
   resetCompletedHabitsForNewDay,
+  whenIdle,
   /** Exposed for unit tests only. */
   _test: { listAllPages, runMutation },
 };
