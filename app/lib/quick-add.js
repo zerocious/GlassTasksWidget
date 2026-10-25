@@ -16,6 +16,13 @@ const NOT_RANGE_AFTER = '(?!\\s*[-–—]\\s*\\d)';
 /** A bare «2:10» right after «счёт [матча]», «глава», «стих» is a score or a verse, not a time. */
 const NOT_SCORE = '(?<!(?<!\\p{L})(?:сч[её]т|глав[аеуы]?|стих)(?:\\s+\\p{L}+)?\\s+)';
 
+/** A range in words — «с 9:00 до 18:00», «с 12.10 по 15.10» — is title text, not a due. */
+const POINT = '\\d{1,2}[:.]\\d{2}(?:\\.\\d{4})?';
+const WORD_RANGE_RE = new RegExp(`${B}(?:с|со|от)\\s+${POINT}\\s+(?:до|по)\\s+${POINT}${E}`, 'giu');
+/** Stand-in for a word range while parsing: a private-use character, no pattern matches it. */
+const RANGE_MARK_BASE = 0xe000;
+const RANGE_MARK_RE = /[\uE000-\uF8FF]/g;
+
 /** JS getDay(): 0 = Sunday. */
 const WEEKDAYS = [
   { day: 1, re: 'понедельник|пн' },
@@ -64,7 +71,9 @@ function validDateKey(y, m, d) {
 function parseQuickAdd(input, now = new Date()) {
   const original = String(input || '').trim();
   const today = todayIso(now);
-  let text = ` ${original} `;
+  /** @type {string[]} */
+  const ranges = [];
+  let text = ` ${original.replace(WORD_RANGE_RE, (m) => String.fromCharCode(RANGE_MARK_BASE + ranges.push(m) - 1))} `;
   /** @type {string | null} */
   let dueKey = null;
   /** @type {string | null} */
@@ -88,8 +97,8 @@ function parseQuickAdd(input, now = new Date()) {
     })) break;
   }
 
-  // Time: «в 18:30», «18:30» (colon only — «12.10» is a date); not «12:30:45».
-  take(rx(`${NOT_RANGE}(?:в\\s+|${NOT_SCORE})([01]?\\d|2[0-3]):([0-5]\\d)(?![:.]\\d)${NOT_RANGE_AFTER}`), (m) => {
+  // Time: «в 18:30», «с 9:00», «18:30» (colon only — «12.10» is a date); not «12:30:45».
+  take(rx(`${NOT_RANGE}(?:(?:в|с|со)\\s+|${NOT_SCORE})([01]?\\d|2[0-3]):([0-5]\\d)(?![:.]\\d)${NOT_RANGE_AFTER}`), (m) => {
     time = `${m[1].padStart(2, '0')}:${m[2]}`;
   });
 
@@ -135,7 +144,12 @@ function parseQuickAdd(input, now = new Date()) {
     });
   }
 
-  const title = text.replace(/\s{2,}/g, ' ').replace(/\s+([,.;:!?])/g, '$1').trim().replace(/[,;:\s-]+$/, '');
+  const title = text
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .trim()
+    .replace(/[,;:\s-]+$/, '')
+    .replace(RANGE_MARK_RE, (mark) => ranges[mark.charCodeAt(0) - RANGE_MARK_BASE] ?? mark);
   if (!title) return { title: original, dueKey: null, time: null, recurrence: null };
 
   // A time or repeat rule without a day means «starting today».
