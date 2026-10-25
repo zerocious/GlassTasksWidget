@@ -282,6 +282,19 @@ let view = 'tasks';
 /** @type {Set<string>} */
 const pendingIds = new Set();
 let addBusy = false;
+/** Adds asked for while `addBusy` was held (another add, sign-in, saving keys), in order. */
+const pendingAdds = [];
+
+/** Queue an add for when `addBusy` is released; one entry per `key` (e.g. the input field). */
+function queueAdd(key, run) {
+  if (!pendingAdds.some((p) => p.key === key)) pendingAdds.push({ key, run });
+}
+
+/** Release `addBusy` and start the next queued add (a run that does not take it is skipped). */
+function releaseAddBusy() {
+  addBusy = false;
+  while (!addBusy && pendingAdds.length) pendingAdds.shift().run();
+}
 /** @type {Promise<void> | null} */
 let loadInFlight = null;
 /** @type {ReturnType<typeof setTimeout> | null} */
@@ -1869,13 +1882,11 @@ function insertCreatedItem(listKind, item) {
   }
 }
 
-/** Enter pressed while the previous add was still saving: submit that field next. */
-let addQueued = null;
-
 async function onAddSubmit(listKind, input) {
   if (!window.widgetApi) return;
   if (addBusy) {
-    if (String(input.value || '').trim()) addQueued = { listKind, input };
+    // Enter while the previous add is saving: this field goes next.
+    if (String(input.value || '').trim()) queueAdd(input, () => onAddSubmit(listKind, input));
     return;
   }
   const raw = String(input.value || '');
@@ -1903,12 +1914,9 @@ async function onAddSubmit(listKind, input) {
   } catch (err) {
     // Give the text back, unless the field already holds something new.
     if (!input.value) input.value = raw;
-    setBanner(`Не удалось добавить: ${errText(err)}`);
+    setBanner(`Не удалось добавить «${title}»: ${errText(err)}`);
   } finally {
-    addBusy = false;
-    const next = addQueued;
-    addQueued = null;
-    if (next) onAddSubmit(next.listKind, next.input);
+    releaseAddBusy();
   }
 }
 
@@ -2374,6 +2382,11 @@ async function removeItem(listKind, item) {
   });
 }
 
+/** Enter that confirms a composition (Chinese, Japanese, emoji pickers) is not a submit. */
+function isImeEnter(e) {
+  return e.isComposing || e.keyCode === 229;
+}
+
 function beginInlineEdit(listKind, item, row) {
   if (!row || row.classList.contains('is-editing')) return;
   if (!guardMutate('изменить задачу')) return;
@@ -2385,7 +2398,8 @@ function beginInlineEdit(listKind, item, row) {
   const input = document.createElement('input');
   input.type = 'text';
   input.className = 'row-title-edit';
-  input.maxLength = 200;
+  // New titles stop at 200; a longer one written in Google stays editable (Google allows 1024).
+  input.maxLength = String(item.title || '').length > 200 ? 1024 : 200;
   input.value = item.title;
   input.setAttribute('aria-label', 'Новое название');
   titleEl.replaceWith(input);
@@ -2402,12 +2416,13 @@ function beginInlineEdit(listKind, item, row) {
     const value = String(input.value || '').trim();
     next.textContent = save && value ? value : item.title;
     if (input.parentNode) input.replaceWith(next);
-    if (save && value && value !== item.title) await renameItem(listKind, item, value);
+    // Unchanged apart from the spaces around it: nothing to save.
+    if (save && value && value !== String(item.title || '').trim()) await renameItem(listKind, item, value);
     else next.textContent = item.title;
   };
 
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && !isImeEnter(e)) {
       e.preventDefault();
       e.stopPropagation();
       finish(true);
@@ -2866,6 +2881,29 @@ function openStreakPanel(habit) {
   });
 }
 
+/** Save a subtask; while another add is saving it waits its turn instead of being dropped. */
+async function createSubtask(parentItem, title) {
+  if (addBusy) {
+    queueAdd({}, () => createSubtask(parentItem, title));
+    return;
+  }
+  addBusy = true;
+  try {
+    const result = await window.widgetApi.createItem('tasks', title, {
+      parentId: parentItem.id,
+    });
+    if (result && result.item) {
+      insertCreatedItem('tasks', result.item);
+    } else {
+      await loadData(true);
+    }
+  } catch (err) {
+    setBanner(`Не удалось добавить подзадачу «${title}»: ${errText(err)}`);
+  } finally {
+    releaseAddBusy();
+  }
+}
+
 async function beginAddSubtask(parentItem, parentRow) {
   if (!parentItem || !parentRow) return;
   if (!guardMutate('добавить подзадачу')) return;
@@ -2894,26 +2932,11 @@ async function beginAddSubtask(parentItem, parentRow) {
     const title = String(input.value || '').trim();
     wrap.remove();
     if (!save || !title) return;
-    if (addBusy) return;
-    addBusy = true;
-    try {
-      const result = await window.widgetApi.createItem('tasks', title, {
-        parentId: parentItem.id,
-      });
-      if (result && result.item) {
-        insertCreatedItem('tasks', result.item);
-      } else {
-        await loadData(true);
-      }
-    } catch (err) {
-      setBanner(`Не удалось добавить подзадачу: ${errText(err)}`);
-    } finally {
-      addBusy = false;
-    }
+    createSubtask(parentItem, title);
   };
 
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && !isImeEnter(e)) {
       e.preventDefault();
       e.stopPropagation();
       finish(true);
@@ -3266,7 +3289,7 @@ async function onAuthClick() {
   } catch (err) {
     setBanner(`Выход из Google: ${errText(err)}`);
   } finally {
-    addBusy = false;
+    releaseAddBusy();
   }
 }
 
@@ -3296,7 +3319,7 @@ async function importClientJson(text) {
   } catch (err) {
     setOnboardingError(errText(err));
   } finally {
-    addBusy = false;
+    releaseAddBusy();
     onboardingDrop?.removeAttribute('aria-busy');
   }
 }
@@ -3329,7 +3352,7 @@ async function onSaveCredentials() {
   } catch (err) {
     setOnboardingError(errText(err));
   } finally {
-    addBusy = false;
+    releaseAddBusy();
     if (btnSaveCredentials) btnSaveCredentials.disabled = false;
     if (btnSkipCredentials) btnSkipCredentials.disabled = false;
   }
@@ -3356,7 +3379,7 @@ async function onSkipCredentials() {
   } catch (err) {
     setOnboardingError(errText(err));
   } finally {
-    addBusy = false;
+    releaseAddBusy();
     if (btnSaveCredentials) btnSaveCredentials.disabled = false;
     if (btnSkipCredentials) btnSkipCredentials.disabled = false;
   }
@@ -3588,7 +3611,7 @@ if (notesTextarea) {
       e.preventDefault();
       e.stopPropagation();
       closeNotesPanel({ revert: true });
-    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    } else if (e.key === 'Enter' && !isImeEnter(e) && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       saveNotesPanel({ closeAfter: true });
     }
@@ -3630,7 +3653,7 @@ if (timeInput) {
       e.preventDefault();
       e.stopPropagation();
       closeTimePanel();
-    } else if (e.key === 'Enter') {
+    } else if (e.key === 'Enter' && !isImeEnter(e)) {
       e.preventDefault();
       saveTimePanel({ closeAfter: true });
     }
@@ -3668,7 +3691,7 @@ if (dateInput) {
       e.preventDefault();
       e.stopPropagation();
       closeDatePanel();
-    } else if (e.key === 'Enter') {
+    } else if (e.key === 'Enter' && !isImeEnter(e)) {
       e.preventDefault();
       saveDatePanel(dateInput.value || null);
     }

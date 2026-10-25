@@ -149,3 +149,68 @@ test('deleting a task already deleted on another device succeeds', async () => {
   assert.equal(result.ok, true);
   assert.ok(!data.tasks.some((t) => t.id === 'T1'));
 });
+
+test('a habit checked in Google\'s own app (a hidden item) stays listed and counts as done', async () => {
+  signedInWith({
+    habits: [
+      { id: 'H1', title: 'Зарядка', status: 'completed', completed: new Date().toISOString(), hidden: true },
+      { id: 'H2', title: 'Чтение', status: 'needsAction' },
+    ],
+  });
+
+  const data = await gt.getWidgetData({ force: true });
+  const habit = data.habits.find((h) => h.id === 'H1');
+
+  assert.ok(habit, data.habits.map((h) => h.id).join(','));
+  assert.equal(habit.completed, true);
+  assert.equal(habit.streak, 1);
+});
+
+test('a task completed in Google\'s own app shows in the completed section', async () => {
+  signedInWith({
+    tasks: [
+      { id: 'T1', title: 'Открытая', status: 'needsAction', position: '00000000000000000001' },
+      { id: 'P1', title: 'С телефона', status: 'completed', completed: new Date().toISOString(), hidden: true, position: '00000000000000000002' },
+    ],
+  });
+
+  const data = await gt.getWidgetData({ force: true });
+
+  assert.ok(data.tasks.some((t) => t.id === 'P1' && t.completed), data.tasks.map((t) => t.id).join(','));
+});
+
+test('open tasks are all listed even behind thousands of old completed ones', async () => {
+  const old = Array.from({ length: 2500 }, (_, i) => ({
+    id: `old${i}`, title: `Старая ${i}`, status: 'completed', completed: localNoon(-400), position: String(i).padStart(20, '0'),
+  }));
+  signedInWith({
+    tasks: [...old, { id: 'late', title: 'Открытая в конце', status: 'needsAction', position: '9'.repeat(20) }],
+  });
+
+  const data = await gt.getWidgetData({ force: true });
+
+  assert.ok(data.tasks.some((t) => t.id === 'late'));
+});
+
+test('renaming keeps a long title written in Google (up to Google\'s 1024 characters)', async () => {
+  const long = `${'Очень длинное название задачи. '.repeat(10).trim()} конец`;
+  signedInWith({ tasks: [{ id: 'T1', title: long, status: 'needsAction' }] });
+  await gt.getWidgetData({ force: true });
+
+  await gt.updateItem('tasks', 'T1', { title: `${long}!` });
+  await gt.updateItem('tasks', 'T1', { title: 'x'.repeat(1500) });
+
+  assert.ok(long.length > 300);
+  assert.equal(server.calls.filter((c) => c.method === 'tasks.patch')[0].params.requestBody.title, `${long}!`);
+  assert.equal(serverItem('tasks', 'T1').title.length, 1024);
+});
+
+test('a title cut to the limit never ends in half an emoji', async () => {
+  signedInWith({ tasks: [{ id: 'T1', title: 'x', status: 'needsAction' }] });
+  await gt.getWidgetData({ force: true });
+
+  await gt.updateItem('tasks', 'T1', { title: `${'x'.repeat(1023)}😀` });
+
+  const title = serverItem('tasks', 'T1').title;
+  assert.equal(title, 'x'.repeat(1023));
+});

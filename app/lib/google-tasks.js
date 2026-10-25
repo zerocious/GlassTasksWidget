@@ -52,8 +52,16 @@ const { applyItemPatch, reorderList } = require('./list-ops');
 const { retryingTasksClient } = require('./retry');
 const { parseQuickAdd } = require('./quick-add');
 
-const MAX_TITLE_LEN = 200;
+/** Google's own limit: a longer title written elsewhere is kept whole when renamed here. */
+const MAX_TITLE_LEN = 1024;
 const MAX_NOTES_LEN = 8000;
+
+/** Cut to `max` UTF-16 units without leaving half of an emoji (a lone surrogate) at the end. */
+function cutTo(text, max) {
+  if (text.length <= max) return text;
+  const out = text.slice(0, max);
+  return /[\uD800-\uDBFF]$/.test(out) ? out.slice(0, -1) : out;
+}
 
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000;
 /** Soft TTL for in-memory widget payload — avoids double network on rapid IPC. */
@@ -439,15 +447,31 @@ async function openList(config, listKind) {
   return { tasksApi, listId };
 }
 
-/** Every visible item of a list (open + completed, all pages), mapped to widget shape. */
-async function fetchListItems(tasksApi, listId) {
+/** Completed tasks older than this are not fetched: the widget lists only the latest few. */
+const DONE_WINDOW_DAYS = 30;
+
+/**
+ * Items of a list mapped to widget shape. `showHidden` everywhere: Google returns tasks
+ * completed in its own web UI or mobile apps only with it.
+ * Habits (a short list that the daily reset keeps open): everything in one query.
+ * Tasks: completed ones pile up for years, so open tasks and recently completed ones are two
+ * queries — thousands of old completions can then never push open tasks past the page cap.
+ * @param {{ recentDoneOnly?: boolean }} [opts]
+ */
+async function fetchListItems(tasksApi, listId, opts = {}) {
   if (!listId) return [];
-  const items = await listAllPages((p) => tasksApi.tasks.list(p), {
-    tasklist: listId,
-    showCompleted: true,
-    showHidden: false,
-  });
-  return items.map(mapTask);
+  const list = (params) =>
+    listAllPages((p) => tasksApi.tasks.list(p), { tasklist: listId, showHidden: true, ...params });
+  if (!opts.recentDoneOnly) return (await list({ showCompleted: true })).map(mapTask);
+  const completedMin = new Date(Date.now() - DONE_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const [open, done] = await Promise.all([
+    list({ showCompleted: false }),
+    list({ showCompleted: true, completedMin }),
+  ]);
+  const byId = new Map();
+  for (const t of open) if (t && t.id && t.status !== 'completed') byId.set(t.id, t);
+  for (const t of done) if (t && t.id && t.status === 'completed') byId.set(t.id, t);
+  return [...byId.values()].map(mapTask);
 }
 
 /**
@@ -538,7 +562,7 @@ async function fetchLivePayloadOnce(config) {
 
   const genStart = mutationGeneration;
   const [tasksRaw, habitsRaw] = await Promise.all([
-    fetchListItems(tasksApi, tasksListId),
+    fetchListItems(tasksApi, tasksListId, { recentDoneOnly: true }),
     fetchListItems(tasksApi, habitsListId),
   ]);
   // Skipped when an edit here raced the fetch: the snapshot may predate it.
@@ -1085,7 +1109,7 @@ async function createItem(listKind, title, opts = {}) {
   }
   let trimmed = String(title || '').trim();
   if (!trimmed) throw new Error('Введите название');
-  if (trimmed.length > MAX_TITLE_LEN) trimmed = trimmed.slice(0, MAX_TITLE_LEN);
+  trimmed = cutTo(trimmed, MAX_TITLE_LEN);
   const parentId =
     opts && typeof opts.parentId === 'string' && opts.parentId.trim()
       ? opts.parentId.trim()
@@ -1240,13 +1264,13 @@ async function updateItem(listKind, taskId, patchOrTitle) {
     if (typeof patch.title === 'string') {
       let trimmed = patch.title.trim();
       if (!trimmed) throw new Error('Введите название');
-      if (trimmed.length > MAX_TITLE_LEN) trimmed = trimmed.slice(0, MAX_TITLE_LEN);
+      trimmed = cutTo(trimmed, MAX_TITLE_LEN);
       body.title = trimmed;
       itemPatch.title = trimmed;
     }
     if (typeof patch.notes === 'string') {
       let notes = patch.notes;
-      if (notes.length > MAX_NOTES_LEN) notes = notes.slice(0, MAX_NOTES_LEN);
+      notes = cutTo(notes, MAX_NOTES_LEN);
       body.notes = notes;
       itemPatch.notes = notes;
     }
@@ -1306,10 +1330,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       if (pendingRecurrence !== undefined) {
         currentNotes = applyRecurrenceToNotes(currentNotes, pendingRecurrence);
       }
-      body.notes =
-        currentNotes.length > MAX_NOTES_LEN
-          ? currentNotes.slice(0, MAX_NOTES_LEN)
-          : currentNotes;
+      body.notes = cutTo(currentNotes, MAX_NOTES_LEN);
       itemPatch.notes = body.notes;
     }
 
