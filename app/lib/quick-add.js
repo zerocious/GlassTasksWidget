@@ -7,9 +7,12 @@
 
 const { todayIso, addDaysIso } = require('./dates');
 
-// Cyrillic-aware word boundaries (\b only knows ASCII).
-const B = '(?<![\\p{L}\\p{N}])';
-const E = '(?![\\p{L}\\p{N}])';
+// Cyrillic-aware word boundaries (\b only knows ASCII); a hyphen joins words («ср-во», «пн-пт»).
+const B = '(?<![\\p{L}\\p{N}-])';
+const E = '(?![\\p{L}\\p{N}-])';
+/** Neither end of a range: «10:00 - 12:00», «12.10 – 15.10». */
+const NOT_RANGE = '(?<!\\d\\s*[-–—]\\s*)';
+const NOT_RANGE_AFTER = '(?!\\s*[-–—]\\s*\\d)';
 
 /** JS getDay(): 0 = Sunday. */
 const WEEKDAYS = [
@@ -29,7 +32,7 @@ const REPEATS = [
 ];
 
 function rx(body) {
-  return new RegExp(`${B}(?:${body})${E}`, 'iu');
+  return new RegExp(`${B}(?:${body})${E}`, 'giu');
 }
 
 function weekdayOf(key) {
@@ -67,12 +70,14 @@ function parseQuickAdd(input, now = new Date()) {
   /** @type {'daily' | 'weekdays' | 'weekly' | null} */
   let recurrence = null;
 
+  /** Remove the first match `onMatch` accepts («2.50» is skipped, «12.11» after it is taken). */
   const take = (re, onMatch) => {
-    const m = text.match(re);
-    if (!m) return false;
-    if (onMatch(m) === false) return false;
-    text = `${text.slice(0, m.index)} ${text.slice(m.index + m[0].length)}`;
-    return true;
+    for (const m of text.matchAll(re)) {
+      if (onMatch(m) === false) continue;
+      text = `${text.slice(0, m.index)} ${text.slice(m.index + m[0].length)}`;
+      return true;
+    }
+    return false;
   };
 
   for (const r of REPEATS) {
@@ -81,8 +86,8 @@ function parseQuickAdd(input, now = new Date()) {
     })) break;
   }
 
-  // Time: «в 18:30», «18:30» (colon only — «12.10» is a date).
-  take(rx('(?:в\\s+)?([01]?\\d|2[0-3]):([0-5]\\d)'), (m) => {
+  // Time: «в 18:30», «18:30» (colon only — «12.10» is a date); not «12:30:45».
+  take(rx(`${NOT_RANGE}(?:в\\s+)?([01]?\\d|2[0-3]):([0-5]\\d)(?![:.]\\d)${NOT_RANGE_AFTER}`), (m) => {
     time = `${m[1].padStart(2, '0')}:${m[2]}`;
   });
 
@@ -114,7 +119,9 @@ function parseQuickAdd(input, now = new Date()) {
 
   if (!dueKey) {
     // «12.10», «12.10.2026», «до 12.10»; a past day without a year means next year.
-    take(rx('(?:до\\s+|к\\s+)?(\\d{1,2})\\.(\\d{1,2})(?:\\.(\\d{4}))?'), (m) => {
+    // A two-digit month and no dotted neighbours keep «1.5 л», «3.4», «192.168.1.1» out.
+    const date = '(\\d{1,2})\\.(\\d{2})(?:\\.(\\d{4}))?';
+    take(rx(`${NOT_RANGE}(?<!\\d[.,])(?:до\\s+|к\\s+)?${date}(?![.,]\\d)${NOT_RANGE_AFTER}`), (m) => {
       const d = Number(m[1]);
       const mo = Number(m[2]);
       const y0 = m[3] ? Number(m[3]) : now.getFullYear();

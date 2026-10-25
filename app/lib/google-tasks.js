@@ -196,6 +196,7 @@ function mapTask(item) {
     recurrence,
     status: item.status || 'needsAction',
     completed,
+    completedAt: (completed && item.completed) || null,
     position: item.position || '',
     parent: item.parent || null,
     meta: formatMeta(item) || (completed ? META_DONE : META_TASK),
@@ -267,13 +268,40 @@ function nestTasksPreserveOrder(tasks) {
   return out;
 }
 
+/** Completed tasks the widget lists. */
+const DONE_SHOWN = 5;
+
 /**
- * Open first, then up to 5 completed — Google sibling order via `position`,
- * nest subtasks under parents (mock keeps array / DnD order).
+ * The `limit` most recently completed items, kept in input order.
+ * @template {{ completedAt?: string | null }} T
+ * @param {T[]} done
+ * @param {number} limit
+ * @returns {T[]}
+ */
+function recentlyCompleted(done, limit) {
+  if (done.length <= limit) return done;
+  const at = (item) => Date.parse(item.completedAt || '') || 0;
+  const keep = new Set(
+    done
+      .map((item, index) => ({ item, index }))
+      .sort((a, b) => at(b.item) - at(a.item) || a.index - b.index)
+      .slice(0, limit)
+      .map(({ item }) => item)
+  );
+  return done.filter((item) => keep.has(item));
+}
+
+/**
+ * Open first, then up to DONE_SHOWN completed — the most recently completed ones when Google
+ * says when (mock data and old caches don't: then the first ones). Google sibling order via
+ * `position`, nest subtasks under parents (mock keeps array / DnD order).
  */
 function sortTasks(tasks) {
   const open = nestTasksPreserveOrder(tasks.filter((t) => !t.completed));
-  const done = nestTasksPreserveOrder(tasks.filter((t) => t.completed)).slice(0, 5);
+  const doneAll = tasks.filter((t) => t.completed);
+  const done = doneAll.some((t) => t.completedAt)
+    ? nestTasksPreserveOrder(recentlyCompleted(doneAll, DONE_SHOWN))
+    : nestTasksPreserveOrder(doneAll).slice(0, DONE_SHOWN);
   return [...open, ...done];
 }
 
@@ -560,6 +588,16 @@ function fromPayloadCache() {
 }
 
 /**
+ * @param {string | null | undefined} completed  Google's completion timestamp (RFC 3339)
+ * @param {string} dayKey  local YYYY-MM-DD
+ */
+function completedOnLocalDay(completed, dayKey) {
+  if (!completed) return false;
+  const d = new Date(completed);
+  return !Number.isNaN(d.getTime()) && todayIso(d) === dayKey;
+}
+
+/**
  * Once per local calendar day: clear completed flags on Habits (Google or mock).
  * Streak store is untouched — only sticky Google/mock completed status resets.
  * @returns {Promise<{
@@ -612,7 +650,10 @@ async function resetCompletedHabitsForNewDay() {
         showCompleted: true,
         showHidden: true,
       });
-      const items = all.filter((i) => i && i.id && i.status === 'completed');
+      // A habit completed today (on the phone, or here after midnight) belongs to the new day.
+      const items = all.filter(
+        (i) => i && i.id && i.status === 'completed' && !completedOnLocalDay(i.completed, today)
+      );
 
       for (const item of items) {
         await tasksApi.tasks.patch({
@@ -851,6 +892,7 @@ function buildCompletedItemPatch(listKind, cached, completed, overrides = {}, st
   return {
     status,
     completed,
+    completedAt: completed ? new Date().toISOString() : null,
     due,
     dueKind,
     dueTime,
@@ -1126,15 +1168,12 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       const hm = normalizeDueTimeInput(patch.dueTime);
       delete patch.dueTime;
       let currentNotes = typeof patch.notes === 'string' ? patch.notes : null;
-      if (currentNotes === null) {
-        if (!hasGoogleCredentials()) {
-          const mockItem = getMockItem(listKind, taskId);
-          if (!mockItem) throw new Error('Элемент не найден');
-          currentNotes = mockItem.notes || '';
-        } else {
-          const cached = lookupCachedItem(listKind, taskId);
-          if (cached && typeof cached.notes === 'string') currentNotes = cached.notes;
-        }
+      // Google: the notes are read with tasks.get below, not from a cache that may predate
+      // an edit made on another device.
+      if (currentNotes === null && !hasGoogleCredentials()) {
+        const mockItem = getMockItem(listKind, taskId);
+        if (!mockItem) throw new Error('Элемент не найден');
+        currentNotes = mockItem.notes || '';
       }
       if (currentNotes !== null) {
         patch.notes = applyDueTimeToNotes(currentNotes, hm);
@@ -1147,15 +1186,12 @@ async function updateItem(listKind, taskId, patchOrTitle) {
       const rule = normalizeRecurrenceInput(patch.recurrence);
       delete patch.recurrence;
       let currentNotes = typeof patch.notes === 'string' ? patch.notes : null;
-      if (currentNotes === null) {
-        if (!hasGoogleCredentials()) {
-          const mockItem = getMockItem(listKind, taskId);
-          if (!mockItem) throw new Error('Элемент не найден');
-          currentNotes = mockItem.notes || '';
-        } else {
-          const cached = lookupCachedItem(listKind, taskId);
-          if (cached && typeof cached.notes === 'string') currentNotes = cached.notes;
-        }
+      // Google: the notes are read with tasks.get below, not from a cache that may predate
+      // an edit made on another device.
+      if (currentNotes === null && !hasGoogleCredentials()) {
+        const mockItem = getMockItem(listKind, taskId);
+        if (!mockItem) throw new Error('Элемент не найден');
+        currentNotes = mockItem.notes || '';
       }
       if (currentNotes !== null) {
         patch.notes = applyRecurrenceToNotes(currentNotes, rule);
@@ -1228,7 +1264,7 @@ async function updateItem(listKind, taskId, patchOrTitle) {
 
     const { tasksApi, listId } = await openList(config, listKind);
 
-    // Cache miss: fetch current notes before applying dueTime/recurrence so we don't wipe them.
+    // Fetch the current notes before applying dueTime/recurrence so we don't wipe them.
     if (
       (pendingDueTime !== undefined || pendingRecurrence !== undefined) &&
       body.notes === undefined

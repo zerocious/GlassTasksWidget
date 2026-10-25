@@ -58,3 +58,32 @@ test('a title made only of keywords is kept as-is', () => {
 test('invalid clock values are left in the title', () => {
   assert.deepEqual(p('Счёт 25:99'), { title: 'Счёт 25:99', dueKey: null, time: null, recurrence: null });
 });
+
+test('decimals, versions and addresses are not dates', () => {
+  for (const s of [
+    'Купить 1.5 л молока',
+    'Прочитать главу 3.4',
+    'Обновить до 10.12.1',
+    'Настроить роутер 192.168.1.1',
+  ]) {
+    assert.deepEqual(p(s), { title: s, dueKey: null, time: null, recurrence: null }, s);
+  }
+});
+
+test('a date after something that only looks like one is still found', () => {
+  assert.deepEqual(p('Оплатить 2.50 и сдать 12.11'), {
+    title: 'Оплатить 2.50 и сдать', dueKey: '2026-11-12', time: null, recurrence: null,
+  });
+});
+
+test('ranges and hyphenated words are left in the title', () => {
+  for (const s of [
+    'Встреча 10:00-12:00',
+    'Встреча 10:00 - 12:00',
+    'Отпуск 12.10–15.10',
+    'Купить ср-во от комаров',
+    'Ошибка в логе 12:30:45',
+  ]) {
+    assert.deepEqual(p(s), { title: s, dueKey: null, time: null, recurrence: null }, s);
+  }
+});

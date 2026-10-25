@@ -37,6 +37,16 @@ function configureReminders({ isQuitting }) {
 }
 
 /**
+ * Id in the «notified today» log. A timed task's id carries its due moment, so moving the task
+ * to another time reminds again; an untimed one is reminded once a day.
+ * @param {string} taskId
+ * @param {Date | null} dueAt
+ */
+function taskReminderId(taskId, dueAt) {
+  return dueAt ? `task:${taskId}@${dueAt.getTime()}` : `task:${taskId}`;
+}
+
+/**
  * Collect actionable open items for the periodic sweep toast.
  * Timed tasks still in the future are skipped (exact timers handle them).
  * Timed tasks whose time already passed (today / overdue / notes+today) stay as safety net.
@@ -57,7 +67,7 @@ function collectReminderCandidates(data) {
       // Past timed: only if due calendar day is today or earlier (notes-only → today).
       if (todayIso(dueAt) > today) continue;
       out.push({
-        id: `task:${t.id}`,
+        id: taskReminderId(t.id, dueAt),
         kind: 'task',
         title: String(t.title || 'Задача').trim() || 'Задача',
         dueKind: 'overdue',
@@ -143,10 +153,10 @@ function stopRemindersScheduler() {
 /**
  * Fire a one-shot exact-time toast for a single task.
  * Re-checks the task is still open so completed/deleted items stay silent.
- * @param {{ id: string, title: string, dueTime?: string | null }} task
+ * @param {{ id: string, reminderId: string, title: string, dueTime?: string | null }} task
  */
 async function fireExactTaskReminder(task) {
-  const reminderId = `task:${task.id}`;
+  const { reminderId } = task;
   if (isQuittingFn() || !loadSettings().remindersEnabled) return;
   if (wasNotifiedToday(reminderId)) return;
   if (!Notification.isSupported()) return;
@@ -187,7 +197,7 @@ function scheduleExactReminders(data) {
   const state = loadReminderState();
   const notified = new Set(state.notifiedIds);
 
-  /** @type {{ id: string, title: string, dueTime: string | null, dueAt: Date }[]} */
+  /** @type {{ id: string, reminderId: string, title: string, dueTime: string | null, dueAt: Date }[]} */
   const upcoming = [];
   for (const t of tasks) {
     if (!t || t.completed || !t.id) continue;
@@ -195,10 +205,11 @@ function scheduleExactReminders(data) {
     if (!dueAt) continue;
     const ts = dueAt.getTime();
     if (ts <= now || ts > horizon) continue;
-    const reminderId = `task:${t.id}`;
+    const reminderId = taskReminderId(t.id, dueAt);
     if (notified.has(reminderId)) continue;
     upcoming.push({
       id: t.id,
+      reminderId,
       title: String(t.title || 'Задача').trim() || 'Задача',
       dueTime:
         t.dueTime ||
