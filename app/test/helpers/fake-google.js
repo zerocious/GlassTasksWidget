@@ -11,14 +11,42 @@ const { resetAuthClient } = require('../../lib/google-auth');
 const { invalidateListCache, invalidatePayloadCache } = require('../../lib/google-tasks');
 const { freshDataRoot } = require('./storage');
 
-const TASKS_LIST = { id: 'L-tasks', title: 'Tasks' };
-const HABITS_LIST = { id: 'L-habits', title: 'Habits' };
+/** Ids of the «Tasks» and «Habits» lists; a test may change one (list deleted and recreated). */
+const DEFAULT_LIST_IDS = { tasks: 'L-tasks', habits: 'L-habits' };
 
 /**
  * loseResponse: the next call of that method is applied, then fails like a dropped connection.
  * @type {{ lists: Record<string, any[]>, calls: { method: string, params: any }[], loseResponse: string | null }}
  */
-const server = { lists: {}, calls: [], loseResponse: null };
+const server = {
+  lists: {},
+  listIds: { ...DEFAULT_LIST_IDS },
+  calls: [],
+  loseResponse: null,
+  maxDepth: 0,
+  doneDepth: 0,
+  latencyMs: 1,
+};
+
+/**
+ * Round trips on the critical path: a call is one round deeper than the deepest call that had
+ * finished when it started, so calls in flight together share a round. startRounds() resets it.
+ */
+function startRounds() {
+  server.maxDepth = 0;
+  server.doneDepth = 0;
+}
+
+async function inRound(fn) {
+  const depth = server.doneDepth + 1;
+  server.maxDepth = Math.max(server.maxDepth, depth);
+  await new Promise((resolve) => setTimeout(resolve, server.latencyMs));
+  try {
+    return await fn();
+  } finally {
+    server.doneDepth = Math.max(server.doneDepth, depth);
+  }
+}
 
 function dropConnectionIfAsked(method) {
   if (server.loseResponse !== method) return;
@@ -44,7 +72,14 @@ const fakeTasksApi = {
   tasklists: {
     list: async (params) => {
       server.calls.push({ method: 'tasklists.list', params });
-      return { data: { items: [TASKS_LIST, HABITS_LIST] } };
+      return {
+        data: {
+          items: [
+            { id: server.listIds.tasks, title: 'Tasks' },
+            { id: server.listIds.habits, title: 'Habits' },
+          ],
+        },
+      };
     },
   },
   tasks: {
@@ -53,8 +88,9 @@ const fakeTasksApi = {
     // pages of maxResults (default 20, max 100).
     list: async (params) => {
       server.calls.push({ method: 'tasks.list', params });
+      if (!server.lists[params.tasklist]) throw notFound();
       const min = params.completedMin ? Date.parse(params.completedMin) : null;
-      const matching = (server.lists[params.tasklist] || []).filter((t) => {
+      const matching = server.lists[params.tasklist].filter((t) => {
         if (t.hidden && !params.showHidden) return false;
         if (t.status === 'completed' && params.showCompleted === false) return false;
         if (min !== null && !(t.completed && Date.parse(t.completed) >= min)) return false;
@@ -85,6 +121,10 @@ const fakeTasksApi = {
   },
 };
 
+for (const group of [fakeTasksApi.tasklists, fakeTasksApi.tasks]) {
+  for (const [name, fn] of Object.entries(group)) group[name] = (params) => inRound(() => fn(params));
+}
+
 const tasksModulePath = require.resolve('@googleapis/tasks');
 const realTasksModule = require('@googleapis/tasks');
 require.cache[tasksModulePath].exports = { ...realTasksModule, tasks: () => fakeTasksApi };
@@ -100,19 +140,21 @@ function signedInWith(lists = {}) {
   resetAuthClient();
   invalidateListCache();
   invalidatePayloadCache();
+  server.listIds = { ...DEFAULT_LIST_IDS };
   server.lists = {
-    [TASKS_LIST.id]: (lists.tasks || []).map((t) => ({ ...t })),
-    [HABITS_LIST.id]: (lists.habits || []).map((t) => ({ ...t })),
+    [server.listIds.tasks]: (lists.tasks || []).map((t) => ({ ...t })),
+    [server.listIds.habits]: (lists.habits || []).map((t) => ({ ...t })),
   };
   server.calls = [];
   server.loseResponse = null;
+  startRounds();
   return server;
 }
 
 /** The item as the fake Google server holds it now. */
 function serverItem(listKind, id) {
-  const listId = listKind === 'habits' ? HABITS_LIST.id : TASKS_LIST.id;
-  return server.lists[listId].find((t) => t.id === id) || null;
+  const listId = listKind === 'habits' ? server.listIds.habits : server.listIds.tasks;
+  return (server.lists[listId] || []).find((t) => t.id === id) || null;
 }
 
-module.exports = { signedInWith, serverItem, server };
+module.exports = { signedInWith, serverItem, server, startRounds };

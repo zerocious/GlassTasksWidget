@@ -116,7 +116,9 @@ test('yesterday\'s completion from another device stays in the history after the
   const yesterday = localNoon(-1);
   signedInWith({ habits: [{ id: 'H1', title: 'Зарядка', status: 'completed', completed: yesterday }] });
 
-  const data = await gt.getWidgetData({ force: true });
+  await gt.getWidgetData({ force: true });
+  await gt.whenIdle(); // the reset runs behind the load
+  const data = await gt.getWidgetData();
   const habit = data.habits.find((h) => h.id === 'H1');
 
   assert.equal(serverItem('habits', 'H1').status, 'needsAction');

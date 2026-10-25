@@ -1102,7 +1102,7 @@ function taskShowsAsSubtask(task) {
 }
 
 function taskRowClassName(task) {
-  return `row${task.completed ? ' done' : ''}${taskDueClass(task)}${taskShowsAsSubtask(task) ? ' row--sub' : ''}`;
+  return `row${task.completed ? ' done' : ''}${taskDueClass(task)}${taskShowsAsSubtask(task) ? ' row--sub' : ''}${task.pendingCreate ? ' is-pending' : ''}`;
 }
 
 const LEGACY_META_RU = { Task: 'Задача', Done: 'Готово', Daily: 'Ежедневно' };
@@ -1167,7 +1167,7 @@ function buildHabitRow(habit) {
   const done = Boolean(habit.completed);
 
   const li = document.createElement('li');
-  li.className = `row${done ? ' done' : ''}`;
+  li.className = `row${done ? ' done' : ''}${habit.pendingCreate ? ' is-pending' : ''}`;
   li.dataset.id = habit.id;
 
   const pills = week
@@ -1681,22 +1681,33 @@ function canBackgroundSync() {
   return !(active && active.matches && active.matches('.add-input') && active.value);
 }
 
-/** Pick up changes made elsewhere (phone, web) without the ↻ button. */
-async function backgroundSync() {
-  if (!canBackgroundSync()) return;
+/**
+ * Pick up changes made elsewhere (phone, web) without the ↻ button.
+ * @param {{ force?: boolean }} [opts] force: false joins a load already running in the main process
+ * @returns {Promise<boolean>} false when it stood back because the user is busy
+ */
+async function backgroundSync({ force = true } = {}) {
+  if (!canBackgroundSync()) return false;
   let next;
   try {
-    next = await window.widgetApi.getData({ force: true });
+    next = await window.widgetApi.getData(force ? { force: true } : {});
   } catch {
-    return;
+    return true;
   }
+  if (!next || !canBackgroundSync()) return false;
   lastLoadAt = Date.now();
-  if (!next || !canBackgroundSync()) return;
-  if (dataSignature(next) === dataSignature(state)) return;
+  if (dataSignature(next) === dataSignature(state)) return true;
   carryPendingItems(state, next);
   state = next;
   if (state.defaultAccent) configAccent = state.defaultAccent;
   renderAll();
+  return true;
+}
+
+/** Painted from the last run's cache: swap in the current data once nothing is being edited. */
+async function replaceStalePaint(triesLeft = 40) {
+  if (await backgroundSync({ force: false })) return;
+  if (triesLeft > 0) setTimeout(() => replaceStalePaint(triesLeft - 1), 500);
 }
 
 function syncIfStale() {
@@ -1904,20 +1915,68 @@ async function onAddSubmit(listKind, input) {
   addBusy = true;
   // Cleared now, not after Google answers: what is typed meanwhile is the next task.
   input.value = '';
+  // On screen at once; Google's item replaces it when it answers.
+  const pending = pendingCreatedItem(listKind, title);
+  pendingIds.add(pending.id);
+  insertCreatedItem(listKind, pending);
   try {
     const result = await window.widgetApi.createItem(listKind, title, { parse: listKind === 'tasks' });
+    pendingIds.delete(pending.id);
     if (result && result.item) {
-      insertCreatedItem(listKind, result.item);
+      replacePendingItem(listKind, pending.id, result.item);
     } else {
+      dropPendingItem(listKind, pending.id);
       await loadData(true);
     }
   } catch (err) {
+    pendingIds.delete(pending.id);
+    dropPendingItem(listKind, pending.id);
     // Give the text back, unless the field already holds something new.
     if (!input.value) input.value = raw;
     setBanner(`Не удалось добавить «${title}»: ${errText(err)}`);
   } finally {
     releaseAddBusy();
   }
+}
+
+let pendingSeq = 0;
+
+/** Placeholder row shown while Google creates the item (not clickable, see `.is-pending`). */
+function pendingCreatedItem(listKind, title) {
+  pendingSeq += 1;
+  const base = { id: `pending-${Date.now()}-${pendingSeq}`, title, notes: '', due: null, parent: null, pendingCreate: true };
+  if (listKind === 'habits') {
+    return { ...base, meta: 'Ежедневно', status: 'needsAction', completed: false, completedToday: false,
+      streak: 0, week: [false, false, false, false, false, false, false], ring: 0, completedDates: [] };
+  }
+  return { ...base, meta: 'Задача', status: 'needsAction', completed: false, dueKind: null, dueTime: null,
+    recurrence: null, position: '' };
+}
+
+/** Swap the placeholder for Google's item (or add it, if a refresh dropped the placeholder). */
+function replacePendingItem(listKind, pendingId, item) {
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  if (!state[key].some((i) => i && i.id === pendingId)) {
+    insertCreatedItem(listKind, item);
+    return;
+  }
+  state[key] = state[key]
+    .filter((i) => i && i.id !== item.id)
+    .map((i) => (i.id === pendingId ? item : i));
+  if (listKind === 'habits') {
+    resortHabitsLocal();
+    renderHabits();
+  } else {
+    resortTasksLocal();
+    renderTasks();
+  }
+}
+
+function dropPendingItem(listKind, pendingId) {
+  const key = listKind === 'habits' ? 'habits' : 'tasks';
+  state[key] = state[key].filter((i) => i && i.id !== pendingId);
+  if (listKind === 'habits') renderHabits();
+  else renderTasks();
 }
 
 function guardMutate(actionLabel) {
@@ -2388,7 +2447,7 @@ function isImeEnter(e) {
 }
 
 function beginInlineEdit(listKind, item, row) {
-  if (!row || row.classList.contains('is-editing')) return;
+  if (!row || row.classList.contains('is-editing') || pendingIds.has(item.id)) return;
   if (!guardMutate('изменить задачу')) return;
 
   const titleEl = row.querySelector('.row-title');
@@ -3120,7 +3179,7 @@ function showCtxMenu(listKind, item, e, opts = {}) {
 function openCtxMenuForRow(listKind, li) {
   const items = listKind === 'habits' ? state.habits : state.tasks;
   const item = items.find((i) => i.id === li.dataset.id);
-  if (!item) return;
+  if (!item || pendingIds.has(item.id)) return;
   const r = li.getBoundingClientRect();
   showCtxMenu(listKind, item, { clientX: r.left + 28, clientY: r.top + r.height - 4 }, { focus: true });
 }
@@ -3140,7 +3199,7 @@ function handleRowContextMenu(listKind, e) {
   }
   const items = listKind === 'habits' ? state.habits : state.tasks;
   const item = items.find((i) => i.id === li.dataset.id);
-  if (!item) {
+  if (!item || pendingIds.has(item.id)) {
     hideCtxMenu();
     return;
   }
@@ -3402,6 +3461,7 @@ async function bootstrap() {
       syncSettingsUi();
       renderAll();
       maybeShowFirstRunOnboarding();
+      if (boot.stale) replaceStalePaint();
       return;
     }
     settings = await window.widgetApi.getSettings();

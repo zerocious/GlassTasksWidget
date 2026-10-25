@@ -51,6 +51,8 @@ function saveOfflineCache(payload) {
     accentColor: payload.accentColor,
     tasksListFound: payload.tasksListFound,
     habitsListFound: payload.habitsListFound,
+    // Ids of the lists by title: the next run reads items without waiting for tasklists.list.
+    listIds: payload.listIds || undefined,
     tasks: payload.tasks || [],
     // Streak history lives in streaks.json; copying it here doubled the file for nothing.
     habits: (payload.habits || []).map(slimHabit),
