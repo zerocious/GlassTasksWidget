@@ -96,3 +96,20 @@ test('a score or a chapter:verse is not a clock time', () => {
   assert.equal(p('Счёт выставить в 10:30').time, '10:30');
   assert.equal(p('Зарядка 7:00').time, '07:00');
 });
+
+test('a range in words («с 9:00 до 18:00») stays in the title', () => {
+  for (const s of ['С 9:00 до 18:00 работа', 'Приём с 9:00 по 13:00', 'Отпуск с 12.10 по 15.10', 'Акция от 01.11 до 15.11']) {
+    assert.deepEqual(p(s), { title: s, dueKey: null, time: null, recurrence: null }, s);
+  }
+  assert.deepEqual(p('Работа завтра с 9:00 до 18:00'), {
+    title: 'Работа с 9:00 до 18:00', dueKey: '2026-10-08', time: null, recurrence: null,
+  });
+  assert.equal(p('Сдать до 12.10').dueKey, '2026-10-12');
+  assert.equal(p('Купить 2 кг до 5.11').dueKey, '2026-11-05');
+});
+
+test('«с 9:00» alone is a start time and leaves no dangling «с»', () => {
+  assert.deepEqual(p('Работа с 9:00 завтра'), {
+    title: 'Работа', dueKey: '2026-10-08', time: '09:00', recurrence: null,
+  });
+});

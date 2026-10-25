@@ -272,8 +272,14 @@ function stripPrefixedTimes(line) {
     return lead;
   });
   if (!changed) return line;
-  // Collapse runs first: «[ \t]+» before punctuation is then linear.
-  const tidy = out.replace(/[ \t]{2,}/g, ' ').replace(/[ \t]([,.;:!?])/g, '$1').trim();
+  // Collapse runs first, so the patterns after it never meet long whitespace (linear).
+  const tidy = out
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\([ \t]?\)/g, '')
+    .replace(/[ \t]([,.;:!?])/g, '$1')
+    .replace(/([,;])(?:[ \t]?[,;])+/g, '$1')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
   return tidy || null;
 }
 

@@ -40,6 +40,8 @@ test('clearing the time also removes a time phrase inside the notes', () => {
   assert.equal(cleared, 'Позвонить Ивану\nномер: 123');
   assert.equal(tp.resolveTaskTime({ notes: cleared }), null);
   assert.equal(tp.applyDueTimeToNotes('созвон в 25:00?', null), 'созвон в 25:00?');
+  assert.equal(tp.applyDueTimeToNotes('Встреча (в 15:00) в офисе', null), 'Встреча в офисе');
+  assert.equal(tp.applyDueTimeToNotes('Позвонить, в 15:00, Ивану', null), 'Позвонить, Ивану');
 });
 
 test('resolveTaskTime ignores Google date-only (UTC midnight) dues', () => {
