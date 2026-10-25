@@ -107,7 +107,8 @@ app.whenReady().then(async () => {
       const dueDay = `${dueAt.getFullYear()}-${String(dueAt.getMonth() + 1).padStart(2, '0')}-${String(dueAt.getDate()).padStart(2, '0')}`;
       if (dueDay > today) continue;
       candidates.push({
-        id: `task:${t.id}`,
+        // Same id as electron/reminders.js: a timed task carries its due moment.
+        id: `task:${t.id}@${dueAt.getTime()}`,
         kind: 'task',
         title: String(t.title || 'Задача').trim() || 'Задача',
         dueKind: 'overdue',

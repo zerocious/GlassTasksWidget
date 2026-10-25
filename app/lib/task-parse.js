@@ -89,6 +89,15 @@ const REPEAT_MARKER = {
   weekly: 'повтор: еженедельно',
 };
 
+/** «в 14:30», «time: 9:05», «время 09.30» inside any text (not a «12:30:45» timestamp). */
+const PREFIXED_TIME_RE =
+  /(^|[\s,;|(])(?:в|В|at|time|время|Время)\s*(?:[:-]\s*)?(\d{1,2})[:.](\d{2})\b(?![:.]\d)/i;
+
+const PREFIXED_TIME_GLOBAL_RE = new RegExp(PREFIXED_TIME_RE.source, 'gi');
+
+/** A line that is nothing but a clock time («14:30»). */
+const BARE_TIME_LINE_RE = /^(\d{1,2}):(\d{2})$/;
+
 function isManagedNotesLine(line) {
   const t = String(line || '').trim();
   return Boolean(t) && (MANAGED_TIME_LINE_RE.test(t) || MANAGED_REPEAT_LINE_RE.test(t));
@@ -174,15 +183,28 @@ function advanceDateKey(key, recurrence) {
   return next;
 }
 
+/** Whole calendar days from local key `from` to `to`. */
+function daysBetweenKeys(from, to) {
+  const [y1, m1, d1] = from.split('-').map(Number);
+  const [y2, m2, d2] = to.split('-').map(Number);
+  return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+}
+
 /**
  * Next due after completing a recurring task (always after today).
+ * A weekly task completed late stays on its weekday.
  * @param {string | null | undefined} due
  * @param {'daily' | 'weekdays' | 'weekly'} recurrence
  */
 function nextOccurrenceDue(due, recurrence) {
   const today = todayIso();
   let cursor = dueDateKey(due) || today;
-  if (cursor < today) cursor = today;
+  if (cursor < today) {
+    cursor =
+      recurrence === 'weekly'
+        ? addDaysIso(cursor, 7 * Math.floor(daysBetweenKeys(cursor, today) / 7))
+        : today;
+  }
   cursor = advanceDateKey(cursor, recurrence);
   while (cursor <= today) {
     cursor = advanceDateKey(cursor, recurrence);
@@ -234,6 +256,24 @@ function normalizeDueTimeInput(value) {
 }
 
 /**
+ * Cut «в 15:00»-style phrases out of one notes line.
+ * @param {string} line
+ * @returns {string | null} null when nothing else was on the line
+ */
+function stripPrefixedTimes(line) {
+  let changed = false;
+  const out = line.replace(PREFIXED_TIME_GLOBAL_RE, (whole, lead, h, min) => {
+    if (!isClock(h, min)) return whole;
+    changed = true;
+    return lead;
+  });
+  if (!changed) return line;
+  // Collapse runs first: «[ \t]+» before punctuation is then linear.
+  const tidy = out.replace(/[ \t]{2,}/g, ' ').replace(/[ \t]([,.;:!?])/g, '$1').trim();
+  return tidy || null;
+}
+
+/**
  * Upsert/clear managed «время HH:MM» line in notes (Google due is date-only).
  * @param {string | null | undefined} notes
  * @param {string | null} dueTime HH:MM or null to clear
@@ -244,16 +284,13 @@ function applyDueTimeToNotes(notes, dueTime) {
   let rest = trimNewlines(kept.join('\n'));
 
   if (dueTime == null || dueTime === '') {
-    // Drop standalone time-only lines so Clear fully removes resolvable time.
+    // Remove everything timeFromNotes would still read, so Clear really clears the time:
+    // time-only lines («14:30», «в 14:30») and phrases inside text («позвонить в 15:00 Ивану»).
     rest = rest
       .split(/\r?\n/)
-      .filter((line) => {
-        const t = String(line).trim();
-        if (!t) return true;
-        if (/^(?:в|at)\s+\d{1,2}[:.]\d{2}$/i.test(t)) return false;
-        if (/^\d{1,2}:\d{2}$/.test(t)) return false;
-        return true;
-      })
+      .filter((line) => !BARE_TIME_LINE_RE.test(line.trim()))
+      .map(stripPrefixedTimes)
+      .filter((line) => line !== null)
       .join('\n');
     rest = trimNewlines(rest);
     return rest;
@@ -310,26 +347,25 @@ function dueTimeLabel(due) {
 }
 
 /**
- * Parse time from notes: «14:30», «в 14:30», «time: 9:05», «время 09.30».
+ * Parse time from notes: «в 14:30», «time: 9:05», «время 09.30» anywhere, a bare «14:30» only
+ * as a line of its own — «открыт 9:00-18:00», «глава 3:16» or «12:30:45» are not the task's time.
  * @param {string | null | undefined} notes
  * @returns {string | null}
  */
 function timeFromNotes(notes) {
   if (!notes) return null;
   const text = String(notes);
-  const patterns = [
-    /(?:^|[\s,;|(])(?:в|В|at|time|время|Время)\s*(?:[:-]\s*)?(\d{1,2})[:.](\d{2})\b/i,
-    /\b(\d{1,2}):(\d{2})\b/,
-  ];
-  for (const re of patterns) {
-    const m = text.match(re);
-    if (!m) continue;
-    const h = Number(m[1]);
-    const min = Number(m[2]);
-    if (!Number.isFinite(h) || !Number.isFinite(min) || h > 23 || min > 59) continue;
-    return formatHm(h, min);
+  const m = text.match(PREFIXED_TIME_RE);
+  if (m && isClock(m[2], m[3])) return formatHm(Number(m[2]), Number(m[3]));
+  for (const line of text.split(/\r?\n/)) {
+    const bare = line.trim().match(BARE_TIME_LINE_RE);
+    if (bare && isClock(bare[1], bare[2])) return formatHm(Number(bare[1]), Number(bare[2]));
   }
   return null;
+}
+
+function isClock(h, min) {
+  return Number(h) <= 23 && Number(min) <= 59;
 }
 
 function formatHm(h, min) {

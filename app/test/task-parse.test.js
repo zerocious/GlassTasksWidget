@@ -26,6 +26,22 @@ test('timeFromNotes understands the supported phrasings', () => {
   assert.equal(tp.timeFromNotes(null), null);
 });
 
+test('a clock time mentioned inside text is not the task time', () => {
+  assert.equal(tp.timeFromNotes('Офис открыт 9:00-18:00'), null);
+  assert.equal(tp.timeFromNotes('Глава 3:16'), null);
+  assert.equal(tp.timeFromNotes('лог: 12:30:45 ошибка'), null);
+  assert.equal(tp.timeFromNotes('ошибка в 12:30:45'), null);
+  assert.equal(tp.timeFromNotes('купить хлеб\r\n  14:30 '), '14:30');
+  assert.equal(tp.resolveTaskDueAt({ due: null, notes: 'МФЦ работает с 0:01 до 20:00' }), null);
+});
+
+test('clearing the time also removes a time phrase inside the notes', () => {
+  const cleared = tp.applyDueTimeToNotes('время 14:30\nПозвонить в 15:00 Ивану\nномер: 123', null);
+  assert.equal(cleared, 'Позвонить Ивану\nномер: 123');
+  assert.equal(tp.resolveTaskTime({ notes: cleared }), null);
+  assert.equal(tp.applyDueTimeToNotes('созвон в 25:00?', null), 'созвон в 25:00?');
+});
+
 test('resolveTaskTime ignores Google date-only (UTC midnight) dues', () => {
   assert.equal(tp.resolveTaskTime({ due: dueOn(today), notes: 'в 18:00' }), '18:00');
   const timed = '2026-03-10T15:20:00.000Z';
@@ -67,6 +83,14 @@ test('nextOccurrenceDue is always after today', () => {
     assert.ok(tp.dueDateKey(next) > today, `${rule}: ${next}`);
   }
   assert.equal(tp.dueDateKey(tp.nextOccurrenceDue(dueOn(today), 'daily')), addDaysIso(today, 1));
+});
+
+test('a weekly task completed late keeps its weekday', () => {
+  const next = (lateBy) => tp.dueDateKey(tp.nextOccurrenceDue(dueOn(addDaysIso(today, -lateBy)), 'weekly'));
+  assert.equal(next(0), addDaysIso(today, 7));
+  assert.equal(next(1), addDaysIso(today, 6));
+  assert.equal(next(10), addDaysIso(today, 4));
+  assert.equal(next(14), addDaysIso(today, 7));
 });
 
 test('weekdays recurrence skips Saturday and Sunday', () => {
