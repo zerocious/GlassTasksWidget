@@ -22,6 +22,7 @@ const { pathToFileURL } = require('url');
 const { loadConfig, getGoogleCredentialsStatus, saveGoogleCredentials } = require('../lib/config');
 const {
   getWidgetData,
+  getQuickWidgetData,
   loginGoogle,
   setTaskCompleted,
   createItem,
@@ -838,14 +839,18 @@ function applyAutoPaletteToData(data) {
 }
 
 function registerIpc() {
+  // Paint at once: the load started at launch if it is done, else the last run's cache
+  // (`stale`: the page asks for fresh data right after), else wait for the load.
   ipcMain.handle('widget:bootstrap', async (event) => {
     if (!isFromWidget(event)) throw new Error('Unauthorized');
-    const data = applyAutoPaletteToData(await getWidgetData());
+    const quick = getQuickWidgetData();
+    const data = applyAutoPaletteToData(quick || (await getWidgetData()));
     refreshExactReminders(data);
     return {
       settings: settingsForRenderer(),
       data,
       credentials: credentialsPayload(),
+      stale: Boolean(quick && quick.stale),
     };
   });
 
@@ -1174,6 +1179,9 @@ if (!gotTheLock) {
   configureReminders({ isQuitting: () => isQuitting });
 
   app.whenReady().then(() => {
+    // Start the Google load now: its round trips overlap the window and page start-up, and
+    // the page's first request joins it instead of starting another.
+    getWidgetData().catch((err) => console.warn('[startup] load', err && err.message ? err.message : err));
     ensureWindowsNotificationShortcut();
     const settings = loadSettings();
     applyAutostart(settings.autostart);

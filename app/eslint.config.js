@@ -27,4 +27,9 @@ module.exports = [
     // Classic script: top-level names like `viewport` may shadow browser globals.
     rules: { 'no-redeclare': ['error', { builtinGlobals: false }] },
   },
+  {
+    // Node scripts whose evaluate() callbacks run inside the widget page.
+    files: ['test/e2e/**/*.js', 'scripts/bench-app.js'],
+    languageOptions: { globals: { ...globals.node, ...globals.browser } },
+  },
 ];

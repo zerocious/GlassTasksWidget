@@ -4,6 +4,7 @@ const {
   getAuthorizedClient,
   isInvalidGrantError,
   normalizeGoogleAuthError,
+  loadSavedTokens,
 } = require('./google-auth');
 const {
   enrichHabits,
@@ -44,7 +45,7 @@ const { loadSettings, saveSettings } = require('./settings-store');
 const {
   saveOfflineCache,
   loadOfflineCache,
-  clearOfflineCache,
+  clearOfflineCache: clearOfflineCacheFile,
   patchOfflineCache,
   reorderOfflineCache,
 } = require('./offline-cache');
@@ -149,11 +150,11 @@ async function whenIdle() {
  * @param {object} params
  * @returns {Promise<any[]>}
  */
-async function listAllPages(listFn, params) {
+async function listAllPages(listFn, params, maxPages = MAX_PAGES) {
   /** @type {any[]} */
   const items = [];
   let pageToken;
-  for (let page = 0; page < MAX_PAGES; page += 1) {
+  for (let page = 0; page < maxPages; page += 1) {
     const res = await listFn({ ...params, maxResults: PAGE_SIZE, ...(pageToken ? { pageToken } : {}) });
     const data = (res && res.data) || {};
     if (Array.isArray(data.items)) items.push(...data.items);
@@ -361,8 +362,33 @@ function reorderPayloadCache(listKind, orderedIds, movedPatch = null) {
   replacePayloadKeepingAge({ ...prev, [key]: ordered, offline: false });
 }
 
+/**
+ * List ids by title that are probably still right (last validated map, or the offline cache of
+ * the previous run). A load uses them at once and re-reads tasklists.list alongside.
+ * @type {Map<string, string> | null}
+ */
+let knownLists = null;
+
+/** Forget the validated list map; the ids stay known for the next load to try. */
 function invalidateListCache() {
+  if (listCache) knownLists = listCache.byTitle;
   listCache = null;
+}
+
+/** Signed out or another account: neither the list map nor the remembered ids apply. */
+function clearOfflineCache() {
+  listCache = null;
+  knownLists = null;
+  clearOfflineCacheFile();
+}
+
+function knownListMap() {
+  if (knownLists) return knownLists;
+  const cached = loadOfflineCache();
+  const ids = cached && cached.listIds;
+  if (!ids || typeof ids !== 'object') return null;
+  const map = new Map(Object.entries(ids).filter(([title, id]) => title && typeof id === 'string' && id));
+  return map.size ? map : null;
 }
 
 function invalidatePayloadCache() {
@@ -412,19 +438,30 @@ function patchPayloadCache(listKind, taskId, patch, append = null) {
   replacePayloadKeepingAge({ ...prev, [key]: list, offline: false });
 }
 
+/** @type {Promise<Map<string, string>> | null} one tasklists.list for callers in the same round */
+let listMapInFlight = null;
+
 async function getListMap(tasksApi) {
   const now = Date.now();
   if (listCache && now - listCache.at < LIST_CACHE_TTL_MS) {
     return listCache.byTitle;
   }
-  const lists = await listAllPages((p) => tasksApi.tasklists.list(p), {});
-  const byTitle = new Map();
-  for (const list of lists) {
-    const title = (list.title || '').trim();
-    if (title && list.id) byTitle.set(title, list.id);
-  }
-  listCache = { at: now, byTitle };
-  return byTitle;
+  if (listMapInFlight) return listMapInFlight;
+  const run = (async () => {
+    const lists = await listAllPages((p) => tasksApi.tasklists.list(p), {});
+    const byTitle = new Map();
+    for (const list of lists) {
+      const title = (list.title || '').trim();
+      if (title && list.id) byTitle.set(title, list.id);
+    }
+    listCache = { at: now, byTitle };
+    knownLists = byTitle;
+    return byTitle;
+  })().finally(() => {
+    if (listMapInFlight === run) listMapInFlight = null;
+  });
+  listMapInFlight = run;
+  return run;
 }
 
 async function resolveListId(tasksApi, name) {
@@ -447,27 +484,39 @@ async function openList(config, listKind) {
   return { tasksApi, listId };
 }
 
-/** Completed tasks older than this are not fetched: the widget lists only the latest few. */
-const DONE_WINDOW_DAYS = 30;
+/**
+ * Completed tasks are read for the last week (all pages: the widget shows the most recent few)
+ * and, in the same round, one page of the last month for a week with too few of them.
+ */
+const DONE_WEEK_DAYS = 7;
+const DONE_MONTH_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Items of a list mapped to widget shape. `showHidden` everywhere: Google returns tasks
  * completed in its own web UI or mobile apps only with it.
  * Habits (a short list that the daily reset keeps open): everything in one query.
- * Tasks: completed ones pile up for years, so open tasks and recently completed ones are two
- * queries — thousands of old completions can then never push open tasks past the page cap.
+ * Tasks: completed ones pile up for years, so open tasks and recent completions are separate
+ * queries in one round — old completions can never push open tasks past the page cap.
  * @param {{ recentDoneOnly?: boolean }} [opts]
  */
 async function fetchListItems(tasksApi, listId, opts = {}) {
   if (!listId) return [];
-  const list = (params) =>
-    listAllPages((p) => tasksApi.tasks.list(p), { tasklist: listId, showHidden: true, ...params });
+  const list = (params, maxPages) =>
+    listAllPages(
+      (p) => tasksApi.tasks.list(p),
+      { tasklist: listId, showHidden: true, ...params },
+      maxPages
+    );
   if (!opts.recentDoneOnly) return (await list({ showCompleted: true })).map(mapTask);
-  const completedMin = new Date(Date.now() - DONE_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const [open, done] = await Promise.all([
+  const since = (days) => new Date(Date.now() - days * DAY_MS).toISOString();
+  const [open, week, month] = await Promise.all([
     list({ showCompleted: false }),
-    list({ showCompleted: true, completedMin }),
+    list({ showCompleted: true, completedMin: since(DONE_WEEK_DAYS) }),
+    list({ showCompleted: true, completedMin: since(DONE_MONTH_DAYS) }, 1),
   ]);
+  const weekDone = week.filter((t) => t && t.status === 'completed');
+  const done = weekDone.length >= DONE_SHOWN ? weekDone : [...weekDone, ...month];
   const byId = new Map();
   for (const t of open) if (t && t.id && t.status !== 'completed') byId.set(t.id, t);
   for (const t of done) if (t && t.id && t.status === 'completed') byId.set(t.id, t);
@@ -556,15 +605,10 @@ async function fetchLivePayloadOnce(config) {
   }
 
   const tasksApi = tasksClient(auth);
-  const listMap = await getListMap(tasksApi);
-  const tasksListId = listMap.get(String(config.tasksListName || '').trim()) || null;
-  const habitsListId = listMap.get(String(config.habitsListName || '').trim()) || null;
-
   const genStart = mutationGeneration;
-  const [tasksRaw, habitsRaw] = await Promise.all([
-    fetchListItems(tasksApi, tasksListId, { recentDoneOnly: true }),
-    fetchListItems(tasksApi, habitsListId),
-  ]);
+  const { ids, items } = await fetchWidgetLists(tasksApi, config);
+  const { tasks: tasksListId, habits: habitsListId } = ids;
+  const [tasksRaw, habitsRaw] = items;
   // Skipped when an edit here raced the fetch: the snapshot may predate it.
   if (genStart === mutationGeneration && mutationsActive === 0) syncHabitsTodayFromGoogle(habitsRaw);
 
@@ -579,10 +623,49 @@ async function fetchLivePayloadOnce(config) {
     accentColor: config.accentColor,
     tasksListFound: Boolean(tasksListId),
     habitsListFound: Boolean(habitsListId),
+    listIds: listCache ? Object.fromEntries(listCache.byTitle) : undefined,
     tasks,
     habits,
     offline: false,
   };
+}
+
+/** Ids of the widget's two lists in a title → id map. */
+function widgetListIds(map, config) {
+  return {
+    tasks: map.get(String(config.tasksListName || '').trim()) || null,
+    habits: map.get(String(config.habitsListName || '').trim()) || null,
+  };
+}
+
+function readWidgetLists(tasksApi, ids) {
+  return Promise.all([
+    fetchListItems(tasksApi, ids.tasks, { recentDoneOnly: true }),
+    fetchListItems(tasksApi, ids.habits),
+  ]);
+}
+
+/**
+ * Items of the Tasks and Habits lists. With list ids from before, the items and a fresh
+ * tasklists.list are read in the same round; only if the ids turn out to have changed (a list
+ * renamed, deleted or recreated) are the items read again.
+ */
+async function fetchWidgetLists(tasksApi, config) {
+  const fresh = listCache && Date.now() - listCache.at < LIST_CACHE_TTL_MS;
+  const known = fresh ? null : knownListMap();
+  if (!known) {
+    const ids = widgetListIds(await getListMap(tasksApi), config);
+    return { ids, items: await readWidgetLists(tasksApi, ids) };
+  }
+  const guess = widgetListIds(known, config);
+  const [map, items] = await Promise.allSettled([getListMap(tasksApi), readWidgetLists(tasksApi, guess)]);
+  if (map.status === 'rejected') throw map.reason;
+  const ids = widgetListIds(map.value, config);
+  if (ids.tasks === guess.tasks && ids.habits === guess.habits) {
+    if (items.status === 'rejected') throw items.reason;
+    return { ids, items: items.value };
+  }
+  return { ids, items: await readWidgetLists(tasksApi, ids) };
 }
 
 function offlineFromCache(config, errMessage) {
@@ -601,6 +684,21 @@ function offlineFromCache(config, errMessage) {
     warning: errMessage || 'Нет сети — показан кэш',
     cachedAt: cached.savedAt || null,
   };
+}
+
+/**
+ * Data to paint at once, without waiting for Google: the fresh in-memory payload, or else the
+ * offline cache of the last run marked `stale` (the caller loads fresh data right after).
+ * Null when there is neither, or no one is signed in.
+ */
+function getQuickWidgetData() {
+  const warm = fromPayloadCache();
+  if (warm) return warm;
+  const tokens = hasGoogleCredentials() ? loadSavedTokens() : null;
+  if (!tokens || !tokens.refresh_token) return null;
+  const cached = offlineFromCache(loadConfig(), null);
+  if (!cached) return null;
+  return { ...cached, offline: false, warning: undefined, stale: true };
 }
 
 /**
@@ -702,7 +800,8 @@ async function resetCompletedHabitsForNewDay() {
         (i) => i && i.id && i.status === 'completed' && localDayOf(i.completed) !== today
       );
 
-      for (const item of items) {
+      // In parallel: one round for the whole list instead of one per habit.
+      await forEachLimited(items, RESET_PARALLEL, async (item) => {
         // Completed on another device on an earlier day: keep that day in the history.
         const day = localDayOf(item.completed);
         if (day && day < today) markCompleted(item.id, day);
@@ -715,11 +814,10 @@ async function resetCompletedHabitsForNewDay() {
           status: 'needsAction',
           completed: false,
         });
-      }
+      });
 
+      // Caches stay valid: habits show the local streak, not Google's completed flag.
       saveSettings({ lastHabitsResetDate: today });
-      invalidateListCache();
-      invalidatePayloadCache();
       return { ok: true, reset: true, mode: 'google', count: items.length };
     } catch (err) {
       const mapped = normalizeGoogleAuthError(err);
@@ -733,27 +831,40 @@ async function resetCompletedHabitsForNewDay() {
       };
     }
   })().finally(() => {
-    mutationsActive -= 1;
-    mutationGeneration += 1;
+    // Not counted as an edit for fetchLivePayload: it only clears completed flags of earlier
+    // days, which a load running alongside may still see without showing anything wrong.
     habitsResetInFlight = null;
   });
-  mutationsActive += 1;
 
   return habitsResetInFlight;
 }
 
-async function getWidgetDataUncached(force) {
-  // Day rollover before serving data so habits aren't stuck completed in Google.
-  // Skipped briefly after a network failure so offline loads aren't delayed twice.
-  if (Date.now() >= habitsResetRetryAt) {
-    try {
-      await resetCompletedHabitsForNewDay();
-    } catch (err) {
-      console.warn(
-        '[habits-reset]',
-        err && err.message ? err.message : err
-      );
+/** Habit patches sent at once by the daily reset. */
+const RESET_PARALLEL = 8;
+
+/** Run `fn` over `items`, at most `limit` at a time; rejects with the first failure. */
+async function forEachLimited(items, limit, fn) {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next];
+      next += 1;
+      await fn(item);
     }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+async function getWidgetDataUncached(force) {
+  // Day rollover so habits aren't stuck completed in Google. Skipped briefly after a network
+  // failure. Demo mode resets data the payload shows, so it waits; in Google it only clears
+  // completed flags the widget doesn't display (habits show the local streak), so the load
+  // does not wait for it.
+  if (Date.now() >= habitsResetRetryAt) {
+    const reset = resetCompletedHabitsForNewDay().catch((err) => {
+      console.warn('[habits-reset]', err && err.message ? err.message : err);
+    });
+    if (!hasGoogleCredentials()) await reset;
   }
 
   if (!force) {
@@ -1525,6 +1636,7 @@ async function moveItem(listKind, taskId, previousId, orderedIds) {
 
 module.exports = {
   getWidgetData,
+  getQuickWidgetData,
   loginGoogle,
   setTaskCompleted,
   createItem,

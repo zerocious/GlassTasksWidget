@@ -921,6 +921,12 @@ body.is-dnd .row {
   transition-delay: 0s;
 }
 
+/* Placeholder while Google creates the item: visible at once, not actionable yet. */
+.row.is-pending {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
 .row--sub {
   padding-left: 26px;
 }
