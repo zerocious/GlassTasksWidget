@@ -68,7 +68,11 @@ const {
 } = require('./reminders');
 const { setupAutoUpdater, checkForAppUpdates } = require('./updater');
 const { createWakeDetector } = require('./power');
-const { clampIntoWorkArea, snapToNearestEdge: snapPosition } = require('../lib/window-bounds');
+const {
+  clampIntoWorkArea,
+  snapToNearestEdge: snapPosition,
+  placeOnScreen,
+} = require('../lib/window-bounds');
 const { createQuitGate } = require('../lib/quit-gate');
 
 function credentialsPayload() {
@@ -234,11 +238,43 @@ function syncTrayMenu(force) {
   tray.setContextMenu(buildTrayMenu());
 }
 
+/**
+ * Move the widget back onto a screen when its header is on none (its monitor was unplugged,
+ * the resolution or scaling changed). A window the user can still grab stays where it is.
+ */
+function keepWidgetOnScreen() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const pos = placeOnScreen(mainWindow.getBounds(), screen.getAllDisplays().map((d) => d.workArea));
+  if (!pos) return;
+  console.log('[window] off screen, moved to', pos.x, pos.y);
+  applyingBounds = true;
+  mainWindow.setPosition(pos.x, pos.y);
+  applyingBounds = false;
+  saveSettings({ pos });
+}
+
+/** @type {ReturnType<typeof setTimeout> | null} */
+let displayChangeTimer = null;
+
+function watchDisplays() {
+  // Metrics events come in bursts while Windows rearranges monitors: act once it settles.
+  const later = () => {
+    if (displayChangeTimer) clearTimeout(displayChangeTimer);
+    displayChangeTimer = setTimeout(() => {
+      displayChangeTimer = null;
+      keepWidgetOnScreen();
+    }, 500);
+  };
+  screen.on('display-removed', later);
+  screen.on('display-metrics-changed', later);
+}
+
 function showWidget() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
     return;
   }
+  keepWidgetOnScreen();
   mainWindow.show();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.focus();
@@ -1145,6 +1181,7 @@ if (!gotTheLock) {
     require('./data-ipc').registerDataIpc({ getWindow: () => mainWindow, applySettingsPatch });
     createWindow();
     createTray();
+    watchDisplays();
     registerHotkeys(settings);
     syncRemindersScheduler(settings.remindersEnabled !== false);
     scheduleHabitsDayRollover();

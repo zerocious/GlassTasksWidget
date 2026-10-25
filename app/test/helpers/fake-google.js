@@ -48,9 +48,22 @@ const fakeTasksApi = {
     },
   },
   tasks: {
+    // Filters as documented for tasks.list: hidden items (completed in Google's own apps) only
+    // with showHidden; completedMin taken strictly (an open task has no completion date);
+    // pages of maxResults (default 20, max 100).
     list: async (params) => {
       server.calls.push({ method: 'tasks.list', params });
-      return { data: { items: (server.lists[params.tasklist] || []).map((t) => ({ ...t })) } };
+      const min = params.completedMin ? Date.parse(params.completedMin) : null;
+      const matching = (server.lists[params.tasklist] || []).filter((t) => {
+        if (t.hidden && !params.showHidden) return false;
+        if (t.status === 'completed' && params.showCompleted === false) return false;
+        if (min !== null && !(t.completed && Date.parse(t.completed) >= min)) return false;
+        return true;
+      });
+      const size = Math.min(params.maxResults || 20, 100);
+      const start = Number(params.pageToken || 0);
+      const next = start + size < matching.length ? String(start + size) : undefined;
+      return { data: { items: matching.slice(start, start + size).map((t) => ({ ...t })), nextPageToken: next } };
     },
     get: async (params) => {
       server.calls.push({ method: 'tasks.get', params });

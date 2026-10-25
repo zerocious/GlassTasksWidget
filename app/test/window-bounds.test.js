@@ -34,3 +34,20 @@ test('work areas that do not start at 0,0 (a second monitor) are respected', () 
   const left = { x: -1280, y: 200, width: 1280, height: 984 };
   assert.deepEqual(snapToNearestEdge({ x: -1250, y: 500, width: 380, height: 460 }, left), { x: -1272, y: 500 });
 });
+
+const { placeOnScreen } = require('../lib/window-bounds');
+const SECOND = { x: 1920, y: 0, width: 1920, height: 1040 };
+
+test('a window left on an unplugged monitor comes back to the nearest screen', () => {
+  assert.deepEqual(placeOnScreen({ x: 2500, y: 300, width: 380, height: 460 }, [FULL_HD]), { x: 1532, y: 300 });
+});
+
+test('a window whose header is above every screen is brought down', () => {
+  assert.deepEqual(placeOnScreen({ x: 600, y: -300, width: 380, height: 460 }, [FULL_HD]), { x: 600, y: 8 });
+});
+
+test('a window the user can still grab by its header is left where it is', () => {
+  assert.equal(placeOnScreen({ x: 1800, y: 300, width: 380, height: 460 }, [FULL_HD]), null);
+  assert.equal(placeOnScreen({ x: 2500, y: 300, width: 380, height: 460 }, [FULL_HD, SECOND]), null);
+  assert.equal(placeOnScreen({ x: 600, y: 900, width: 380, height: 460 }, [FULL_HD]), null);
+});

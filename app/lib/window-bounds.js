@@ -56,4 +56,43 @@ function snapToNearestEdge(bounds, workArea, margin = MARGIN) {
   return clampIntoWorkArea({ ...bounds, x, y }, workArea, margin);
 }
 
-module.exports = { clampIntoWorkArea, snapToNearestEdge };
+/** The strip the window is dragged by (tabs and buttons) and how much of it must be on a screen. */
+const HEADER_HEIGHT = 40;
+const MIN_GRAB_WIDTH = 80;
+const MIN_GRAB_HEIGHT = 20;
+
+function overlap(a1, a2, b1, b2) {
+  return Math.max(0, Math.min(a2, b2) - Math.max(a1, b1));
+}
+
+/** Distance from a point to a rectangle (0 inside). */
+function distanceTo(px, py, r) {
+  const dx = Math.max(r.x - px, 0, px - (r.x + r.width));
+  const dy = Math.max(r.y - py, 0, py - (r.y + r.height));
+  return Math.hypot(dx, dy);
+}
+
+/**
+ * Where to move a window the user can no longer grab (its monitor was unplugged, the
+ * resolution or scaling changed), or null when its header is still on some screen.
+ * @param {Rect} bounds
+ * @param {Rect[]} workAreas
+ * @returns {{ x: number, y: number } | null}
+ */
+function placeOnScreen(bounds, workAreas, margin = MARGIN) {
+  if (!workAreas.length) return null;
+  const grabbable = workAreas.some(
+    (wa) =>
+      overlap(bounds.x, bounds.x + bounds.width, wa.x, wa.x + wa.width) >= MIN_GRAB_WIDTH &&
+      overlap(bounds.y, bounds.y + HEADER_HEIGHT, wa.y, wa.y + wa.height) >= MIN_GRAB_HEIGHT
+  );
+  if (grabbable) return null;
+  const cx = bounds.x + bounds.width / 2;
+  const cy = bounds.y + bounds.height / 2;
+  const nearest = workAreas.reduce((best, wa) =>
+    distanceTo(cx, cy, wa) < distanceTo(cx, cy, best) ? wa : best
+  );
+  return clampIntoWorkArea(bounds, nearest, margin);
+}
+
+module.exports = { clampIntoWorkArea, snapToNearestEdge, placeOnScreen };
